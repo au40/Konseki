@@ -1,0 +1,1964 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Immersion Tracker</title>
+<script src="assets/chart.umd.min.js"></script>
+<link rel="stylesheet" href="assets/dark.min.css">
+<script src="assets/flatpickr.min.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --accent:   #5B8CFF;
+  --surface:  #1C1C28;
+  --card:     #24243A;
+  --muted:    #6B6B8A;
+  --success:  #4ECBA0;
+  --text:     #E8E8F0;
+  --dim:      #9090A8;
+  --warn:     #FF9F5B;
+  --grid:     #2E2E48;
+  --hover:    #2E2E50;
+  --purple:   #C78BFF;
+  --pink:     #FF7BAC;
+  --radius:   12px;
+  --sidebar:  172px;
+}
+
+html, body { height: 100%; background: var(--surface); color: var(--text);
+             font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; overflow: hidden; }
+
+/* ── Layout ─────────────────────────────────────────────────────────────── */
+.app { display: flex; height: 100vh; }
+
+.sidebar {
+  width: var(--sidebar); flex-shrink: 0;
+  background: var(--card); display: flex; flex-direction: column;
+  padding: 0 10px 16px;
+}
+.sidebar-logo { text-align: center; padding: 20px 0 18px; }
+.sidebar-logo .icon { font-size: 26px; color: var(--accent); }
+.sidebar-logo .name { font-size: 12px; font-weight: 600; color: var(--text); line-height: 1.4; }
+
+.nav-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 8px; cursor: pointer;
+  color: var(--dim); font-size: 13px; font-weight: 500;
+  transition: background 0.15s, color 0.15s; user-select: none;
+}
+.nav-item:hover   { background: var(--hover); color: var(--text); }
+.nav-item.active  { background: var(--accent); color: #fff; }
+.nav-icon         { font-size: 15px; width: 18px; text-align: center; flex-shrink: 0; }
+
+.sidebar-status { margin-top: auto; padding: 8px 4px 0;
+                  font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+.content { flex: 1; overflow-y: auto; overflow-x: hidden; }
+.page    { display: none; padding: 24px; max-width: 920px; }
+.page.active { display: block; }
+
+/* ── Scrollbar ───────────────────────────────────────────────────────────── */
+.content::-webkit-scrollbar { width: 6px; }
+.content::-webkit-scrollbar-track { background: var(--surface); }
+.content::-webkit-scrollbar-thumb { background: var(--grid); border-radius: 3px; }
+
+/* ── Typography ──────────────────────────────────────────────────────────── */
+h1 { font-size: 22px; font-weight: 700; color: var(--text); }
+h2 { font-size: 14px; font-weight: 700; color: var(--text); margin: 20px 0 8px; }
+.muted { color: var(--dim); font-size: 12px; }
+
+/* ── Cards ───────────────────────────────────────────────────────────────── */
+.card { background: var(--card); border-radius: var(--radius); padding: 16px 20px; }
+
+.stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 12px 0; }
+.stat-card { background: var(--card); border-radius: var(--radius); padding: 14px 16px; }
+.stat-card .label { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+.stat-card .value { font-size: 26px; font-weight: 700; line-height: 1.1; }
+.stat-card .sub   { font-size: 10px; color: var(--dim); margin-top: 3px; }
+
+/* ── Page header ─────────────────────────────────────────────────────────── */
+.page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.page-header .right { display: flex; align-items: center; gap: 12px; }
+
+/* ── Buttons ─────────────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer;
+  font-size: 13px; font-weight: 600; font-family: inherit;
+  transition: opacity 0.15s, background 0.15s;
+}
+.btn:hover { opacity: 0.88; }
+.btn:active { opacity: 0.72; }
+.btn-primary  { background: var(--accent); color: #fff; }
+.btn-outline  { background: transparent; border: 1px solid var(--accent); color: var(--accent); }
+.btn-danger   { background: transparent; border: 1px solid #FF6B6B; color: #FF6B6B; }
+.btn-sm       { padding: 5px 12px; font-size: 12px; }
+.btn-xs       { padding: 3px 9px; font-size: 11px; border-radius: 6px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ── Segment control ─────────────────────────────────────────────────────── */
+.seg { display: flex; background: #141422; border-radius: 8px; padding: 3px; gap: 2px; }
+.seg-btn {
+  padding: 5px 14px; border-radius: 6px; border: none; cursor: pointer;
+  background: transparent; color: var(--dim); font-size: 12px;
+  font-family: inherit; font-weight: 500; transition: background 0.15s, color 0.15s;
+}
+.seg-btn.active { background: var(--accent); color: #fff; }
+.seg-btn:hover:not(.active) { color: var(--text); }
+
+/* ── Forms ───────────────────────────────────────────────────────────────── */
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 6px; }
+input[type=text], input[type=number] {
+  background: #141422; border: 1px solid var(--grid); border-radius: 8px;
+  color: var(--text); font-family: inherit; font-size: 13px;
+  padding: 9px 12px; outline: none; width: 100%;
+  transition: border-color 0.15s;
+}
+input:focus { border-color: var(--accent); }
+input::placeholder { color: var(--muted); }
+select {
+  background: #141422; border: 1px solid var(--grid); border-radius: 8px;
+  color: var(--text); font-family: inherit; font-size: 13px;
+  padding: 9px 12px; outline: none; cursor: pointer;
+  transition: border-color 0.15s; appearance: none; width: 100%;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236B6B8A' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat; background-position: right 12px center;
+  padding-right: 36px;
+}
+select:focus { border-color: var(--accent); }
+
+/* ── Activity pills ─────────────────────────────────────────────────────── */
+.pill-group { display: flex; flex-wrap: wrap; gap: 6px; }
+.pill {
+  padding: 6px 14px; border-radius: 20px; border: 1px solid var(--grid);
+  background: transparent; color: var(--dim); cursor: pointer;
+  font-size: 12px; font-family: inherit; transition: all 0.15s;
+}
+.pill.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.pill:hover:not(.active) { border-color: var(--dim); color: var(--text); }
+.pill-del {
+  background: #1E1E30; border: 1px solid var(--grid); border-radius: 20px;
+  padding: 5px 12px; font-size: 12px; color: var(--dim); display: inline-flex;
+  align-items: center; gap: 6px;
+}
+.pill-del .x {
+  width: 14px; height: 14px; border-radius: 50%; background: #2E2E48;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 9px; cursor: pointer; transition: background 0.15s; line-height: 1;
+}
+.pill-del .x:hover { background: #FF6B6B; color: #fff; }
+
+/* ── Feedback ────────────────────────────────────────────────────────────── */
+.feedback { font-size: 12px; min-height: 18px; margin-top: 8px; }
+.feedback.ok  { color: var(--success); }
+.feedback.err { color: #FF6B6B; }
+
+/* ── Session rows ────────────────────────────────────────────────────────── */
+.session-list { display: flex; flex-direction: column; gap: 6px; }
+.session-row {
+  background: var(--card); border-radius: 8px;
+  display: flex; align-items: stretch; overflow: hidden;
+}
+.session-badge { width: 6px; flex-shrink: 0; }
+.session-body  { flex: 1; padding: 10px 14px; }
+.session-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.session-meta  { font-size: 10px; color: var(--dim); margin-top: 2px; }
+.session-right { padding: 10px 14px; text-align: right; display: flex;
+                 flex-direction: column; align-items: flex-end; justify-content: center; gap: 2px; }
+.session-time  { font-size: 12px; font-weight: 700; }
+.session-chars { font-size: 10px; color: var(--dim); }
+.empty-msg     { color: var(--dim); font-size: 13px; padding: 12px 0; }
+
+/* ── Weekly bars ─────────────────────────────────────────────────────────── */
+.weekly-bars { background: var(--card); border-radius: var(--radius); padding: 12px 16px; }
+.mini-bar { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
+.mini-bar-label { width: 38px; font-size: 10px; color: var(--dim); flex-shrink: 0; }
+.mini-bar-track { flex: 1; height: 12px; background: #1E1E30; border-radius: 3px; overflow: hidden; }
+.mini-bar-fill  { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.4s ease; }
+.mini-bar-time  { width: 42px; font-size: 10px; color: var(--dim); text-align: right; flex-shrink: 0; }
+
+/* ── Charts ──────────────────────────────────────────────────────────────── */
+.chart-wrap {
+  background: var(--card); border-radius: var(--radius);
+  padding: 16px; position: relative;
+}
+.chart-row { display: grid; grid-template-columns: 3fr 2fr; gap: 16px; margin-top: 16px; }
+.stats-ctrl { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+.toggle-label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim);
+                cursor: pointer; user-select: none; }
+.toggle-label input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+
+/* ── Heatmap ─────────────────────────────────────────────────────────────── */
+.heatmap-wrap {
+  background: var(--card); border-radius: var(--radius);
+  padding: 14px 16px; overflow-x: auto;
+}
+.heatmap-inner { display: flex; flex-direction: column; gap: 3px; }
+.heatmap-months { display: flex; gap: 2px; }
+.heatmap-grid   { display: flex; gap: 2px; align-items: flex-start; }
+.heatmap-days   { display: flex; flex-direction: column; gap: 2px; margin-right: 4px; flex-shrink: 0; }
+.heatmap-day-label { height: 11px; width: 16px; font-size: 8px; color: var(--dim);
+                     line-height: 11px; text-align: right; flex-shrink: 0; }
+.heatmap-week   { display: flex; flex-direction: column; gap: 2px; flex-shrink: 0; }
+.heatmap-cell   { width: 11px; height: 11px; border-radius: 2px; cursor: default; transition: opacity 0.1s; }
+.heatmap-cell:hover { opacity: 0.8; }
+.heatmap-month-label { font-size: 9px; color: var(--dim); width: 11px; overflow: visible;
+                       white-space: nowrap; flex-shrink: 0; }
+.heatmap-legend { display: flex; align-items: center; gap: 4px; margin-top: 6px;
+                  justify-content: flex-end; }
+.heatmap-legend span { font-size: 9px; color: var(--dim); }
+.heatmap-legend-cell { width: 11px; height: 11px; border-radius: 2px; }
+
+/* ── Goals ───────────────────────────────────────────────────────────────── */
+.goal-list { display: flex; flex-direction: column; gap: 10px; }
+.goal-card {
+  background: var(--card); border-radius: var(--radius); padding: 14px 18px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.goal-card-header { display: flex; align-items: center; justify-content: space-between; }
+.goal-label { font-size: 14px; font-weight: 600; color: var(--text); }
+.goal-badges { display: flex; gap: 6px; align-items: center; }
+.badge {
+  padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 600;
+  background: #1E1E30; color: var(--dim);
+}
+.badge-daily   { color: var(--accent); }
+.badge-weekly  { color: var(--purple); }
+.badge-total   { color: var(--warn); }
+.progress-track {
+  height: 8px; background: #1E1E30; border-radius: 4px; overflow: hidden;
+}
+.progress-fill {
+  height: 100%; border-radius: 4px; transition: width 0.5s ease;
+}
+.goal-meta { display: flex; justify-content: space-between; align-items: center; }
+.goal-numbers { font-size: 12px; color: var(--dim); }
+.goal-pct { font-size: 13px; font-weight: 700; }
+.goal-chunk {
+  font-size: 12px; display: flex; align-items: center; gap: 6px;
+  padding-top: 6px; border-top: 1px solid var(--grid);
+}
+
+/* ── Media cards (grid) ──────────────────────────────────────────────────── */
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-top: 4px;
+  align-items: start;
+}
+.media-card {
+  border-radius: var(--radius); overflow: hidden;
+  cursor: pointer; transition: transform 0.18s, box-shadow 0.18s;
+  position: relative;
+}
+.media-card:hover {
+  transform: translateY(-4px) scale(1.02);
+  box-shadow: 0 12px 32px rgba(0,0,0,0.6);
+  z-index: 2;
+}
+.media-card:hover .media-card-overlay { opacity: 1; }
+
+/* Card with real cover image — shape defined by the image */
+.media-card-img {
+  width: 100%; height: auto; display: block;
+  border-radius: var(--radius);
+}
+
+/* Fallback placeholder — fixed portrait aspect ratio */
+.media-card-placeholder {
+  aspect-ratio: 2 / 3;
+  display: flex; align-items: center; justify-content: center;
+  flex-direction: column; gap: 10px;
+  border-radius: var(--radius);
+  position: relative; overflow: hidden;
+}
+.media-placeholder-icon    { font-size: 38px; line-height: 1; position: relative; z-index: 1; }
+.media-placeholder-initial {
+  font-size: 54px; font-weight: 900; color: rgba(255,255,255,0.12);
+  position: absolute; bottom: 6px; right: 8px; line-height: 1;
+  font-family: serif; z-index: 0;
+}
+.media-placeholder-spine {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 7px;
+  background: rgba(0,0,0,0.28); border-radius: var(--radius) 0 0 var(--radius);
+}
+
+/* Overlay that sits on top of both image and placeholder */
+.media-card-overlay {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  padding: 28px 9px 9px;
+  background: linear-gradient(transparent, rgba(0,0,0,0.88) 55%);
+  border-radius: 0 0 var(--radius) var(--radius);
+  opacity: 0;
+  transition: opacity 0.18s;
+}
+.media-card:hover .media-card-overlay { opacity: 1; }
+
+/* Always-visible thin bottom strip (title only, no hover needed) */
+.media-card-footer {
+  position: absolute; bottom: 0; left: 0; right: 0;
+  padding: 22px 8px 8px;
+  background: linear-gradient(transparent, rgba(0,0,0,0.82));
+  border-radius: 0 0 var(--radius) var(--radius);
+}
+.media-card-title {
+  font-size: 11px; font-weight: 700; color: #fff; line-height: 1.3;
+  overflow: hidden; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  margin-bottom: 2px;
+}
+.media-card-meta {
+  display: flex; justify-content: space-between; align-items: center;
+}
+.media-card-time    { font-size: 11px; font-weight: 700; color: var(--accent); }
+.media-card-source  { font-size: 9px; color: rgba(255,255,255,0.5); }
+
+/* ── Media detail view ───────────────────────────────────────────────────── */
+.detail-hero {
+  display: flex; gap: 22px; margin-bottom: 20px; align-items: flex-start;
+}
+.detail-cover-box {
+  width: 160px; min-height: 220px; border-radius: var(--radius);
+  overflow: hidden; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 54px; border: 1px solid var(--grid);
+}
+.detail-cover-box img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.detail-info { flex: 1; min-width: 0; }
+.detail-title { font-size: 20px; font-weight: 700; color: var(--text); line-height: 1.25; margin-bottom: 8px; }
+.genre-badge {
+  display: inline-block; padding: 3px 10px; border-radius: 20px;
+  background: #1E1E30; border: 1px solid var(--grid);
+  font-size: 11px; color: var(--dim); margin-right: 5px; margin-bottom: 5px;
+}
+.detail-desc {
+  font-size: 12px; color: var(--dim); line-height: 1.75;
+  max-height: 145px; overflow-y: auto; margin-top: 10px;
+  padding-right: 6px; white-space: pre-wrap;
+}
+.detail-desc::-webkit-scrollbar { width: 4px; }
+.detail-desc::-webkit-scrollbar-track { background: transparent; }
+.detail-desc::-webkit-scrollbar-thumb { background: var(--grid); border-radius: 2px; }
+
+/* ── Detail session rows ─────────────────────────────────────────────────── */
+.detail-sessions { display: flex; flex-direction: column; gap: 5px; margin-top: 4px; }
+.detail-session-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; background: var(--card);
+  border-radius: 8px; font-size: 12px;
+}
+.dsr-date  { color: var(--dim); width: 88px; flex-shrink: 0; }
+.dsr-time  { font-weight: 700; color: var(--accent); width: 68px; }
+.dsr-chars { color: var(--dim); flex: 1; }
+.dsr-speed { color: var(--success); width: 90px; text-align: right; font-size: 11px; }
+.dsr-cards { color: var(--warn); width: 72px; text-align: right; font-size: 11px; }
+
+/* ── Extra stat cards ────────────────────────────────────────────────────── */
+.extra-stat-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin: 12px 0; }
+.extra-stat-card { background: var(--card); border-radius: var(--radius); padding: 12px 14px; }
+.extra-stat-card .label { font-size: 10px; color: var(--dim); margin-bottom: 3px; }
+.extra-stat-card .value { font-size: 20px; font-weight: 700; line-height: 1.15; }
+.extra-stat-card .sub   { font-size: 10px; color: var(--dim); margin-top: 2px; }
+
+/* ── Settings ────────────────────────────────────────────────────────────── */
+.settings-section { margin-bottom: 20px; }
+.settings-section .card { padding: 20px; }
+.settings-section h3 { font-size: 13px; font-weight: 700; margin-bottom: 12px; }
+.settings-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.url-input { flex: 1; }
+
+/* ── Media filter bar ────────────────────────────────────────────────────── */
+.filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.filter-btn {
+  padding: 5px 14px; border-radius: 20px; border: 1px solid var(--grid);
+  background: transparent; color: var(--dim); cursor: pointer; font-size: 12px;
+  font-family: inherit; transition: all 0.15s;
+}
+.filter-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.filter-btn:hover:not(.active) { border-color: var(--dim); color: var(--text); }
+
+/* ── Color swatches ──────────────────────────────────────────────────────── */
+.color-grid { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.swatch {
+  width: 22px; height: 22px; border-radius: 50%; cursor: pointer; border: 2px solid transparent;
+  transition: border-color 0.15s; flex-shrink: 0;
+}
+.swatch.selected { border-color: #fff; }
+
+/* ── Divider ─────────────────────────────────────────────────────────────── */
+.divider { height: 1px; background: var(--grid); margin: 20px 0; }
+
+/* ── Flatpickr overrides ─────────────────────────────────────────────────── */
+.flatpickr-calendar.open { z-index: 9999; }
+.flatpickr-calendar {
+  background: #2a2a42 !important;
+  border: 1px solid var(--grid) !important;
+  border-radius: var(--radius) !important;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5) !important;
+  font-family: 'Segoe UI', system-ui, sans-serif !important;
+}
+.flatpickr-months { background: #2a2a42 !important; border-radius: var(--radius) var(--radius) 0 0 !important; }
+.flatpickr-month  { color: var(--text) !important; fill: var(--text) !important; }
+.flatpickr-current-month .flatpickr-monthDropdown-months { background: #2a2a42 !important; }
+.flatpickr-current-month input.cur-year { color: var(--text) !important; }
+.flatpickr-weekdays { background: #2a2a42 !important; }
+span.flatpickr-weekday { color: var(--dim) !important; background: #2a2a42 !important; }
+.flatpickr-day { color: var(--text) !important; border-radius: 6px !important; }
+.flatpickr-day:hover { background: var(--hover) !important; border-color: transparent !important; }
+.flatpickr-day.selected, .flatpickr-day.selected:hover {
+  background: var(--accent) !important; border-color: var(--accent) !important;
+}
+.flatpickr-day.today { border-color: var(--accent) !important; }
+.flatpickr-day.today:hover { background: var(--hover) !important; }
+.flatpickr-day.flatpickr-disabled, .flatpickr-day.flatpickr-disabled:hover {
+  color: var(--muted) !important; opacity: 0.4;
+}
+.flatpickr-prev-month, .flatpickr-next-month { color: var(--dim) !important; fill: var(--dim) !important; }
+.flatpickr-prev-month:hover svg, .flatpickr-next-month:hover svg { fill: var(--text) !important; }
+.numInputWrapper span.arrowUp:after  { border-bottom-color: var(--dim) !important; }
+.numInputWrapper span.arrowDown:after { border-top-color: var(--dim) !important; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <div class="icon">⬡</div>
+      <div class="name">Immersion<br>Tracker</div>
+    </div>
+    <div class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
+      <span class="nav-icon">◈</span>Dashboard
+    </div>
+    <div class="nav-item" data-page="log" onclick="navigate('log')">
+      <span class="nav-icon">＋</span>Log entry
+    </div>
+    <div class="nav-item" data-page="history" onclick="navigate('history')">
+      <span class="nav-icon">≡</span>History
+    </div>
+    <div class="nav-item" data-page="stats" onclick="navigate('stats')">
+      <span class="nav-icon">◎</span>Stats
+    </div>
+    <div class="nav-item" data-page="goals" onclick="navigate('goals')">
+      <span class="nav-icon">◉</span>Goals
+    </div>
+    <div class="nav-item" data-page="media" onclick="navigate('media')">
+      <span class="nav-icon">▦</span>Media
+    </div>
+    <div class="nav-item" data-page="settings" onclick="navigate('settings')">
+      <span class="nav-icon">⚙</span>Settings
+    </div>
+    <div class="sidebar-status" id="status">Loading…</div>
+  </nav>
+
+  <!-- ── Content ─────────────────────────────────────────────────────────── -->
+  <main class="content">
+
+    <!-- ── Dashboard ─────────────────────────────────────────────────────── -->
+    <div id="page-dashboard" class="page active">
+      <div class="page-header">
+        <h1>Today</h1>
+        <div class="right">
+          <span class="muted" id="today-date"></span>
+          <button class="btn btn-primary btn-sm" id="pull-btn" onclick="doPullGSM()">↻ Pull GSM now</button>
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat-card"><div class="label">Time today</div>
+          <div class="value" id="d-time" style="color:var(--accent)">—</div></div>
+        <div class="stat-card"><div class="label">Characters</div>
+          <div class="value" id="d-chars" style="color:var(--success)">—</div></div>
+        <div class="stat-card"><div class="label">Lines read</div>
+          <div class="value" id="d-lines" style="color:var(--warn)">—</div></div>
+        <div class="stat-card"><div class="label">Days tracked</div>
+          <div class="value" id="d-days" style="color:var(--muted)">—</div></div>
+      </div>
+      <h2>Today's sessions</h2>
+      <div class="session-list" id="today-sessions"></div>
+      <h2>Last 7 days</h2>
+      <div class="weekly-bars" id="weekly-bars"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0 8px">
+        <h2 style="margin:0">Activity heatmap</h2>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn btn-outline btn-sm" onclick="changeDashHeatmapYear(-1)">←</button>
+          <span id="dash-heatmap-year" style="font-size:13px;font-weight:600;color:var(--text);min-width:36px;text-align:center"></span>
+          <button class="btn btn-outline btn-sm" id="dash-heatmap-next" onclick="changeDashHeatmapYear(1)">→</button>
+        </div>
+      </div>
+      <div class="heatmap-wrap"><div id="heatmap-dash"></div></div>
+    </div>
+
+    <!-- ── Log entry ─────────────────────────────────────────────────────── -->
+    <div id="page-log" class="page">
+      <div class="page-header"><h1>Log entry</h1></div>
+      <p class="muted" style="margin:6px 0 20px">Manually record an immersion session.</p>
+      <div class="card" style="margin-bottom:16px">
+        <div class="form-group">
+          <label>Activity type</label>
+          <div class="pill-group" id="atype-pills"></div>
+        </div>
+        <div style="display:grid;grid-template-columns:140px 1fr;gap:16px">
+          <div class="form-group">
+            <label>Time (minutes)</label>
+            <input type="number" id="log-minutes" min="1">
+          </div>
+          <div class="form-group">
+            <label>Title / notes (optional)</label>
+            <input type="text" id="log-title">
+          </div>
+        </div>
+        <div class="form-group" style="max-width:180px">
+          <label>Date</label>
+          <input type="text" id="log-date">
+        </div>
+        <div class="feedback" id="log-feedback"></div>
+        <button class="btn btn-primary" style="margin-top:12px" onclick="doLogSession()">Add entry</button>
+      </div>
+
+      <h2>Import CSV</h2>
+      <div class="card" style="margin-bottom:20px">
+        <p class="muted" style="margin-bottom:14px;line-height:1.6">
+          Imports a CSV with columns:<br>
+          Activity, Language, Activity Type, Time (minutes), Date
+        </p>
+        <div style="display:flex;align-items:center;gap:14px">
+          <button class="btn btn-outline btn-sm" onclick="doImportCSV()">Choose CSV file…</button>
+          <span class="feedback" id="csv-feedback"></span>
+        </div>
+      </div>
+
+      <h2>Custom Categories</h2>
+      <div class="card">
+        <p class="muted" style="margin-bottom:14px">Add your own activity categories alongside the built-in ones.</p>
+        <div class="pill-group" id="custom-cat-list" style="margin-bottom:14px"></div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end">
+          <div class="form-group" style="margin-bottom:0">
+            <label>Category name</label>
+            <input type="text" id="new-cat-name" maxlength="32">
+          </div>
+          <button class="btn btn-outline" style="height:40px" onclick="doAddCategory()">Add</button>
+        </div>
+        <div style="margin-top:10px">
+          <label class="muted">Color</label>
+          <div class="color-grid" id="cat-color-swatches"></div>
+        </div>
+        <div class="feedback" id="cat-feedback"></div>
+      </div>
+    </div>
+
+    <!-- ── History ────────────────────────────────────────────────────────── -->
+    <div id="page-history" class="page">
+      <div class="page-header"><h1>Session history</h1></div>
+      <p class="muted" style="margin:6px 0 16px">Most recent 30 sessions</p>
+      <div class="session-list" id="history-list"></div>
+    </div>
+
+    <!-- ── Stats ──────────────────────────────────────────────────────────── -->
+    <div id="page-stats" class="page">
+      <div class="stats-ctrl">
+        <h1>Stats</h1>
+        <div class="seg" id="range-seg">
+          <button class="seg-btn active" data-range="30d"  onclick="setRange('30d')">30d</button>
+          <button class="seg-btn"        data-range="90d"  onclick="setRange('90d')">90d</button>
+          <button class="seg-btn"        data-range="1y"   onclick="setRange('1y')">1y</button>
+          <button class="seg-btn"        data-range="All"  onclick="setRange('All')">All</button>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat-card"><div class="label" id="sc-time-lbl">Total time</div>
+          <div class="value" id="sc-time" style="color:var(--accent)">—</div></div>
+        <div class="stat-card"><div class="label" id="sc-chars-lbl">Total chars</div>
+          <div class="value" id="sc-chars" style="color:var(--success)">—</div></div>
+        <div class="stat-card"><div class="label">Current streak</div>
+          <div class="value" id="sc-streak" style="color:var(--warn)">—</div></div>
+        <div class="stat-card"><div class="label" id="sc-avg-lbl">Avg per day</div>
+          <div class="value" id="sc-avg" style="color:var(--purple)">—</div></div>
+      </div>
+
+      <!-- Extra stats row -->
+      <div class="extra-stat-grid" id="extra-stats-grid">
+        <div class="extra-stat-card">
+          <div class="label">Best single day</div>
+          <div class="value" id="es-best-day" style="color:var(--accent)">—</div>
+          <div class="sub" id="es-best-day-date"></div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Best week</div>
+          <div class="value" id="es-best-week" style="color:var(--success)">—</div>
+          <div class="sub" id="es-best-week-date"></div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Chars / hour</div>
+          <div class="value" id="es-cph" style="color:var(--warn)">—</div>
+          <div class="sub">reading speed</div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Consistency</div>
+          <div class="value" id="es-consistency" style="color:var(--purple)">—</div>
+          <div class="sub" id="es-consistency-sub"></div>
+        </div>
+      </div>
+      <div class="extra-stat-grid" style="margin-top:-4px">
+        <div class="extra-stat-card">
+          <div class="label">Longest session</div>
+          <div class="value" id="es-longest" style="color:var(--pink)">—</div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Longest streak</div>
+          <div class="value" id="es-lng-streak" style="color:var(--accent)">—</div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Unique titles</div>
+          <div class="value" id="es-titles" style="color:var(--success)">—</div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Days since start</div>
+          <div class="value" id="es-days-total" style="color:var(--dim)">—</div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0 8px">
+        <h2 style="margin:0">Daily time</h2>
+        <label class="toggle-label">
+          <input type="checkbox" id="cum-toggle" onchange="onCumToggle()"> Show cumulative
+        </label>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-daily" height="180"></canvas></div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0 8px">
+        <h2 style="margin:0">Activity heatmap</h2>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn btn-outline btn-sm" onclick="changeHeatmapYear(-1)">←</button>
+          <span id="heatmap-year-label" style="font-size:13px;font-weight:600;color:var(--text);min-width:36px;text-align:center"></span>
+          <button class="btn btn-outline btn-sm" id="heatmap-next-btn" onclick="changeHeatmapYear(1)">→</button>
+        </div>
+      </div>
+      <div class="heatmap-wrap"><div id="heatmap-stats"></div></div>
+
+      <div class="chart-row">
+        <div>
+          <h2>Top titles</h2>
+          <div class="chart-wrap"><canvas id="chart-titles" height="220"></canvas></div>
+        </div>
+        <div>
+          <h2>By activity</h2>
+          <div class="chart-wrap"><canvas id="chart-donut" height="220"></canvas></div>
+        </div>
+      </div>
+      <div style="height:24px"></div>
+    </div>
+
+    <!-- ── Goals ──────────────────────────────────────────────────────────── -->
+    <div id="page-goals" class="page">
+      <div class="page-header"><h1>Goals</h1></div>
+      <p class="muted" style="margin:6px 0 20px">Set a target, a deadline, and let the tracker tell you what you need to do each day or week to get there.</p>
+
+      <div class="card" style="margin-bottom:20px">
+        <h3 style="font-size:13px;font-weight:700;margin-bottom:14px">New goal</h3>
+        <div class="form-group">
+          <label>Label</label>
+          <input type="text" id="goal-label">
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+          <div class="form-group" style="margin-bottom:0">
+            <label>Track</label>
+            <select id="goal-metric" onchange="updateGoalUnit()">
+              <option value="time_seconds">Time</option>
+              <option value="chars_read">Characters</option>
+              <option value="lines_read">Lines</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label id="goal-target-label">Target (minutes)</label>
+            <input type="number" id="goal-target" min="1">
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>Deadline</label>
+            <input type="text" id="goal-deadline">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+          <div class="form-group" style="margin-bottom:0">
+            <label>Break into chunks</label>
+            <select id="goal-chunk">
+              <option value="daily">Daily — split evenly by day</option>
+              <option value="weekly">Weekly — split evenly by week</option>
+              <option value="none">None — just track overall progress</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>Activity filter (optional)</label>
+            <select id="goal-activity"><option value="">All activities</option></select>
+          </div>
+        </div>
+        <div class="feedback" id="goal-feedback"></div>
+        <button class="btn btn-primary" style="margin-top:14px" onclick="doAddGoal()">Add goal</button>
+      </div>
+
+      <h2 style="margin-top:4px">Active goals</h2>
+      <div class="goal-list" id="goal-list">
+        <p class="empty-msg">No goals yet. Add one above.</p>
+      </div>
+    </div>
+
+    <!-- ── Media ──────────────────────────────────────────────────────────── -->
+    <div id="page-media" class="page">
+
+      <!-- Grid view -->
+      <div id="media-grid-view">
+        <div class="page-header">
+          <h1>Media</h1>
+          <span class="muted" id="media-count"></span>
+        </div>
+        <p class="muted" style="margin:6px 0 14px">All tracked titles — click any card to see details.</p>
+        <div class="filter-bar" id="media-filters">
+          <button class="filter-btn active" data-filter="all" onclick="setMediaFilter('all')">All</button>
+          <button class="filter-btn" data-filter="Reading"   onclick="setMediaFilter('Reading')">📖 Reading</button>
+          <button class="filter-btn" data-filter="Watching"  onclick="setMediaFilter('Watching')">📺 Watching</button>
+          <button class="filter-btn" data-filter="Listening" onclick="setMediaFilter('Listening')">🎵 Listening</button>
+          <button class="filter-btn" data-filter="Other"     onclick="setMediaFilter('Other')">◎ Other</button>
+        </div>
+        <div class="media-grid" id="media-grid">
+          <p class="empty-msg">No media tracked yet.</p>
+        </div>
+      </div>
+
+      <!-- Detail view (hidden by default) -->
+      <div id="media-detail-view" style="display:none">
+        <!-- Back nav -->
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeMediaDetail()">← Back</button>
+          <span class="muted" id="detail-breadcrumb" style="font-size:12px"></span>
+        </div>
+
+        <!-- Hero: cover + info -->
+        <div class="detail-hero">
+          <div id="detail-cover" class="detail-cover-box"></div>
+          <div class="detail-info">
+            <div id="detail-title" class="detail-title"></div>
+            <div id="detail-genres" style="margin-top:6px"></div>
+            <div id="detail-desc" class="detail-desc"></div>
+          </div>
+        </div>
+
+        <!-- Stat cards -->
+        <div class="stat-grid" id="detail-stats-grid"></div>
+
+        <!-- Daily activity chart -->
+        <h2 style="margin-top:16px">Daily activity</h2>
+        <div class="chart-wrap"><canvas id="chart-detail" height="180"></canvas></div>
+
+        <!-- Session list -->
+        <h2 style="margin-top:20px">Sessions <span id="detail-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
+        <div class="detail-sessions" id="detail-session-list"></div>
+        <div style="height:24px"></div>
+      </div>
+
+    </div>
+
+    <!-- ── Settings ───────────────────────────────────────────────────────── -->
+    <div id="page-settings" class="page">
+      <div class="page-header"><h1>Settings</h1></div>
+
+      <div class="settings-section" style="margin-top:20px">
+        <div class="card">
+          <h3>GameSentenceMiner</h3>
+          <p class="muted">API URL (default: http://localhost:7275/api/stats)</p>
+          <div class="settings-row">
+            <input type="text" id="gsm-url" class="url-input" value="http://localhost:7275/api/stats" onchange="saveSettings()">
+            <button class="btn btn-outline btn-sm" onclick="doTestGSM()">Test connection</button>
+          </div>
+          <div class="feedback" id="gsm-status" style="margin-top:8px"></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Day rollover</h3>
+          <p class="muted" style="margin-bottom:12px">Sessions logged before this time count as the previous day.</p>
+          <select id="rollover-hour" onchange="saveSettings()" style="max-width:280px">
+            <option value="0">Midnight (default — no rollover)</option>
+            <option value="1">1:00 AM</option>
+            <option value="2">2:00 AM</option>
+            <option value="3">3:00 AM</option>
+            <option value="4">4:00 AM</option>
+            <option value="5">5:00 AM</option>
+            <option value="6">6:00 AM</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Sessions folder</h3>
+          <p id="sessions-dir" style="color:var(--accent);font-size:12px;margin-bottom:8px">…</p>
+          <p class="muted">Drop any *.json session file here and it will be ingested automatically.</p>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+// ── Globals ────────────────────────────────────────────────────────────────
+let currentPage   = 'dashboard';
+let currentRange  = '30d';
+let statsCache    = {};
+let charts        = {};
+let selectedAtype = 'Reading';
+let selectedCatColor = '#5B8CFF';
+let mediaAllData  = [];
+let mediaFilter     = 'all';
+let heatmapYear     = new Date().getFullYear();
+let dashHeatmapYear = new Date().getFullYear();
+let appSettings   = { rollover_hour: 0, gsm_url: 'http://localhost:7275/api/stats' };
+let currentDetailTitle = null;
+
+const BUILTIN_TYPES = ['Reading','Listening','Watching','Speaking','Vocabulary','Other'];
+const ACOLORS = {
+  Reading:'#5B8CFF', Listening:'#4ECBA0', Watching:'#FF9F5B',
+  Speaking:'#C78BFF', Vocabulary:'#FF7BAC', Other:'#6B6B8A'
+};
+const CAT_PALETTE = [
+  '#5B8CFF','#4ECBA0','#FF9F5B','#C78BFF','#FF7BAC',
+  '#5BE8C4','#FFD15B','#FF6B6B','#6B6B8A','#38BDF8'
+];
+const PALETTE = ['#5B8CFF','#4ECBA0','#FF9F5B','#C78BFF','#FF7BAC','#5BE8C4','#FFD15B','#6B6B8A'];
+const HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
+
+Chart.defaults.color       = '#9090A8';
+Chart.defaults.borderColor = '#2E2E48';
+Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
+Chart.defaults.font.size   = 11;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function fmtTime(s) {
+  if (!s || s <= 0) return '0m';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+function fmtChars(n) { return n >= 10000 ? `${(n/1000).toFixed(1)}k` : n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
+function srcLabel(s) {
+  return {gsm:'Game',anki:'Anki',ttu:'ttsureader',manual:'Manual',csv:'Import'}[s?.toLowerCase()] || (s||'').toUpperCase();
+}
+function acolor(t) { return ACOLORS[t] || '#6B6B8A'; }
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+
+function today() {
+  const now      = new Date();
+  const rollover = appSettings.rollover_hour || 0;
+  const d        = (rollover > 0 && now.getHours() < rollover)
+                   ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)
+                   : now;
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function isoDateFromObj(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
+function mediaIcon(source, atype) {
+  if (source === 'gsm') return '🎮';
+  if (atype === 'Watching') return '📺';
+  if (atype === 'Listening') return '🎵';
+  if (atype === 'Speaking') return '🎙';
+  if (atype === 'Vocabulary') return '📝';
+  return '📖';
+}
+
+// ── Navigation ─────────────────────────────────────────────────────────────
+function navigate(page) {
+  document.querySelectorAll('.nav-item').forEach(el =>
+    el.classList.toggle('active', el.dataset.page === page));
+  document.querySelectorAll('.page').forEach(el =>
+    el.classList.toggle('active', el.id === `page-${page}`));
+  currentPage = page;
+  loadPage(page);
+}
+
+async function loadPage(page) {
+  if      (page === 'dashboard') await loadDashboard();
+  else if (page === 'log')       await buildLogPage();
+  else if (page === 'history')   await loadHistory();
+  else if (page === 'stats')     await loadStats(currentRange);
+  else if (page === 'goals')     await loadGoals();
+  else if (page === 'media')     await loadMedia();
+  else if (page === 'settings')  await loadSettings();
+}
+
+// ── Dashboard ──────────────────────────────────────────────────────────────
+async function loadDashboard() {
+  const d = await window.pywebview.api.get_dashboard();
+  document.getElementById('today-date').textContent = today();
+
+  const todaySec = d.today.reduce((a,r) => a + r.seconds, 0);
+  document.getElementById('d-time').textContent  = fmtTime(todaySec);
+  document.getElementById('d-chars').textContent = fmtChars(d.today.reduce((a,r) => a+r.chars, 0));
+  document.getElementById('d-lines').textContent = d.today.reduce((a,r) => a+r.lines, 0);
+  document.getElementById('d-days').textContent  = d.totals.days;
+
+  const list = document.getElementById('today-sessions');
+  list.innerHTML = '';
+  if (!d.today.length) {
+    list.innerHTML = '<p class="empty-msg">No sessions yet today. Use Log entry, pull from GSM, or drop a session file.</p>';
+  } else {
+    d.today.forEach(s => list.appendChild(makeSessionRow(s)));
+  }
+
+  const bars = document.getElementById('weekly-bars');
+  bars.innerHTML = '';
+  const maxSec = Math.max(...d.weekly.map(r => r.seconds), 1);
+  d.weekly.forEach(r => {
+    const pct = Math.min(r.seconds / maxSec * 100, 100);
+    bars.innerHTML += `
+      <div class="mini-bar">
+        <span class="mini-bar-label">${r.date.slice(5)}</span>
+        <div class="mini-bar-track"><div class="mini-bar-fill" style="width:${pct}%"></div></div>
+        <span class="mini-bar-time">${fmtTime(r.seconds)}</span>
+      </div>`;
+  });
+
+  await refreshDashHeatmap();
+}
+
+async function refreshDashHeatmap() {
+  const curYear = new Date().getFullYear();
+  const label   = document.getElementById('dash-heatmap-year');
+  const nextBtn = document.getElementById('dash-heatmap-next');
+  if (label)   label.textContent = dashHeatmapYear;
+  if (nextBtn) nextBtn.disabled  = dashHeatmapYear >= curYear;
+  const hmData = await window.pywebview.api.get_heatmap(dashHeatmapYear, null);
+  renderHeatmap('heatmap-dash', hmData, null, true, dashHeatmapYear);
+}
+
+async function changeDashHeatmapYear(delta) {
+  dashHeatmapYear = Math.min(new Date().getFullYear(), Math.max(2000, dashHeatmapYear + delta));
+  await refreshDashHeatmap();
+}
+
+function makeSessionRow(s) {
+  const color = acolor(s.activity_type);
+  const el    = document.createElement('div');
+  el.className = 'session-row';
+  el.innerHTML = `
+    <div class="session-badge" style="background:${color}"></div>
+    <div class="session-body">
+      <div class="session-title">${s.title || s.activity_type || '—'}</div>
+      <div class="session-meta">${srcLabel(s.source)} · ${s.activity_type || ''} · ${s.date || today()}</div>
+    </div>
+    <div class="session-right">
+      ${s.seconds > 0 ? `<span class="session-time" style="color:${color}">${fmtTime(s.seconds)}</span>` : ''}
+      ${s.chars   > 0 ? `<span class="session-chars">${fmtChars(s.chars)} chars</span>` : ''}
+      <button class="btn btn-xs btn-danger" style="margin-top:4px" onclick="doDeleteSession(${s.id}, this)">✕</button>
+    </div>`;
+  return el;
+}
+
+// ── Delete session ─────────────────────────────────────────────────────────
+async function doDeleteSession(id, btn) {
+  btn.disabled = true;
+  const r = await window.pywebview.api.delete_session(id);
+  if (r.ok) {
+    btn.closest('.session-row').remove();
+    statsCache = {};
+    setStatus('Session deleted');
+  } else {
+    btn.disabled = false;
+  }
+}
+
+// ── Heatmap renderer ────────────────────────────────────────────────────────
+function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
+  const container = document.getElementById(containerId);
+  if (!container) return;
+
+  const todayObj = new Date();
+  const allDates = [];
+
+  if (yearMode) {
+    const yr    = yearMode;
+    const start = new Date(yr, 0, 1);
+    const end   = yr === todayObj.getFullYear()
+                  ? new Date(todayObj.getFullYear(), todayObj.getMonth(), todayObj.getDate())
+                  : new Date(yr, 11, 31);
+    for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+      const copy = new Date(d);
+      const key  = isoDateFromObj(copy);
+      allDates.push({ date: key, secs: data[key] || 0, d: copy });
+    }
+  } else {
+    const days = maxDays || 84;
+    for (let i = days - 1; i >= 0; i--) {
+      const d = new Date(todayObj.getFullYear(), todayObj.getMonth(), todayObj.getDate() - i);
+      const key = isoDateFromObj(d);
+      allDates.push({ date: key, secs: data[key] || 0, d });
+    }
+  }
+
+  function getColor(secs) {
+    if (!secs) return HEATMAP_COLORS[0];
+    const h = secs / 3600;
+    if (h < 0.25) return HEATMAP_COLORS[1];
+    if (h < 0.75) return HEATMAP_COLORS[2];
+    if (h < 1.5)  return HEATMAP_COLORS[3];
+    return HEATMAP_COLORS[4];
+  }
+
+  const startDow = allDates[0].d.getDay();
+  const padded   = [...Array(startDow).fill(null), ...allDates];
+  while (padded.length % 7 !== 0) padded.push(null);
+
+  const weeks = [];
+  for (let i = 0; i < padded.length; i += 7) weeks.push(padded.slice(i, i + 7));
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  let html = '<div class="heatmap-inner">';
+
+  if (showLabels) {
+    html += '<div class="heatmap-months" style="padding-left:24px">';
+    let lastM = -1;
+    weeks.forEach(week => {
+      const first = week.find(d => d !== null);
+      let label = '';
+      if (first) {
+        const m = first.d.getMonth();
+        if (m !== lastM) { label = MONTHS[m]; lastM = m; }
+      }
+      html += `<span class="heatmap-month-label">${label}</span>`;
+    });
+    html += '</div>';
+  }
+
+  html += '<div class="heatmap-grid">';
+
+  if (showLabels) {
+    html += '<div class="heatmap-days">';
+    ['','M','','W','','F',''].forEach(l => {
+      html += `<div class="heatmap-day-label">${l}</div>`;
+    });
+    html += '</div>';
+  }
+
+  weeks.forEach(week => {
+    html += '<div class="heatmap-week">';
+    week.forEach(day => {
+      if (!day) {
+        html += '<div class="heatmap-cell" style="background:transparent"></div>';
+      } else {
+        const color = getColor(day.secs);
+        const tip   = `${day.date}  ${fmtTime(day.secs)}`;
+        html += `<div class="heatmap-cell" style="background:${color}" title="${tip}"></div>`;
+      }
+    });
+    html += '</div>';
+  });
+
+  html += '</div>';
+  html += '<div class="heatmap-legend"><span>Less</span>';
+  HEATMAP_COLORS.forEach(c => {
+    html += `<div class="heatmap-legend-cell" style="background:${c}"></div>`;
+  });
+  html += '<span>More</span></div>';
+  html += '</div>';
+
+  container.innerHTML = html;
+}
+
+// ── GSM pull ────────────────────────────────────────────────────────────────
+async function doPullGSM() {
+  const btn = document.getElementById('pull-btn');
+  btn.disabled = true; btn.textContent = 'Pulling…';
+  const url = document.getElementById('gsm-url')?.value || null;
+  const r   = await window.pywebview.api.pull_gsm(url);
+  btn.disabled = false; btn.textContent = '↻ Pull GSM now';
+  if (r.ok) {
+    const parts = [`${fmtChars(r.chars)} chars`];
+    if (r.cards > 0)  parts.push(`${r.cards} cards`);
+    if (r.speed > 0)  parts.push(`${fmtChars(Math.round(r.speed))}/hr`);
+    setStatus(`GSM: ${parts.join(' · ')}`);
+    if (currentPage === 'dashboard') await loadDashboard();
+  } else {
+    setStatus('GSM not reachable — is it running?');
+  }
+}
+
+// ── Log entry ──────────────────────────────────────────────────────────────
+async function buildLogPage() {
+  const customCats = await window.pywebview.api.get_categories();
+  const allTypes   = [...BUILTIN_TYPES, ...customCats.map(c => c.name)];
+  const allColors  = Object.fromEntries([
+    ...BUILTIN_TYPES.map(t => [t, ACOLORS[t]]),
+    ...customCats.map(c => [c.name, c.color])
+  ]);
+
+  const pills = document.getElementById('atype-pills');
+  pills.innerHTML = '';
+  allTypes.forEach(t => {
+    const b = document.createElement('button');
+    b.className = 'pill' + (t === selectedAtype ? ' active' : '');
+    b.textContent = t;
+    if (t === selectedAtype) {
+      const col = allColors[t] || 'var(--accent)';
+      b.style.background = col; b.style.borderColor = col; b.style.color = '#fff';
+    }
+    b.onclick = () => {
+      selectedAtype = t;
+      pills.querySelectorAll('.pill').forEach(p => {
+        p.classList.remove('active');
+        p.style.background = ''; p.style.borderColor = ''; p.style.color = '';
+      });
+      b.classList.add('active');
+      const col = allColors[t] || 'var(--accent)';
+      b.style.background = col; b.style.borderColor = col; b.style.color = '#fff';
+    };
+    pills.appendChild(b);
+  });
+
+  renderCustomCatList(customCats);
+  buildColorSwatches();
+}
+
+function buildColorSwatches() {
+  const grid = document.getElementById('cat-color-swatches');
+  if (!grid) return;
+  grid.innerHTML = '';
+  CAT_PALETTE.forEach(c => {
+    const el = document.createElement('div');
+    el.className = 'swatch' + (c === selectedCatColor ? ' selected' : '');
+    el.style.background = c;
+    el.onclick = () => {
+      selectedCatColor = c;
+      grid.querySelectorAll('.swatch').forEach(s => s.classList.remove('selected'));
+      el.classList.add('selected');
+    };
+    grid.appendChild(el);
+  });
+}
+
+function renderCustomCatList(cats) {
+  const el = document.getElementById('custom-cat-list');
+  if (!el) return;
+  el.innerHTML = '';
+  if (!cats.length) {
+    el.innerHTML = '<span class="muted" style="font-size:12px">No custom categories yet.</span>';
+    return;
+  }
+  cats.forEach(c => {
+    const pill = document.createElement('span');
+    pill.className = 'pill-del';
+    pill.style.borderColor = c.color;
+    pill.style.color = c.color;
+    pill.innerHTML = `${c.name} <span class="x" onclick="doDeleteCategory('${c.name.replace(/'/g,"\\'")}')">✕</span>`;
+    el.appendChild(pill);
+  });
+}
+
+async function doAddCategory() {
+  const name = document.getElementById('new-cat-name').value.trim();
+  const fb   = document.getElementById('cat-feedback');
+  if (!name) { fb.className='feedback err'; fb.textContent='Enter a category name.'; return; }
+  if (BUILTIN_TYPES.includes(name)) {
+    fb.className='feedback err'; fb.textContent='That name is already a built-in category.'; return;
+  }
+  const r = await window.pywebview.api.add_category(name, selectedCatColor);
+  if (r.ok) {
+    fb.className='feedback ok'; fb.textContent=`✓ Added "${name}"`;
+    document.getElementById('new-cat-name').value = '';
+    await buildLogPage();
+  } else {
+    fb.className='feedback err'; fb.textContent = r.error || 'Error';
+  }
+}
+
+async function doDeleteCategory(name) {
+  const r = await window.pywebview.api.delete_category(name);
+  if (r.ok) await buildLogPage();
+}
+
+async function doLogSession() {
+  const minutes = document.getElementById('log-minutes').value.trim();
+  const title   = document.getElementById('log-title').value.trim();
+  const dt      = document.getElementById('log-date').value.trim();
+  const fb      = document.getElementById('log-feedback');
+
+  if (!minutes || isNaN(minutes) || Number(minutes) <= 0) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a positive number of minutes.'; return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) {
+    fb.className = 'feedback err'; fb.textContent = 'Date must be YYYY-MM-DD.'; return;
+  }
+  const r = await window.pywebview.api.log_session(selectedAtype, Number(minutes), title, dt);
+  if (r.ok) {
+    fb.className = 'feedback ok'; fb.textContent = `✓ Logged ${Math.round(minutes)}m of ${selectedAtype}`;
+    document.getElementById('log-minutes').value = '';
+    document.getElementById('log-title').value   = '';
+    document.getElementById('log-date')._flatpickr?.setDate(today(), false);
+    statsCache = {};
+    setStatus('Session logged');
+  } else {
+    fb.className = 'feedback err'; fb.textContent = r.error || 'Something went wrong.';
+  }
+}
+
+async function doImportCSV() {
+  const path = await window.pywebview.api.open_csv_dialog();
+  const fb   = document.getElementById('csv-feedback');
+  if (!path) { fb.className=''; fb.textContent=''; return; }
+  const r = await window.pywebview.api.do_import_csv(path);
+  fb.className = r.imported ? 'feedback ok' : 'feedback';
+  fb.textContent = `✓ Imported ${r.imported} row(s)` + (r.skipped ? `  (${r.skipped} skipped)` : '');
+  if (r.imported) { statsCache = {}; setStatus(`Imported ${r.imported} sessions`); }
+}
+
+// ── History ────────────────────────────────────────────────────────────────
+async function loadHistory() {
+  const sessions = await window.pywebview.api.get_history();
+  const list     = document.getElementById('history-list');
+  list.innerHTML = '';
+  if (!sessions.length) {
+    list.innerHTML = '<p class="empty-msg">No sessions yet.</p>'; return;
+  }
+  sessions.forEach(s => list.appendChild(makeSessionRow(s)));
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+async function loadStats(range_val) {
+  const extraStats = await window.pywebview.api.get_extra_stats();
+  renderExtraStats(extraStats);
+  await refreshStatsHeatmap();
+
+  if (!statsCache[range_val]) {
+    statsCache[range_val] = await window.pywebview.api.get_stats(range_val);
+    const others = ['30d','90d','1y','All'].filter(r => r !== range_val);
+    setTimeout(() => prefetchStats(others, 0), 500);
+  }
+  renderStats(statsCache[range_val]);
+}
+
+function prefetchStats(ranges, idx) {
+  if (idx >= ranges.length) return;
+  const rv = ranges[idx];
+  if (!statsCache[rv]) {
+    window.pywebview.api.get_stats(rv).then(d => {
+      statsCache[rv] = d;
+      setTimeout(() => prefetchStats(ranges, idx+1), 300);
+    });
+  } else {
+    prefetchStats(ranges, idx+1);
+  }
+}
+
+async function setRange(rv) {
+  currentRange = rv;
+  document.querySelectorAll('.seg-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.range === rv));
+  await loadStats(rv);
+}
+
+function onCumToggle() {
+  if (statsCache[currentRange]) renderDailyChart(statsCache[currentRange].daily);
+}
+
+async function refreshStatsHeatmap() {
+  const curYear = new Date().getFullYear();
+  const label   = document.getElementById('heatmap-year-label');
+  const nextBtn = document.getElementById('heatmap-next-btn');
+  if (label)   label.textContent = heatmapYear;
+  if (nextBtn) nextBtn.disabled  = heatmapYear >= curYear;
+  const hmData = await window.pywebview.api.get_heatmap(heatmapYear);
+  renderHeatmap('heatmap-stats', hmData, null, true, heatmapYear);
+}
+
+async function changeHeatmapYear(delta) {
+  const curYear = new Date().getFullYear();
+  heatmapYear   = Math.min(curYear, Math.max(2000, heatmapYear + delta));
+  await refreshStatsHeatmap();
+}
+
+function renderExtraStats(es) {
+  document.getElementById('es-best-day').textContent       = fmtTime(es.best_day_secs);
+  document.getElementById('es-best-day-date').textContent  = es.best_day_date || '—';
+  document.getElementById('es-best-week').textContent      = fmtTime(es.best_week_secs);
+  document.getElementById('es-best-week-date').textContent = es.best_week_start ? `w/o ${es.best_week_start}` : '—';
+  document.getElementById('es-cph').textContent            = es.chars_per_hour ? fmtChars(es.chars_per_hour) : '—';
+  document.getElementById('es-consistency').textContent    = `${es.consistency_pct}%`;
+  document.getElementById('es-consistency-sub').textContent = es.total_tracked_days ? `over ${es.total_tracked_days}d` : '';
+  document.getElementById('es-longest').textContent        = fmtTime(es.longest_session_secs);
+  document.getElementById('es-lng-streak').textContent     = `${es.longest_streak}d`;
+  document.getElementById('es-titles').textContent         = es.unique_titles;
+  document.getElementById('es-days-total').textContent     = es.total_tracked_days || '—';
+}
+
+function renderStats(d) {
+  const rl  = d.range_val === 'All' ? 'all time' : d.range_val;
+  document.getElementById('sc-time-lbl').textContent  = `Time (${rl})`;
+  document.getElementById('sc-chars-lbl').textContent = `Characters (${rl})`;
+  document.getElementById('sc-avg-lbl').textContent   = `Avg/day (${rl})`;
+  document.getElementById('sc-time').textContent      = fmtTime(d.r_secs);
+  document.getElementById('sc-chars').textContent     = fmtChars(d.r_chars);
+  document.getElementById('sc-streak').textContent    = `${d.cur_streak}d`;
+  document.getElementById('sc-avg').textContent       = fmtTime(d.avg_secs);
+  renderDailyChart(d.daily);
+  renderTitlesChart(d.titles);
+  renderDonutChart(d.activity);
+}
+
+// ── Charts ─────────────────────────────────────────────────────────────────
+function destroyChart(id) {
+  if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+}
+
+function renderDailyChart(daily) {
+  destroyChart('daily');
+  const n   = daily.length;
+  const cum = document.getElementById('cum-toggle').checked;
+
+  let labels, values;
+  if (n > 4*365) {
+    const b = {};
+    daily.forEach(({date:d,seconds:s}) => { const k=d.slice(0,7); b[k]=(b[k]||0)+s; });
+    const agg = Object.entries(b).sort();
+    labels = agg.map(([k])=>k); values = agg.map(([,s])=>s/3600);
+  } else if (n > 90) {
+    const b = {};
+    daily.forEach(({date:d,seconds:s}) => {
+      const dt = new Date(d);
+      const w  = `${dt.getFullYear()}-W${String(Math.ceil((dt.getDate()+new Date(dt.getFullYear(),0,1).getDay())/7)).padStart(2,'0')}`;
+      b[w]=(b[w]||0)+s;
+    });
+    const agg = Object.entries(b).sort();
+    labels = agg.map(([k])=>k); values = agg.map(([,s])=>s/3600);
+  } else {
+    labels = daily.map(r=>r.date.slice(5));
+    values = daily.map(r=>r.seconds/60);
+  }
+
+  const isHours = n > 90;
+  const fmt  = v => isHours ? `${v.toFixed(1)}h` : fmtTime(v*60);
+  const step = Math.max(1, Math.floor(labels.length/14));
+  const shownLabels = labels.map((l,i) => i%step===0 ? l : '');
+  const barColors   = values.map((_,i) => i===values.length-1 ? '#8ABAFF' : '#5B8CFF');
+
+  const datasets = [{
+    label: 'Time', data: values, backgroundColor: barColors,
+    borderRadius: 3, borderSkipped: false,
+  }];
+
+  if (cum) {
+    let run=0; const cumVals=values.map(v=>(run+=v,run));
+    datasets.push({
+      label: 'Cumulative', data: cumVals, type: 'line',
+      borderColor: '#4ECBA0', backgroundColor: 'rgba(78,203,160,0.08)',
+      borderWidth: 2, pointRadius: 0, fill: true, tension: 0.3,
+      yAxisID: 'y2',
+    });
+  }
+
+  const ctx = document.getElementById('chart-daily').getContext('2d');
+  charts['daily'] = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: shownLabels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: cum },
+        tooltip: { callbacks: { label: c => fmt(c.raw) } }
+      },
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback:v=>fmt(v)} },
+        ...(cum ? {y2:{position:'right',grid:{display:false},ticks:{color:'#4ECBA0',callback:v=>fmt(v)}}} : {})
+      }
+    }
+  });
+}
+
+function renderTitlesChart(titles) {
+  destroyChart('titles');
+  if (!titles.length) return;
+  const labels = titles.map(t => t.title.length>22 ? t.title.slice(0,21)+'…' : t.title);
+  const values = titles.map(t => t.hours);
+  const ctx    = document.getElementById('chart-titles').getContext('2d');
+  charts['titles'] = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: PALETTE.slice(0,values.length),
+                   borderRadius: 3, borderSkipped: false }]
+    },
+    options: {
+      indexAxis: 'y', responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend:{display:false}, tooltip:{callbacks:{label:c=>`${c.raw.toFixed(1)}h`}} },
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',callback:v=>`${v.toFixed(0)}h`} },
+        y: { grid:{display:false}, ticks:{color:'#9090A8'} }
+      }
+    }
+  });
+}
+
+function renderDonutChart(activity) {
+  destroyChart('donut');
+  if (!activity.length) return;
+  const labels = activity.map(a=>a.type);
+  const values = activity.map(a=>a.seconds);
+  const colors = labels.map(acolor);
+  const ctx    = document.getElementById('chart-donut').getContext('2d');
+  charts['donut'] = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels,
+      datasets: [{ data: values, backgroundColor: colors,
+                   borderColor:'#24243A', borderWidth:2, hoverOffset:4 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false, cutout: '60%',
+      plugins: {
+        legend: { position:'bottom', labels:{color:'#9090A8',padding:10,boxWidth:12,boxHeight:12,usePointStyle:true} },
+        tooltip: { callbacks: { label: c => `${c.label}: ${fmtTime(c.raw)}` } }
+      }
+    }
+  });
+}
+
+// ── Goals ──────────────────────────────────────────────────────────────────
+function updateGoalUnit() {
+  const metric = document.getElementById('goal-metric').value;
+  document.getElementById('goal-target-label').textContent =
+    metric === 'time_seconds' ? 'Target (minutes)'
+    : metric === 'chars_read' ? 'Target (characters)'
+    :                            'Target (lines)';
+}
+
+async function populateGoalActivitySelect() {
+  const cats     = await window.pywebview.api.get_categories();
+  const allTypes = [...BUILTIN_TYPES, ...cats.map(c => c.name)];
+  const sel      = document.getElementById('goal-activity');
+  sel.innerHTML  = '<option value="">All activities</option>';
+  allTypes.forEach(t => {
+    const o = document.createElement('option');
+    o.value = t; o.textContent = t;
+    sel.appendChild(o);
+  });
+}
+
+async function loadGoals() {
+  await populateGoalActivitySelect();
+  const goals = await window.pywebview.api.get_goals();
+  const list  = document.getElementById('goal-list');
+  list.innerHTML = '';
+  if (!goals.length) {
+    list.innerHTML = '<p class="empty-msg">No goals yet. Add one above.</p>'; return;
+  }
+  const active   = goals.filter(g => !g.is_complete && !g.is_overdue);
+  const complete = goals.filter(g => g.is_complete);
+  const overdue  = goals.filter(g => g.is_overdue);
+  [...active, ...overdue, ...complete].forEach(g => list.appendChild(makeGoalCard(g)));
+}
+
+function makeGoalCard(g) {
+  const el = document.createElement('div');
+  el.className = 'goal-card';
+
+  const isTime  = g.metric === 'time_seconds';
+  const isChars = g.metric === 'chars_read';
+  const perUnit = g.chunk_period === 'daily' ? '/day' : g.chunk_period === 'weekly' ? '/week' : '';
+
+  function fmtMetric(v) {
+    if (!v && v !== 0) return '—';
+    if (isTime)  return fmtTime(v);
+    if (isChars) return fmtChars(Math.round(v));
+    return String(Math.round(v));
+  }
+
+  const pct = g.pct;
+  const fillColor = g.is_complete ? '#4ECBA0'
+                  : g.is_overdue  ? '#FF6B6B'
+                  : pct >= 75     ? '#5B8CFF'
+                  : pct >= 40     ? '#FF9F5B'
+                  :                 '#FF6B6B';
+
+  let statusBadge;
+  if (g.is_complete) {
+    statusBadge = `<span class="badge" style="color:#4ECBA0;background:#0d2b1e">✓ Complete</span>`;
+  } else if (g.is_overdue) {
+    statusBadge = `<span class="badge" style="color:#FF6B6B;background:#2b0d0d">Overdue</span>`;
+  } else {
+    const urgency = g.days_left <= 3 ? '#FF6B6B' : g.days_left <= 7 ? '#FF9F5B' : 'var(--dim)';
+    statusBadge = `<span class="badge" style="color:${urgency}">${g.days_left}d left</span>`;
+  }
+
+  let chunkHtml = '';
+  if (g.chunk_period !== 'none' && g.chunk_needed !== null && !g.is_complete && !g.is_overdue) {
+    const needed   = fmtMetric(g.chunk_needed);
+    const original = fmtMetric(g.original_chunk);
+    const behind   = g.original_chunk && g.chunk_needed > g.original_chunk * 1.05;
+    const ahead    = g.original_chunk && g.chunk_needed < g.original_chunk * 0.95;
+    const icon     = behind ? '⚠' : ahead ? '↓' : '→';
+    const color    = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
+    const paceNote = g.original_chunk
+      ? `<span style="color:var(--muted);font-size:10px;margin-left:4px">original pace: ${original}${perUnit}</span>`
+      : '';
+    chunkHtml = `
+      <div class="goal-chunk" style="color:${color}">
+        <span>${icon} ${needed}${perUnit} to finish on time</span>${paceNote}
+      </div>`;
+  } else if (g.is_overdue) {
+    chunkHtml = `<div class="goal-chunk" style="color:#FF6B6B">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
+  }
+
+  const actLabel = g.activity_type ? ` · ${g.activity_type}` : '';
+
+  el.innerHTML = `
+    <div class="goal-card-header">
+      <span class="goal-label">${g.label}</span>
+      <div class="goal-badges">
+        ${statusBadge}
+        <button class="btn btn-xs btn-danger" onclick="doDeleteGoal(${g.id})">✕</button>
+      </div>
+    </div>
+    <div class="progress-track">
+      <div class="progress-fill" style="width:${pct}%;background:${fillColor}"></div>
+    </div>
+    <div class="goal-meta">
+      <span class="goal-numbers">${fmtMetric(g.completed)} / ${fmtMetric(g.target)}${actLabel}</span>
+      <span class="goal-pct" style="color:${fillColor}">${g.is_complete ? '100%' : pct + '%'}</span>
+    </div>
+    ${chunkHtml}
+    <div style="font-size:10px;color:var(--muted)">deadline: ${g.deadline} · started: ${g.start_date}</div>`;
+  return el;
+}
+
+async function doAddGoal() {
+  const label       = document.getElementById('goal-label').value.trim();
+  const metric      = document.getElementById('goal-metric').value;
+  const rawTarget   = parseFloat(document.getElementById('goal-target').value);
+  const deadline    = document.getElementById('goal-deadline').value.trim();
+  const chunkPeriod = document.getElementById('goal-chunk').value;
+  const atype       = document.getElementById('goal-activity').value || null;
+  const fb          = document.getElementById('goal-feedback');
+
+  if (!label) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a label.'; return;
+  }
+  if (isNaN(rawTarget) || rawTarget <= 0) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a positive target.'; return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
+    fb.className = 'feedback err'; fb.textContent = 'Deadline must be YYYY-MM-DD.'; return;
+  }
+  if (deadline <= today()) {
+    fb.className = 'feedback err'; fb.textContent = 'Deadline must be a future date.'; return;
+  }
+
+  const target = metric === 'time_seconds' ? rawTarget * 60 : rawTarget;
+
+  const r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype);
+  if (r.ok) {
+    fb.className = 'feedback ok'; fb.textContent = '✓ Goal added';
+    document.getElementById('goal-label').value    = '';
+    document.getElementById('goal-target').value   = '';
+    document.getElementById('goal-deadline').value = '';
+    statsCache = {};
+    await loadGoals();
+  } else {
+    fb.className = 'feedback err'; fb.textContent = r.error || 'Error';
+  }
+}
+
+async function doDeleteGoal(id) {
+  const r = await window.pywebview.api.delete_goal(id);
+  if (r.ok) await loadGoals();
+}
+
+// ── Media (grid) ────────────────────────────────────────────────────────────
+async function loadMedia() {
+  // Always start at grid view when navigating to media tab
+  destroyChart('detail');
+  currentDetailTitle = null;
+  document.getElementById('media-grid-view').style.display  = 'block';
+  document.getElementById('media-detail-view').style.display = 'none';
+
+  mediaAllData = await window.pywebview.api.get_media();
+  document.getElementById('media-count').textContent = `${mediaAllData.length} titles`;
+  renderMediaGrid();
+}
+
+function setMediaFilter(f) {
+  mediaFilter = f;
+  document.querySelectorAll('.filter-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.filter === f));
+  renderMediaGrid();
+}
+
+function renderMediaGrid() {
+  const grid = document.getElementById('media-grid');
+  const filtered = mediaFilter === 'all'
+    ? mediaAllData
+    : mediaAllData.filter(m => m.activity_type === mediaFilter || m.source === mediaFilter);
+
+  grid.innerHTML = '';
+  if (!filtered.length) {
+    grid.innerHTML = '<p class="empty-msg">No media found.</p>'; return;
+  }
+  filtered.forEach(m => grid.appendChild(makeMediaCard(m)));
+}
+
+function makeMediaCard(m) {
+  const color   = acolor(m.activity_type);
+  const icon    = mediaIcon(m.source, m.activity_type);
+  const initial = (m.title || '?')[0].toUpperCase();
+  const isBook  = m.activity_type === 'Reading' || m.source === 'ttsureader';
+  const hasImg  = !!m.image;
+
+  const el = document.createElement('div');
+  el.className = 'media-card';
+  el.onclick   = () => openMediaDetail(m.title);
+
+  let innerHTML = '';
+
+  if (hasImg) {
+    // Image-shaped card — img defines the aspect ratio naturally
+    innerHTML += `<img class="media-card-img" src="${m.image}" alt="${m.title}" loading="lazy">`;
+  } else {
+    // Fallback placeholder — portrait 2:3
+    const spineHTML = isBook ? `<div class="media-placeholder-spine"></div>` : '';
+    innerHTML += `
+      <div class="media-card-placeholder" style="background:${color}1a;border:1px solid ${color}2a">
+        ${spineHTML}
+        <div class="media-placeholder-icon">${icon}</div>
+        <div class="media-placeholder-initial">${initial}</div>
+      </div>`;
+  }
+
+  // Always-visible footer strip
+  innerHTML += `
+    <div class="media-card-footer">
+      <div class="media-card-title">${m.title || m.activity_type || 'Untitled'}</div>
+      <div class="media-card-meta">
+        <span class="media-card-time">${fmtTime(m.total_secs)}</span>
+        <span class="media-card-source">${srcLabel(m.source)}</span>
+      </div>
+    </div>`;
+
+  el.innerHTML = innerHTML;
+  return el;
+}
+
+// ── Media detail view ──────────────────────────────────────────────────────
+async function openMediaDetail(title) {
+  const detail = await window.pywebview.api.get_title_detail(title);
+  if (!detail) return;
+  currentDetailTitle = title;
+
+  document.getElementById('media-grid-view').style.display  = 'none';
+  document.getElementById('media-detail-view').style.display = 'block';
+  renderMediaDetail(detail);
+}
+
+function closeMediaDetail() {
+  destroyChart('detail');
+  currentDetailTitle = null;
+  document.getElementById('media-detail-view').style.display = 'none';
+  document.getElementById('media-grid-view').style.display  = 'block';
+}
+
+function renderMediaDetail(d) {
+  const isGSM = d.source === 'gsm';
+  const color  = acolor(d.activity_type);
+
+  // Breadcrumb
+  document.getElementById('detail-breadcrumb').textContent = `Media  ›  ${d.title}`;
+
+  // Cover image or placeholder
+  const coverEl = document.getElementById('detail-cover');
+  coverEl.innerHTML = '';
+  coverEl.style.border = '';
+  if (isGSM && d.image) {
+    const img = document.createElement('img');
+    img.src = d.image;
+    img.alt = d.title;
+    coverEl.appendChild(img);
+    coverEl.style.background = 'transparent';
+    coverEl.style.border = 'none';
+  } else {
+    coverEl.textContent = mediaIcon(d.source, d.activity_type);
+    coverEl.style.background = `${color}22`;
+    coverEl.style.border = `1px solid ${color}33`;
+  }
+
+  // Title
+  document.getElementById('detail-title').textContent = d.title;
+
+  // Genres or activity type badge
+  const genresEl = document.getElementById('detail-genres');
+  if (d.genres && d.genres.length) {
+    genresEl.innerHTML = d.genres.map(g =>
+      `<span class="genre-badge">${g}</span>`
+    ).join('');
+  } else {
+    genresEl.innerHTML = `<span class="genre-badge" style="color:${color};border-color:${color}44">${d.activity_type}</span>`;
+  }
+
+  // Description
+  const descEl = document.getElementById('detail-desc');
+  if (d.description) {
+    descEl.textContent = d.description;
+    descEl.style.display = 'block';
+  } else {
+    descEl.style.display = 'none';
+  }
+
+  // Compute derived speed if avg_speed is 0 but we have chars+time
+  const computedSpeed = d.avg_speed > 0
+    ? d.avg_speed
+    : (d.total_secs > 60 && d.total_chars > 0
+       ? d.total_chars / (d.total_secs / 3600)
+       : 0);
+  const speedDisplay = computedSpeed > 0
+    ? `${fmtChars(Math.round(computedSpeed))}/h`
+    : '—';
+
+  // Stats grid — always show 4 base cards; add cards mined if present
+  const statsGrid = document.getElementById('detail-stats-grid');
+  const hasMining = isGSM && d.total_cards > 0;
+  statsGrid.style.gridTemplateColumns = hasMining ? 'repeat(5,1fr)' : 'repeat(4,1fr)';
+
+  statsGrid.innerHTML = `
+    <div class="stat-card">
+      <div class="label">Total time</div>
+      <div class="value" style="color:var(--accent);font-size:22px">${fmtTime(d.total_secs)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Characters</div>
+      <div class="value" style="color:var(--success);font-size:22px">${d.total_chars > 0 ? fmtChars(d.total_chars) : '—'}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Avg read speed</div>
+      <div class="value" style="color:var(--warn);font-size:22px">${speedDisplay}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Sessions</div>
+      <div class="value" style="color:var(--dim);font-size:22px">${d.session_count}</div>
+      <div class="sub">${d.first_date} → ${d.last_date}</div>
+    </div>
+    ${hasMining ? `
+    <div class="stat-card">
+      <div class="label">Cards mined</div>
+      <div class="value" style="color:var(--purple);font-size:22px">${d.total_cards}</div>
+    </div>` : ''}
+  `;
+
+  // Chart
+  renderDetailChart(d.daily, isGSM);
+
+  // Session list
+  const countEl = document.getElementById('detail-session-count');
+  countEl.textContent = `(${d.session_count})`;
+  renderDetailSessions(d.daily, isGSM);
+}
+
+function renderDetailChart(daily, isGSM) {
+  destroyChart('detail');
+  if (!daily.length) return;
+
+  const n = daily.length;
+  let labels, charVals, speedVals;
+
+  if (n > 90) {
+    // Aggregate by week
+    const wb = {}, sb = {}, sc = {};
+    daily.forEach(({ date: dt, chars: c, speed: sp }) => {
+      const d  = new Date(dt);
+      const wk = `${d.getFullYear()}-W${String(Math.ceil(
+        (d.getDate() + new Date(d.getFullYear(), 0, 1).getDay()) / 7
+      )).padStart(2,'0')}`;
+      wb[wk] = (wb[wk] || 0) + c;
+      if (sp > 0) { sb[wk] = (sb[wk] || 0) + sp; sc[wk] = (sc[wk] || 0) + 1; }
+    });
+    const agg = Object.entries(wb).sort();
+    labels    = agg.map(([k]) => k);
+    charVals  = agg.map(([k]) => wb[k]);
+    speedVals = agg.map(([k]) => sc[k] ? sb[k] / sc[k] : 0);
+  } else {
+    labels    = daily.map(r => r.date.slice(5));
+    charVals  = daily.map(r => r.chars);
+    speedVals = daily.map(r => r.speed || 0);
+  }
+
+  const step        = Math.max(1, Math.floor(labels.length / 14));
+  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
+  const hasSpeed    = isGSM && speedVals.some(s => s > 0);
+
+  const datasets = [{
+    label: 'Characters',
+    data: charVals,
+    backgroundColor: charVals.map((_, i) => i === charVals.length - 1 ? '#8ABAFF' : '#5B8CFF'),
+    borderRadius: 3,
+    borderSkipped: false,
+  }];
+
+  const scalesConf = {
+    x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+    y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
+  };
+
+  if (hasSpeed) {
+    datasets.push({
+      label: 'Read speed (chars/h)',
+      data: speedVals,
+      type: 'line',
+      borderColor: '#4ECBA0',
+      backgroundColor: 'rgba(78,203,160,0.06)',
+      borderWidth: 2,
+      pointRadius: 0,
+      fill: false,
+      tension: 0.35,
+      yAxisID: 'y2',
+    });
+    scalesConf.y2 = {
+      position: 'right',
+      grid: { display: false },
+      ticks: { color: '#4ECBA0', callback: v => fmtChars(v) },
+    };
+  }
+
+  const ctx = document.getElementById('chart-detail').getContext('2d');
+  charts['detail'] = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: shownLabels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: {
+          display: hasSpeed,
+          labels: { color:'#9090A8', boxWidth:12, usePointStyle:true }
+        },
+        tooltip: {
+          callbacks: {
+            label: c => c.dataset.label === 'Characters'
+              ? `${fmtChars(c.raw)} chars`
+              : `${fmtChars(Math.round(c.raw))}/h`
+          }
+        }
+      },
+      scales: scalesConf,
+    }
+  });
+}
+
+function renderDetailSessions(daily, isGSM) {
+  const el = document.getElementById('detail-session-list');
+  el.innerHTML = '';
+
+  if (!daily.length) {
+    el.innerHTML = '<p class="empty-msg">No session data.</p>';
+    return;
+  }
+
+  // Show newest first
+  const reversed = [...daily].reverse();
+
+  reversed.forEach(s => {
+    const row = document.createElement('div');
+    row.className = 'detail-session-row';
+
+    const speedHTML = isGSM
+      ? `<span class="dsr-speed">${s.speed > 0 ? fmtChars(Math.round(s.speed)) + '/h' : '—'}</span>`
+      : '';
+    const cardsHTML = (isGSM && s.cards > 0)
+      ? `<span class="dsr-cards">${s.cards} cards</span>`
+      : (isGSM ? `<span class="dsr-cards" style="color:var(--muted)">0 cards</span>` : '');
+
+    row.innerHTML = `
+      <span class="dsr-date">${s.date}</span>
+      <span class="dsr-time">${fmtTime(s.seconds)}</span>
+      <span class="dsr-chars">${s.chars > 0 ? fmtChars(s.chars) + ' chars' : ''}</span>
+      ${speedHTML}
+      ${cardsHTML}
+    `;
+    el.appendChild(row);
+  });
+}
+
+// ── Settings ───────────────────────────────────────────────────────────────
+async function loadSettings() {
+  const s = await window.pywebview.api.get_all_settings();
+  appSettings = s;
+  document.getElementById('sessions-dir').textContent  = await window.pywebview.api.get_sessions_dir();
+  document.getElementById('gsm-url').value             = s.gsm_url || 'http://localhost:7275/api/stats';
+  document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
+}
+
+async function saveSettings() {
+  const rollover = parseInt(document.getElementById('rollover-hour').value) || 0;
+  const gsm_url  = document.getElementById('gsm-url').value.trim();
+  appSettings = { ...appSettings, rollover_hour: rollover, gsm_url };
+  await window.pywebview.api.save_settings({ rollover_hour: rollover, gsm_url });
+  setStatus('Settings saved');
+}
+
+async function doTestGSM() {
+  const url = document.getElementById('gsm-url').value.trim();
+  const fb  = document.getElementById('gsm-status');
+  fb.className=''; fb.textContent='Testing…';
+  const r = await window.pywebview.api.test_gsm(url);
+  fb.className = r.ok ? 'feedback ok' : 'feedback err';
+  fb.textContent = r.ok ? '✓ Connected' : `✗ ${r.error || 'Could not connect — is GSM running?'}`;
+}
+
+// ── Data changed (file watcher) ────────────────────────────────────────────
+function onDataChanged() {
+  statsCache = {};
+  setStatus('New session ingested');
+  if      (currentPage === 'dashboard') loadDashboard();
+  else if (currentPage === 'history')   loadHistory();
+  else if (currentPage === 'stats')     loadStats(currentRange);
+  else if (currentPage === 'goals')     loadGoals();
+  else if (currentPage === 'media')     {
+    // If viewing a detail, refresh it; otherwise refresh the grid
+    if (currentDetailTitle) {
+      openMediaDetail(currentDetailTitle);
+    } else {
+      loadMedia();
+    }
+  }
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+async function init() {
+  appSettings = await window.pywebview.api.get_all_settings();
+  const urlInput = document.getElementById('gsm-url');
+  if (urlInput && appSettings.gsm_url) urlInput.value = appSettings.gsm_url;
+
+  flatpickr('#log-date', {
+    dateFormat:    'Y-m-d',
+    defaultDate:   today(),
+    disableMobile: true,
+  });
+  flatpickr('#goal-deadline', {
+    dateFormat:    'Y-m-d',
+    minDate:       'today',
+    disableMobile: true,
+  });
+
+  await buildLogPage();
+  setStatus('Ready');
+  loadPage('dashboard');
+}
+
+if (window.pywebview) {
+  init();
+} else {
+  window.addEventListener('pywebviewready', init);
+}
+</script>
+</body>
+</html>
