@@ -511,6 +511,7 @@ class Api:
         return {
             "rollover_hour": int(get_setting("rollover_hour", "0")),
             "gsm_url":       get_setting("gsm_url", imports.GSM_API),
+            "theme":         get_setting("theme", "dark"),
         }
 
     def save_settings(self, data):

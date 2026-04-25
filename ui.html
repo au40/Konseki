@@ -399,6 +399,31 @@
 
       <div class="settings-section">
         <div class="card">
+          <h3>Appearance</h3>
+          <p class="muted" style="margin-bottom:4px">Color theme for the app.</p>
+          <div class="theme-options">
+            <button class="theme-opt" data-theme="dark" onclick="setTheme('dark')">
+              <div class="theme-swatch">
+                <span class="theme-swatch-dot" style="background:#1C1C28"></span>
+                <span class="theme-swatch-dot" style="background:#5B8CFF"></span>
+                <span class="theme-swatch-dot" style="background:#4ECBA0"></span>
+              </div>
+              Dark
+            </button>
+            <button class="theme-opt" data-theme="mint" onclick="setTheme('mint')">
+              <div class="theme-swatch">
+                <span class="theme-swatch-dot" style="background:#EEF8F5"></span>
+                <span class="theme-swatch-dot" style="background:#2EAA92"></span>
+                <span class="theme-swatch-dot" style="background:#9A82D4"></span>
+              </div>
+              Light
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
           <h3>Sessions folder</h3>
           <p id="sessions-dir" style="color:var(--accent);font-size:12px;margin-bottom:8px">…</p>
           <p class="muted">Drop any *.json session file here and it will be ingested automatically.</p>

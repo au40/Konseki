@@ -12,7 +12,7 @@ let currentSeriesId = null;
 let draggedItem   = null; // {type:'title'|'series', id:string|number}
 let heatmapYear     = new Date().getFullYear();
 let dashHeatmapYear = new Date().getFullYear();
-let appSettings   = { rollover_hour: 0, gsm_url: 'http://localhost:7275/api/stats' };
+let appSettings   = { rollover_hour: 0, gsm_url: 'http://localhost:7275/api/stats', theme: 'dark' };
 let currentDetailTitle = null;
 
 const BUILTIN_TYPES = ['Reading','Listening','Speaking','Vocabulary','Other'];
@@ -25,7 +25,7 @@ const CAT_PALETTE = [
   '#5BE8C4','#FFD15B','#FF6B6B','#6B6B8A','#38BDF8'
 ];
 const PALETTE = ['#5B8CFF','#4ECBA0','#FF9F5B','#C78BFF','#FF7BAC','#5BE8C4','#FFD15B','#6B6B8A'];
-const HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
+let HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
 
 Chart.defaults.color       = '#9090A8';
 Chart.defaults.borderColor = '#2E2E48';
@@ -1376,6 +1376,31 @@ async function commitTitleEdit(newDisplay) {
   }
 }
 
+// ── Theme ──────────────────────────────────────────────────────────────────
+function applyTheme(theme) {
+  if (theme === 'mint') {
+    document.documentElement.setAttribute('data-theme', 'mint');
+    HEATMAP_COLORS = ['#E8F5F0','#A8DDD2','#62C4B4','#2EAA92','#1A7060'];
+    Chart.defaults.color       = '#8AADA9';
+    Chart.defaults.borderColor = '#C2E4DC';
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+    HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
+    Chart.defaults.color       = '#9090A8';
+    Chart.defaults.borderColor = '#2E2E48';
+  }
+  // Update active-page charts to reflect new theme colors
+  loadPage(currentPage);
+}
+
+function setTheme(theme) {
+  appSettings = { ...appSettings, theme };
+  window.pywebview.api.save_settings({ theme });
+  applyTheme(theme);
+  document.querySelectorAll('.theme-opt').forEach(el =>
+    el.classList.toggle('selected', el.dataset.theme === theme));
+}
+
 // ── Settings ───────────────────────────────────────────────────────────────
 async function loadSettings() {
   const s = await window.pywebview.api.get_all_settings();
@@ -1383,6 +1408,9 @@ async function loadSettings() {
   document.getElementById('sessions-dir').textContent  = await window.pywebview.api.get_sessions_dir();
   document.getElementById('gsm-url').value             = s.gsm_url || 'http://localhost:7275/api/stats';
   document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
+  const theme = s.theme || 'dark';
+  document.querySelectorAll('.theme-opt').forEach(el =>
+    el.classList.toggle('selected', el.dataset.theme === theme));
 }
 
 /* ── GSM aggregate import JS — INACTIVE ──────────────────────────────────────
@@ -1430,6 +1458,7 @@ function onDataChanged() {
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   appSettings = await window.pywebview.api.get_all_settings();
+  applyTheme(appSettings.theme || 'dark');
   const urlInput = document.getElementById('gsm-url');
   if (urlInput && appSettings.gsm_url) urlInput.value = appSettings.gsm_url;
 
