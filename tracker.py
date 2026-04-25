@@ -93,31 +93,6 @@ def init_db():
             created_at    TEXT NOT NULL
         )
     """)
-    # Migrate old goals schema (had 'period' instead of 'deadline')
-    goal_cols = [r[1] for r in con.execute("PRAGMA table_info(goals)").fetchall()]
-    if goal_cols and 'deadline' not in goal_cols:
-        con.execute("DROP TABLE goals")
-        con.execute("""
-            CREATE TABLE goals (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                label         TEXT NOT NULL,
-                metric        TEXT NOT NULL,
-                target_value  REAL NOT NULL,
-                deadline      TEXT NOT NULL,
-                chunk_period  TEXT NOT NULL DEFAULT 'daily',
-                activity_type TEXT,
-                start_date    TEXT NOT NULL,
-                created_at    TEXT NOT NULL
-            )
-        """)
-
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS custom_categories (
-            name       TEXT PRIMARY KEY,
-            color      TEXT DEFAULT '#6B6B8A',
-            created_at TEXT NOT NULL
-        )
-    """)
 
     # GSM game metadata table — stores cover images, descriptions, genres etc.
     con.execute("""
