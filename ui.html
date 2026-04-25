@@ -801,6 +801,28 @@ span.flatpickr-weekday { color: var(--dim) !important; background: #2a2a42 !impo
           <p class="muted">Drop any *.json session file here and it will be ingested automatically.</p>
         </div>
       </div>
+
+      <!-- ── GSM aggregate import — INACTIVE ────────────────────────────────
+           Commented out alongside gsm_aggregate_import() in tracker.py.
+           Problem: totalCharsPerGame labels don't match currentGameStats.game_name.
+           Restore both this block and the tracker.py commented section together.
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Full GSM history import</h3>
+          <p class="muted" style="margin-bottom:6px;line-height:1.65">
+            Imports all-time character counts and reading time for every game
+            tracked in GSM. Chars count in Stats and Media. Time is stored but
+            only surfaces in the Media tab.
+          </p>
+          <div id="gsm-import-status" style="font-size:11px;color:var(--dim);margin-bottom:12px;min-height:16px"></div>
+          <button class="btn btn-outline" id="gsm-import-btn" onclick="doImportGSMHistory()">
+            ↓ Import full GSM history
+          </button>
+          <div class="feedback" id="gsm-import-feedback" style="margin-top:10px"></div>
+        </div>
+      </div>
+      ──────────────────────────────────────────────────────────────────── -->
     </div>
 
   </main>
@@ -845,6 +867,9 @@ function fmtTime(s) {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 function fmtChars(n) { return n >= 10000 ? `${(n/1000).toFixed(1)}k` : n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
 function srcLabel(s) {
   return {gsm:'Game',anki:'Anki',ttu:'ttsureader',manual:'Manual',csv:'Import'}[s?.toLowerCase()] || (s||'').toUpperCase();
 }
@@ -1641,7 +1666,7 @@ function makeMediaCard(m) {
   // Always-visible footer strip
   innerHTML += `
     <div class="media-card-footer">
-      <div class="media-card-title">${m.title || m.activity_type || 'Untitled'}</div>
+      <div class="media-card-title">${escHtml(m.display_title || m.title || m.activity_type || 'Untitled')}</div>
       <div class="media-card-meta">
         <span class="media-card-time">${fmtTime(m.total_secs)}</span>
         <span class="media-card-source">${srcLabel(m.source)}</span>
@@ -1675,7 +1700,7 @@ function renderMediaDetail(d) {
   const color  = acolor(d.activity_type);
 
   // Breadcrumb
-  document.getElementById('detail-breadcrumb').textContent = `Media  ›  ${d.title}`;
+  document.getElementById('detail-breadcrumb').textContent = `Media  ›  ${d.display_title || d.title}`;
 
   // Cover image or placeholder
   const coverEl = document.getElementById('detail-cover');
@@ -1694,8 +1719,8 @@ function renderMediaDetail(d) {
     coverEl.style.border = `1px solid ${color}33`;
   }
 
-  // Title
-  document.getElementById('detail-title').textContent = d.title;
+  // Title + rename button
+  renderDetailTitle(d.display_title || d.title);
 
   // Genres or activity type badge
   const genresEl = document.getElementById('detail-genres');
@@ -1888,6 +1913,54 @@ function renderDetailSessions(daily, isGSM) {
   });
 }
 
+// ── Title alias editing ────────────────────────────────────────────────────
+let _titleEditPrev = '';
+
+function renderDetailTitle(display) {
+  const el = document.getElementById('detail-title');
+  el.innerHTML =
+    `<span id="detail-title-text">${escHtml(display)}</span>` +
+    `<button class="btn btn-xs btn-outline" onclick="startEditTitle()" ` +
+    `style="margin-left:10px;font-size:11px;vertical-align:middle;flex-shrink:0;opacity:0.7">✎</button>`;
+}
+
+function startEditTitle() {
+  _titleEditPrev = document.getElementById('detail-title-text')?.textContent || '';
+  const el = document.getElementById('detail-title');
+  el.innerHTML =
+    `<input id="title-edit-input" type="text" value="${escHtml(_titleEditPrev)}"
+            style="font-size:18px;font-weight:700;color:var(--text);background:#141422;
+                   border:1px solid var(--accent);border-radius:8px;padding:4px 10px;
+                   outline:none;flex:1;min-width:0"
+            onkeydown="handleTitleEditKey(event)">` +
+    `<span style="font-size:10px;color:var(--dim);margin-left:8px;white-space:nowrap;flex-shrink:0">↵ save · Esc cancel</span>`;
+  el.style.display = 'flex';
+  el.style.alignItems = 'center';
+  const input = document.getElementById('title-edit-input');
+  input.focus(); input.select();
+}
+
+function handleTitleEditKey(e) {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    commitTitleEdit(document.getElementById('title-edit-input').value.trim());
+  } else if (e.key === 'Escape') {
+    renderDetailTitle(_titleEditPrev);
+  }
+}
+
+async function commitTitleEdit(newDisplay) {
+  const r = await window.pywebview.api.set_title_alias(currentDetailTitle, newDisplay);
+  const effective = (r.ok && newDisplay) ? newDisplay : (r.ok ? currentDetailTitle : _titleEditPrev);
+  renderDetailTitle(effective);
+  if (r.ok) {
+    // Update breadcrumb and refresh media grid
+    document.getElementById('detail-breadcrumb').textContent = `Media  ›  ${effective}`;
+    mediaAllData = await window.pywebview.api.get_media();
+    renderMediaGrid();
+  }
+}
+
 // ── Settings ───────────────────────────────────────────────────────────────
 async function loadSettings() {
   const s = await window.pywebview.api.get_all_settings();
@@ -1896,6 +1969,13 @@ async function loadSettings() {
   document.getElementById('gsm-url').value             = s.gsm_url || 'http://localhost:7275/api/stats';
   document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
 }
+
+/* ── GSM aggregate import JS — INACTIVE ──────────────────────────────────────
+   Restore alongside gsm_aggregate_import() in tracker.py and the HTML card.
+
+async function loadGSMImportStatus() { ... }
+async function doImportGSMHistory()  { ... }
+── ────────────────────────────────────────────────────────────────────────── */
 
 async function saveSettings() {
   const rollover = parseInt(document.getElementById('rollover-hour').value) || 0;

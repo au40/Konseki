@@ -61,6 +61,7 @@ def init_db():
         ("sentences_read", "INTEGER DEFAULT 0"),
         ("cards_mined",    "INTEGER DEFAULT 0"),
         ("game_id",        "TEXT"),
+        ("time_excluded",  "INTEGER DEFAULT 0"),
     ]:
         if col_name not in cols:
             con.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
@@ -128,6 +129,14 @@ def init_db():
             genres       TEXT,
             first_date   TEXT,
             last_updated TEXT NOT NULL
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS title_aliases (
+            original_title TEXT PRIMARY KEY,
+            display_title  TEXT NOT NULL,
+            updated_at     TEXT NOT NULL
         )
     """)
 
@@ -265,17 +274,26 @@ def _q1(sql, *args):
     con.close()
     return r
 
+def _get_aliases():
+    """Return {original_title: display_title} for all user-set aliases."""
+    if not Path(DB_PATH).exists():
+        return {}
+    rows = _q("SELECT original_title, display_title FROM title_aliases")
+    return {r[0]: r[1] for r in rows}
+
 def get_today_stats():
     return _q("""
         SELECT id,source,title,activity_type,chars_read,lines_read,time_seconds
-        FROM sessions WHERE session_date=? ORDER BY ingested_at DESC
+        FROM sessions WHERE session_date=? AND (time_excluded IS NULL OR time_excluded=0)
+        ORDER BY ingested_at DESC
     """, get_today())
 
 def get_weekly_summary():
     days = [(get_today_date() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
     con  = sqlite3.connect(DB_PATH)
     out  = [(d,) + con.execute(
-        "SELECT COALESCE(SUM(chars_read),0),COALESCE(SUM(time_seconds),0) "
+        "SELECT COALESCE(SUM(chars_read),0), "
+        "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0) "
         "FROM sessions WHERE session_date=?", (d,)).fetchone()
         for d in days]
     con.close()
@@ -284,22 +302,24 @@ def get_weekly_summary():
 def get_all_time_totals():
     return _q1("""
         SELECT COALESCE(SUM(chars_read),0), COALESCE(SUM(lines_read),0),
-               COALESCE(SUM(time_seconds),0), COUNT(DISTINCT session_date)
+               COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0),
+               COUNT(DISTINCT CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN session_date END)
         FROM sessions
     """)
 
 def get_range_totals(n):
+    _t = "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0)"
+    _d = "COUNT(DISTINCT CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN session_date END)"
     if n is None:
-        return _q1("SELECT COALESCE(SUM(chars_read),0),COALESCE(SUM(time_seconds),0),"
-                   "COUNT(DISTINCT session_date) FROM sessions")
+        return _q1(f"SELECT COALESCE(SUM(chars_read),0),{_t},{_d} FROM sessions")
     since = (get_today_date() - timedelta(days=n - 1)).isoformat()
-    return _q1("SELECT COALESCE(SUM(chars_read),0),COALESCE(SUM(time_seconds),0),"
-               "COUNT(DISTINCT session_date) FROM sessions WHERE session_date>=?", since)
+    return _q1(f"SELECT COALESCE(SUM(chars_read),0),{_t},{_d} FROM sessions WHERE session_date>=?", since)
 
 def get_recent_sessions(limit=30):
     return _q("""
         SELECT id,session_date,source,title,activity_type,chars_read,lines_read,time_seconds
-        FROM sessions ORDER BY session_date DESC,ingested_at DESC LIMIT ?
+        FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0)
+        ORDER BY session_date DESC,ingested_at DESC LIMIT ?
     """, limit)
 
 def get_daily_time_series(days):
@@ -314,7 +334,7 @@ def get_daily_time_series(days):
         total_days = days
     sums = dict(_q(
         "SELECT session_date,COALESCE(SUM(time_seconds),0) "
-        "FROM sessions WHERE session_date>=? GROUP BY session_date",
+        "FROM sessions WHERE session_date>=? AND (time_excluded IS NULL OR time_excluded=0) GROUP BY session_date",
         earliest.isoformat()
     ))
     return [(( earliest + timedelta(days=i)).isoformat(),
@@ -324,13 +344,15 @@ def get_daily_time_series(days):
 def get_activity_breakdown():
     return [(r[0], r[1]) for r in _q("""
         SELECT COALESCE(activity_type,'Other'), COALESCE(SUM(time_seconds),0)
-        FROM sessions GROUP BY COALESCE(activity_type,'Other')
+        FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0)
+        GROUP BY COALESCE(activity_type,'Other')
         ORDER BY SUM(time_seconds) DESC
     """) if r[1] > 0]
 
 def get_streak():
     rows = _q("SELECT DISTINCT session_date FROM sessions "
-              "WHERE time_seconds>0 ORDER BY session_date DESC")
+              "WHERE time_seconds>0 AND (time_excluded IS NULL OR time_excluded=0) "
+              "ORDER BY session_date DESC")
     if not rows:
         return 0, 0
     sd  = sorted({datetime.strptime(r[0], "%Y-%m-%d").date() for r in rows})
@@ -351,7 +373,8 @@ def get_streak():
     return cur, lng
 
 def get_top_titles(limit=8):
-    return [(r[0], r[1]) for r in _q("""
+    aliases = _get_aliases()
+    return [(aliases.get(r[0], r[0]), r[1]) for r in _q("""
         SELECT COALESCE(NULLIF(title,''),activity_type,'Untitled') t,
                COALESCE(SUM(time_seconds),0)/3600.0
         FROM sessions GROUP BY t ORDER BY SUM(time_seconds) DESC LIMIT ?
@@ -362,7 +385,7 @@ def get_heatmap_data(days=371):
     earliest = (get_today_date() - timedelta(days=days - 1)).isoformat()
     rows = _q(
         "SELECT session_date, COALESCE(SUM(time_seconds),0) "
-        "FROM sessions WHERE session_date>=? GROUP BY session_date",
+        "FROM sessions WHERE session_date>=? AND (time_excluded IS NULL OR time_excluded=0) GROUP BY session_date",
         earliest
     )
     return {r[0]: r[1] for r in rows}
@@ -386,9 +409,11 @@ def get_media_stats():
         GROUP BY s.title
         ORDER BY total_secs DESC
     """)
+    aliases = _get_aliases()
     return [
         {
             "title":         r[0],
+            "display_title": aliases.get(r[0], r[0]),
             "source":        r[1],
             "activity_type": r[2],
             "total_secs":    r[3],
@@ -405,11 +430,13 @@ def get_media_stats():
 def get_extra_stats():
     best_day = _q1(
         "SELECT session_date, SUM(time_seconds) as t "
-        "FROM sessions GROUP BY session_date ORDER BY t DESC LIMIT 1"
+        "FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0) "
+        "GROUP BY session_date ORDER BY t DESC LIMIT 1"
     )
     reading = _q1(
         "SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
-        "WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0"
+        "WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0 "
+        "AND (time_excluded IS NULL OR time_excluded=0)"
     )
     chars_per_hour = 0
     if reading and reading[1] and reading[1] > 0:
@@ -429,7 +456,9 @@ def get_extra_stats():
         ) or (0,))[0] or 0
         consistency = round(active_days / total_tracked_days * 100, 1) if total_tracked_days > 0 else 0
 
-    longest_session = (_q1("SELECT MAX(time_seconds) FROM sessions") or (0,))[0] or 0
+    longest_session = (_q1(
+        "SELECT MAX(time_seconds) FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0)"
+    ) or (0,))[0] or 0
     _, longest_streak = get_streak()
 
     total_chars = (_q1("SELECT COALESCE(SUM(chars_read),0) FROM sessions") or (0,))[0]
@@ -439,6 +468,7 @@ def get_extra_stats():
     if first:
         rows = _q(
             "SELECT session_date, SUM(time_seconds) FROM sessions "
+            "WHERE (time_excluded IS NULL OR time_excluded=0) "
             "GROUP BY session_date ORDER BY session_date"
         )
         week_totals = {}
@@ -666,12 +696,143 @@ def pull_gsm_now(url=None):
         con.close()
 
         ingest_session_file(str(out))
+
+        # Backfill historical dates for the current game (time_excluded=1)
+        speed_heatmap = data.get("readingSpeedHeatmapData") or {}
+        if game_id and cur.get("daily_activity"):
+            con_hist = sqlite3.connect(DB_PATH)
+            n = _upsert_gsm_daily_history(
+                con_hist, game_name, game_id,
+                cur["daily_activity"], speed_heatmap
+            )
+            con_hist.commit()
+            con_hist.close()
+            if n:
+                print(f"[gsm] Backfilled {n} historical session(s) for {game_name}")
+
         return s
     except requests.exceptions.ConnectionError:
         return None
     except Exception as e:
         print(f"[gsm] {e}")
         return None
+
+def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_heatmap):
+    """
+    Backfill per-day historical sessions for the current game directly into
+    the DB — no JSON files, no file-watcher pipeline.
+    time_excluded=1: visible in Media tab only, not Stats/heatmap/streak.
+    Skips today and any date already present for this game.
+    """
+    if not daily_activity:
+        return 0
+    today_str = get_today()
+    existing  = {
+        r[0] for r in con.execute(
+            "SELECT DISTINCT session_date FROM sessions WHERE title=? AND source='gsm'",
+            (game_name,)
+        ).fetchall()
+    }
+    inserted = 0
+    for date_str, chars in daily_activity.items():
+        if date_str == today_str or date_str in existing or not chars or chars <= 0:
+            continue
+        year  = date_str[:4]
+        speed = float((speed_heatmap.get(year) or {}).get(date_str, 0))
+        con.execute("""
+            INSERT INTO sessions
+              (source, title, activity_type, session_date, chars_read, lines_read,
+               time_seconds, reading_speed, sentences_read, cards_mined, game_id,
+               raw_file, ingested_at, time_excluded)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
+            "gsm", game_name, "Reading", date_str,
+            int(chars), 0, (chars / speed * 3600) if speed > 0 else 0.0,
+            speed, 0, 0, game_id, None, datetime.now().isoformat(),
+            1,  # time_excluded: visible in Media tab only
+        ))
+        inserted += 1
+    return inserted
+
+
+# ── GSM aggregate import — INACTIVE ──────────────────────────────────────────
+#
+# Problem: totalCharsPerGame uses different title strings than
+# currentGameStats.game_name (e.g. "ひぐらしのなく頃に" vs "Higurashi When They
+# Cry - Ch.1 Onikakushi"). There is no game_id or other shared key to
+# reliably match them, so deduplication against existing per-day sessions is
+# impossible without user intervention.
+#
+# Current approach: per-day history is populated automatically by
+# _upsert_gsm_daily_history on each pull. Uncomment everything below if a
+# reliable title-matching solution is found or the GSM API exposes a shared
+# key across both endpoints.
+#
+# def gsm_aggregate_import(url=None):
+#     target = url or GSM_API
+#     try:
+#         r = requests.get(target, timeout=15)
+#         r.raise_for_status()
+#         data = r.json()
+#     except requests.exceptions.ConnectionError:
+#         return None, "Could not connect to GSM"
+#     except Exception as e:
+#         return None, str(e)
+#
+#     chars_per_game = data.get("totalCharsPerGame") or {}
+#     game_labels    = chars_per_game.get("labels", [])
+#     game_totals    = chars_per_game.get("totals", [])
+#     time_per_game  = data.get("readingTimePerGame") or {}
+#     time_by_game   = dict(zip(time_per_game.get("labels", []), time_per_game.get("totals", [])))
+#     speed_per_game = data.get("readingSpeedPerGame") or {}
+#     speed_by_game  = dict(zip(speed_per_game.get("labels", []), speed_per_game.get("totals", [])))
+#     cur = data.get("currentGameStats") or {}
+#     if cur.get("game_id"):
+#         _upsert_gsm_game(cur)
+#     con = sqlite3.connect(DB_PATH)
+#     today_str = get_today()
+#     imported  = 0
+#     for game_name, api_total_chars in zip(game_labels, game_totals):
+#         if not api_total_chars or api_total_chars <= 0:
+#             continue
+#         has_real = con.execute(
+#             "SELECT 1 FROM sessions WHERE title=? AND source='gsm' LIMIT 1", (game_name,)
+#         ).fetchone()
+#         if has_real:
+#             continue
+#         con.execute("DELETE FROM sessions WHERE source='gsm_import' AND title=?", (game_name,))
+#         game_id = cur.get("game_id") if game_name == cur.get("game_name") else None
+#         con.execute("""
+#             INSERT INTO sessions
+#               (source, title, activity_type, session_date, chars_read, lines_read,
+#                time_seconds, reading_speed, sentences_read, cards_mined, game_id,
+#                raw_file, ingested_at, time_excluded)
+#             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+#         """, (
+#             "gsm_import", game_name, "Reading", today_str,
+#             int(api_total_chars), 0,
+#             float(time_by_game.get(game_name, 0)) * 3600,
+#             float(speed_by_game.get(game_name, 0)),
+#             0, 0, game_id, None, datetime.now().isoformat(), 1,
+#         ))
+#         imported += 1
+#     con.commit()
+#     con.close()
+#     set_setting("gsm_last_import", datetime.now().isoformat())
+#     set_setting("gsm_last_import_count", str(imported))
+#     return {"imported": imported}, None
+#
+# class Api — add back inside Api class to restore:
+#     def import_gsm_history(self, url=None):
+#         result, error = gsm_aggregate_import(url or get_setting("gsm_url", GSM_API))
+#         if error: return {"ok": False, "error": error}
+#         return {"ok": True, **result}
+#     def get_gsm_import_status(self):
+#         return {"last_import": get_setting("gsm_last_import", ""),
+#                 "last_count": int(get_setting("gsm_last_import_count", "0") or "0")}
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
 
 # ── File watcher ──────────────────────────────────────────────────────────────
 class SessionHandler(FileSystemEventHandler):
@@ -702,10 +863,11 @@ class Api:
         today  = get_today_stats()
         weekly = get_weekly_summary()
         totals = get_all_time_totals()
+        aliases = _get_aliases()
         return {
             "today": [
-                {"id": r[0], "source": r[1], "title": r[2], "activity_type": r[3],
-                 "chars": r[4], "lines": r[5], "seconds": r[6]}
+                {"id": r[0], "source": r[1], "title": aliases.get(r[2], r[2]),
+                 "activity_type": r[3], "chars": r[4], "lines": r[5], "seconds": r[6]}
                 for r in today
             ],
             "weekly": [
@@ -720,9 +882,10 @@ class Api:
 
     # ── History ───────────────────────────────────────────────────────────────
     def get_history(self):
+        aliases = _get_aliases()
         return [
-            {"id": r[0], "date": r[1], "source": r[2], "title": r[3], "activity_type": r[4],
-             "chars": r[5], "lines": r[6], "seconds": r[7]}
+            {"id": r[0], "date": r[1], "source": r[2], "title": aliases.get(r[3], r[3]),
+             "activity_type": r[4], "chars": r[5], "lines": r[6], "seconds": r[7]}
             for r in get_recent_sessions(30)
         ]
 
@@ -762,6 +925,7 @@ class Api:
             rows  = _q(
                 "SELECT session_date, COALESCE(SUM(time_seconds),0) "
                 "FROM sessions WHERE session_date>=? AND session_date<=? "
+                "AND (time_excluded IS NULL OR time_excluded=0) "
                 "GROUP BY session_date",
                 start, end
             )
@@ -822,6 +986,7 @@ class Api:
 
         return {
             "title":         title,
+            "display_title": _get_aliases().get(title, title),
             "source":        source,
             "activity_type": sessions[0][3],
             "total_chars":   total_chars,
@@ -928,6 +1093,25 @@ class Api:
         try:
             r = requests.get(url, timeout=4)
             r.raise_for_status()
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Title aliases ──────────────────────────────────────────────────────────
+    def set_title_alias(self, original, display):
+        """Set or clear a display alias for a title. Pass display='' to clear."""
+        try:
+            display = (display or "").strip()
+            con = sqlite3.connect(DB_PATH)
+            if not display or display == original:
+                con.execute("DELETE FROM title_aliases WHERE original_title=?", (original,))
+            else:
+                con.execute("""
+                    INSERT OR REPLACE INTO title_aliases (original_title, display_title, updated_at)
+                    VALUES (?,?,?)
+                """, (original, display, datetime.now().isoformat()))
+            con.commit()
+            con.close()
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
