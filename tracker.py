@@ -11,6 +11,9 @@ import csv
 import os
 import threading
 import requests
+import zipfile
+import io
+import base64
 from datetime import datetime, date, timedelta
 from pathlib import Path
 from watchdog.observers import Observer
@@ -112,6 +115,32 @@ def init_db():
             original_title TEXT PRIMARY KEY,
             display_title  TEXT NOT NULL,
             updated_at     TEXT NOT NULL
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS book_covers (
+            title      TEXT PRIMARY KEY,
+            image_data TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS series (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS series_members (
+            series_id INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+            title     TEXT NOT NULL,
+            position  INTEGER NOT NULL DEFAULT 0,
+            added_at  TEXT NOT NULL,
+            PRIMARY KEY (series_id, title)
         )
     """)
 
@@ -377,9 +406,10 @@ def get_media_stats():
             COUNT(*)                         AS session_count,
             MAX(s.session_date)              AS last_date,
             MIN(s.session_date)              AS first_date,
-            MAX(g.image_data)                AS image_data
+            COALESCE(MAX(b.image_data), MAX(g.image_data)) AS image_data
         FROM sessions s
-        LEFT JOIN gsm_games g ON s.title = g.game_name
+        LEFT JOIN gsm_games   g ON s.title = g.game_name
+        LEFT JOIN book_covers b ON s.title = b.title
         WHERE s.title IS NOT NULL AND s.title != ''
         GROUP BY s.title
         ORDER BY total_secs DESC
@@ -400,6 +430,46 @@ def get_media_stats():
         }
         for r in rows
     ]
+
+def get_series_data():
+    series_rows = _q("SELECT id, name, created_at FROM series ORDER BY created_at DESC")
+    if not series_rows:
+        return []
+    aliases = _get_aliases()
+    result = []
+    for s_id, s_name, _ in series_rows:
+        members_rows = _q("""
+            SELECT sm.title, sm.position,
+                   COALESCE(b.image_data, g.image_data) AS image
+            FROM series_members sm
+            LEFT JOIN book_covers b ON sm.title = b.title
+            LEFT JOIN gsm_games  g ON sm.title = g.game_name
+            WHERE sm.series_id = ?
+            ORDER BY sm.position ASC, sm.added_at ASC
+        """, s_id)
+        if not members_rows:
+            continue
+        members = [
+            {"title": r[0], "display_title": aliases.get(r[0], r[0]), "image": r[2] or ""}
+            for r in members_rows
+        ]
+        titles = tuple(m["title"] for m in members)
+        ph = ",".join("?" * len(titles))
+        con = sqlite3.connect(DB_PATH)
+        stats = con.execute(
+            f"SELECT COALESCE(SUM(time_seconds),0), COALESCE(SUM(chars_read),0) "
+            f"FROM sessions WHERE title IN ({ph})", titles
+        ).fetchone()
+        con.close()
+        result.append({
+            "id":          s_id,
+            "name":        s_name or members[0]["display_title"],
+            "members":     members,
+            "total_secs":  stats[0] if stats else 0,
+            "total_chars": stats[1] if stats else 0,
+        })
+    return result
+
 
 # ── Extra stats ───────────────────────────────────────────────────────────────
 def get_extra_stats():
@@ -605,6 +675,74 @@ def _upsert_gsm_game(cur_stats):
     ))
     con.commit()
     con.close()
+
+
+def import_ttsu_zip_data(zip_bytes):
+    """Parse a ッツ Reader export zip and insert sessions. Returns {imported, skipped, titles}."""
+    imported = 0
+    skipped  = 0
+    titles_seen = set()
+
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile as e:
+        raise ValueError(f"Not a valid zip file: {e}")
+
+    with zf:
+        import posixpath
+        stat_files = [
+            n for n in zf.namelist()
+            if posixpath.basename(n).startswith('statistics_') and n.endswith('.json')
+        ]
+        for stat_path in stat_files:
+            try:
+                entries = json.loads(zf.read(stat_path).decode('utf-8'))
+            except Exception:
+                continue
+            if not isinstance(entries, list):
+                continue
+
+            for entry in entries:
+                date_key = (entry.get('dateKey') or '').strip()
+                if not date_key:
+                    continue
+
+                title = (entry.get('title') or '').strip()
+                if not title:
+                    title = stat_path.split('/')[0]
+
+                chars     = int(entry.get('charactersRead', 0) or 0)
+                time_secs = float(entry.get('readingTime', 0) or 0)
+                if chars == 0 and time_secs == 0:
+                    skipped += 1
+                    continue
+
+                speed = float(entry.get('lastReadingSpeed', 0) or 0) or \
+                        float(entry.get('maxReadingSpeed',  0) or 0)
+
+                con = sqlite3.connect(DB_PATH)
+                exists = con.execute(
+                    "SELECT 1 FROM sessions WHERE source='ttsureader' AND title=? AND session_date=?",
+                    (title, date_key)
+                ).fetchone()
+                if exists:
+                    skipped += 1
+                    con.close()
+                    continue
+
+                con.execute("""
+                    INSERT INTO sessions
+                      (source, title, activity_type, session_date,
+                       chars_read, time_seconds, reading_speed, ingested_at, time_excluded)
+                    VALUES (?,?,?,?,?,?,?,?,0)
+                """, ('ttsureader', title, 'Reading', date_key,
+                      chars, time_secs, speed, datetime.now().isoformat()))
+                con.commit()
+                con.close()
+                imported += 1
+                titles_seen.add(title)
+
+    return {"imported": imported, "skipped": skipped, "titles": sorted(titles_seen)}
 
 
 def pull_gsm_now(url=None):
@@ -941,6 +1079,14 @@ class Api:
                     "first_date": gm[4] or "",
                 }
 
+        # Manual cover overrides any auto-fetched image
+        book_cover = _q1("SELECT image_data FROM book_covers WHERE title=?", title)
+        if book_cover and book_cover[0]:
+            if game_meta:
+                game_meta["image"] = book_cover[0]
+            else:
+                game_meta = {"game_id": None, "desc": "", "image": book_cover[0], "genres": [], "first_date": ""}
+
         total_chars = sum(s[4] for s in sessions)
         total_secs  = sum(s[6] for s in sessions)
         speeds      = [s[7] for s in sessions if s[7] and s[7] > 0]
@@ -1038,7 +1184,7 @@ class Api:
     def open_csv_dialog(self):
         try:
             result = self._window.create_file_dialog(
-                webview.OPEN_DIALOG,
+                webview.FileDialog.OPEN,
                 allow_multiple=False,
                 file_types=('CSV Files (*.csv)', 'All files (*.*)')
             )
@@ -1050,6 +1196,39 @@ class Api:
     def do_import_csv(self, path):
         imp, skip = import_csv_file(path)
         return {"imported": imp, "skipped": skip}
+
+    # ── ッツ Reader ──────────────────────────────────────────────────────────────
+    def open_ttsu_zip_dialog(self):
+        try:
+            result = self._window.create_file_dialog(
+                webview.FileDialog.OPEN,
+                allow_multiple=False,
+                file_types=('Zip Files (*.zip)', 'All files (*.*)')
+            )
+            return result[0] if result else None
+        except Exception as e:
+            print(f"[dialog] {e}")
+            return None
+
+    def do_import_ttsu_zip(self, path):
+        try:
+            with open(path, 'rb') as f:
+                zip_bytes = f.read()
+            result = import_ttsu_zip_data(zip_bytes)
+            self._notify()
+            return {"ok": True, **result}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+
+    def do_import_ttsu_zip_b64(self, b64_str):
+        try:
+            zip_bytes = base64.b64decode(b64_str)
+            result = import_ttsu_zip_data(zip_bytes)
+            self._notify()
+            return {"ok": True, **result}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
     # ── GSM ───────────────────────────────────────────────────────────────────
     def pull_gsm(self, url=None):
@@ -1068,6 +1247,108 @@ class Api:
         try:
             r = requests.get(url, timeout=4)
             r.raise_for_status()
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Book covers ───────────────────────────────────────────────────────────
+    def set_book_cover(self, title, b64_str):
+        try:
+            raw = base64.b64decode(b64_str[:16])
+            if raw[:4] == b'\x89PNG':
+                mime = 'image/png'
+            elif raw[:6] in (b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1') or raw[:2] == b'\xff\xd8':
+                mime = 'image/jpeg'
+            elif raw[:6] in (b'GIF87a', b'GIF89a'):
+                mime = 'image/gif'
+            elif raw[:4] == b'RIFF' or raw[8:12] == b'WEBP':
+                mime = 'image/webp'
+            else:
+                mime = 'image/jpeg'
+            data_url = f"data:{mime};base64,{b64_str}"
+            con = sqlite3.connect(DB_PATH)
+            con.execute("""
+                INSERT OR REPLACE INTO book_covers (title, image_data, updated_at)
+                VALUES (?, ?, ?)
+            """, (title, data_url, datetime.now().isoformat()))
+            con.commit()
+            con.close()
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Series ────────────────────────────────────────────────────────────────
+    def get_series(self):
+        return get_series_data()
+
+    def create_series(self, title1, title2):
+        try:
+            con = sqlite3.connect(DB_PATH)
+            con.execute("PRAGMA foreign_keys = ON")
+            now = datetime.now().isoformat()
+            cur = con.execute(
+                "INSERT INTO series (name, created_at) VALUES (?, ?)", (None, now)
+            )
+            s_id = cur.lastrowid
+            con.execute(
+                "INSERT INTO series_members (series_id, title, position, added_at) VALUES (?,?,?,?)",
+                (s_id, title1, 0, now)
+            )
+            con.execute(
+                "INSERT INTO series_members (series_id, title, position, added_at) VALUES (?,?,?,?)",
+                (s_id, title2, 1, now)
+            )
+            con.commit()
+            con.close()
+            return {"ok": True, "series_id": s_id}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def add_to_series(self, series_id, title):
+        try:
+            con = sqlite3.connect(DB_PATH)
+            con.execute("PRAGMA foreign_keys = ON")
+            max_pos = con.execute(
+                "SELECT COALESCE(MAX(position),0) FROM series_members WHERE series_id=?",
+                (int(series_id),)
+            ).fetchone()[0]
+            con.execute(
+                "INSERT OR IGNORE INTO series_members (series_id, title, position, added_at) "
+                "VALUES (?,?,?,?)",
+                (int(series_id), title, max_pos + 1, datetime.now().isoformat())
+            )
+            con.commit()
+            con.close()
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def remove_from_series(self, series_id, title):
+        try:
+            con = sqlite3.connect(DB_PATH)
+            con.execute("PRAGMA foreign_keys = ON")
+            con.execute(
+                "DELETE FROM series_members WHERE series_id=? AND title=?",
+                (int(series_id), title)
+            )
+            remaining = con.execute(
+                "SELECT COUNT(*) FROM series_members WHERE series_id=?", (int(series_id),)
+            ).fetchone()[0]
+            if remaining < 2:
+                con.execute("DELETE FROM series_members WHERE series_id=?", (int(series_id),))
+                con.execute("DELETE FROM series WHERE id=?", (int(series_id),))
+            con.commit()
+            con.close()
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def rename_series(self, series_id, name):
+        try:
+            con = sqlite3.connect(DB_PATH)
+            con.execute("UPDATE series SET name=? WHERE id=?", (name.strip() or None, int(series_id)))
+            con.commit()
+            con.close()
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
