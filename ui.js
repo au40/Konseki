@@ -34,9 +34,10 @@ Chart.defaults.font.size   = 11;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function fmtTime(s) {
-  if (!s || s <= 0) return '0m';
+  if (!s || s <= 0) return '0 min';
+  if (s < 3600) return `${(s / 60).toFixed(1)} min`;
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 function fmtChars(n) { return n >= 10000 ? `${(n/1000).toFixed(1)}k` : n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
 function escHtml(s) {
@@ -392,7 +393,7 @@ async function doLogSession() {
   }
   const r = await window.pywebview.api.log_session(selectedAtype, Number(minutes), title, dt);
   if (r.ok) {
-    fb.className = 'feedback ok'; fb.textContent = `✓ Logged ${Math.round(minutes)}m of ${selectedAtype}`;
+    fb.className = 'feedback ok'; fb.textContent = `✓ Logged ${fmtTime(Number(minutes) * 60)} of ${selectedAtype}`;
     document.getElementById('log-minutes').value = '';
     document.getElementById('log-title').value   = '';
     document.getElementById('log-date')._flatpickr?.setDate(today(), false);

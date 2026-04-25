@@ -5,6 +5,8 @@ delegating to db.py (data layer) and imports.py (external integrations).
 """
 
 import base64
+import os
+import threading
 import time
 import webview
 import sqlite3
@@ -14,6 +16,13 @@ from datetime import datetime, date
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    _TRAY_AVAILABLE = True
+except ImportError:
+    _TRAY_AVAILABLE = False
 
 import db
 import imports
@@ -33,7 +42,16 @@ from db import (
 from imports import pull_gsm_now, import_ttsu_zip_data
 
 
-# ── File watcher ──────────────────────────────────────────────────────────────
+# ── Tray icon ─────────────────────────────────────────────────────────────────
+def _make_tray_image():
+    size = 64
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse([4, 4, 60, 60], fill="#9B9BC7")
+    return img
+
+
+# ── File watchers ─────────────────────────────────────────────────────────────
 class SessionHandler(FileSystemEventHandler):
     def __init__(self, cb):
         self.cb = cb
@@ -49,6 +67,35 @@ class SessionHandler(FileSystemEventHandler):
             time.sleep(0.3)
             if db.ingest_session_file(e.src_path):
                 self.cb()
+
+
+class GsmWalHandler(FileSystemEventHandler):
+    """Watches GSM's WAL file; triggers a GSM pull after writes settle."""
+
+    _WATCHED = {"gsm.db-wal", "gsm.db"}
+
+    def __init__(self, cb, debounce_secs=10):
+        self._cb = cb
+        self._debounce_secs = debounce_secs
+        self._timer = None
+        self._lock = threading.Lock()
+
+    def _schedule(self):
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+            t = threading.Timer(self._debounce_secs, self._cb)
+            t.daemon = True
+            t.start()
+            self._timer = t
+
+    def on_modified(self, e):
+        if not e.is_directory and os.path.basename(e.src_path) in self._WATCHED:
+            self._schedule()
+
+    def on_created(self, e):
+        if not e.is_directory and os.path.basename(e.src_path) in self._WATCHED:
+            self._schedule()
 
 
 # ── JS-callable API ───────────────────────────────────────────────────────────
@@ -489,7 +536,7 @@ def main():
     init_db()
     scan_existing_files()
 
-    api      = Api()
+    api       = Api()
     html_dir  = Path(__file__).parent
     html_path = html_dir / "ui.html"
 
@@ -504,16 +551,78 @@ def main():
     )
     api._window = win
 
+    # Sessions directory watcher (existing)
     handler  = SessionHandler(api._notify)
     observer = Observer()
     observer.schedule(handler, str(SESSIONS_DIR), recursive=False)
     observer.start()
+
+    # GSM WAL watcher — fires pull when GSM writes to its database
+    appdata     = os.getenv("APPDATA") or os.path.expanduser("~/.config")
+    gsm_dir     = os.path.join(appdata, "GameSentenceMiner")
+    gsm_observer = None
+    if os.path.isdir(gsm_dir):
+        def _on_gsm_change():
+            result = pull_gsm_now()
+            if result:
+                print(f"[gsm-watch] Auto-pulled: {result.get('chars_read', 0)} chars  "
+                      f"| {result.get('title', '')}")
+                api._notify()
+        gsm_observer = Observer()
+        gsm_observer.schedule(GsmWalHandler(_on_gsm_change), gsm_dir, recursive=False)
+        gsm_observer.start()
+        print(f"[gsm-watch] Watching {gsm_dir}")
+    else:
+        print(f"[gsm-watch] {gsm_dir} not found — watcher disabled")
+
+    # System tray (requires pystray + Pillow)
+    tray_icon = None
+    if _TRAY_AVAILABLE:
+        _state = {"quitting": False}
+
+        def _show(icon, item):
+            win.show()
+
+        def _pull_gsm(icon, item):
+            result = pull_gsm_now()
+            if result:
+                api._notify()
+
+        def _quit(icon, item):
+            _state["quitting"] = True
+            icon.stop()
+            win.destroy()
+
+        def _on_closing():
+            if _state["quitting"]:
+                return True  # allow the destroy from _quit to proceed
+            win.hide()
+            return False     # cancel user-initiated close; hide instead
+
+        tray_icon = pystray.Icon(
+            APP_NAME,
+            _make_tray_image(),
+            APP_NAME,
+            menu=pystray.Menu(
+                pystray.MenuItem("Open", _show, default=True),
+                pystray.MenuItem("Pull GSM Now", _pull_gsm),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Quit", _quit),
+            ),
+        )
+        tray_icon.run_detached()
+        win.events.closing += _on_closing
 
     try:
         webview.start()
     finally:
         observer.stop()
         observer.join()
+        if gsm_observer:
+            gsm_observer.stop()
+            gsm_observer.join()
+        if tray_icon:
+            tray_icon.stop()
 
 
 if __name__ == "__main__":

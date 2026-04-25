@@ -1,3 +1,4 @@
 tracker.db
 sessions/
 .claude
+__pycache__
