@@ -641,15 +641,9 @@ span.flatpickr-weekday { color: var(--dim) !important; background: #2a2a42 !impo
       </div>
       <div class="heatmap-wrap"><div id="heatmap-stats"></div></div>
 
-      <div class="chart-row">
-        <div>
-          <h2>Top titles</h2>
-          <div class="chart-wrap"><canvas id="chart-titles" height="220"></canvas></div>
-        </div>
-        <div>
-          <h2>By activity</h2>
-          <div class="chart-wrap"><canvas id="chart-donut" height="220"></canvas></div>
-        </div>
+      <div style="margin-top:16px">
+        <h2>By activity</h2>
+        <div class="chart-wrap"><canvas id="chart-donut" height="220"></canvas></div>
       </div>
       <div style="height:24px"></div>
     </div>
@@ -720,7 +714,6 @@ span.flatpickr-weekday { color: var(--dim) !important; background: #2a2a42 !impo
         <div class="filter-bar" id="media-filters">
           <button class="filter-btn active" data-filter="all" onclick="setMediaFilter('all')">All</button>
           <button class="filter-btn" data-filter="Reading"   onclick="setMediaFilter('Reading')">📖 Reading</button>
-          <button class="filter-btn" data-filter="Watching"  onclick="setMediaFilter('Watching')">📺 Watching</button>
           <button class="filter-btn" data-filter="Listening" onclick="setMediaFilter('Listening')">🎵 Listening</button>
           <button class="filter-btn" data-filter="Other"     onclick="setMediaFilter('Other')">◎ Other</button>
         </div>
@@ -843,9 +836,9 @@ let dashHeatmapYear = new Date().getFullYear();
 let appSettings   = { rollover_hour: 0, gsm_url: 'http://localhost:7275/api/stats' };
 let currentDetailTitle = null;
 
-const BUILTIN_TYPES = ['Reading','Listening','Watching','Speaking','Vocabulary','Other'];
+const BUILTIN_TYPES = ['Reading','Listening','Speaking','Vocabulary','Other'];
 const ACOLORS = {
-  Reading:'#5B8CFF', Listening:'#4ECBA0', Watching:'#FF9F5B',
+  Reading:'#5B8CFF', Listening:'#4ECBA0',
   Speaking:'#C78BFF', Vocabulary:'#FF7BAC', Other:'#6B6B8A'
 };
 const CAT_PALETTE = [
@@ -891,7 +884,6 @@ function isoDateFromObj(d) {
 
 function mediaIcon(source, atype) {
   if (source === 'gsm') return '🎮';
-  if (atype === 'Watching') return '📺';
   if (atype === 'Listening') return '🎵';
   if (atype === 'Speaking') return '🎙';
   if (atype === 'Vocabulary') return '📝';
@@ -1331,7 +1323,6 @@ function renderStats(d) {
   document.getElementById('sc-streak').textContent    = `${d.cur_streak}d`;
   document.getElementById('sc-avg').textContent       = fmtTime(d.avg_secs);
   renderDailyChart(d.daily);
-  renderTitlesChart(d.titles);
   renderDonutChart(d.activity);
 }
 
@@ -1400,30 +1391,6 @@ function renderDailyChart(daily) {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
         y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback:v=>fmt(v)} },
         ...(cum ? {y2:{position:'right',grid:{display:false},ticks:{color:'#4ECBA0',callback:v=>fmt(v)}}} : {})
-      }
-    }
-  });
-}
-
-function renderTitlesChart(titles) {
-  destroyChart('titles');
-  if (!titles.length) return;
-  const labels = titles.map(t => t.title.length>22 ? t.title.slice(0,21)+'…' : t.title);
-  const values = titles.map(t => t.hours);
-  const ctx    = document.getElementById('chart-titles').getContext('2d');
-  charts['titles'] = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{ data: values, backgroundColor: PALETTE.slice(0,values.length),
-                   borderRadius: 3, borderSkipped: false }]
-    },
-    options: {
-      indexAxis: 'y', responsive: true, maintainAspectRatio: false, animation: false,
-      plugins: { legend:{display:false}, tooltip:{callbacks:{label:c=>`${c.raw.toFixed(1)}h`}} },
-      scales: {
-        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',callback:v=>`${v.toFixed(0)}h`} },
-        y: { grid:{display:false}, ticks:{color:'#9090A8'} }
       }
     }
   });
