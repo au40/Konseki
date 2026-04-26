@@ -7,7 +7,6 @@ delegating to db.py (data layer) and imports.py (external integrations).
 import base64
 import os
 import threading
-import time
 import webview
 import sqlite3
 import json
@@ -53,20 +52,41 @@ def _make_tray_image():
 
 # ── File watchers ─────────────────────────────────────────────────────────────
 class SessionHandler(FileSystemEventHandler):
-    def __init__(self, cb):
+    def __init__(self, cb, debounce_secs=1.0):
         self.cb = cb
+        self._debounce_secs = debounce_secs
+        self._timer = None
+        self._lock = threading.Lock()
+        self._pending = set()
+
+    def _schedule(self, path):
+        with self._lock:
+            self._pending.add(path)
+            if self._timer:
+                self._timer.cancel()
+            t = threading.Timer(self._debounce_secs, self._flush)
+            t.daemon = True
+            t.start()
+            self._timer = t
+
+    def _flush(self):
+        with self._lock:
+            paths = list(self._pending)
+            self._pending.clear()
+        notified = False
+        for path in paths:
+            if db.ingest_session_file(path):
+                notified = True
+        if notified:
+            self.cb()
 
     def on_created(self, e):
         if not e.is_directory and e.src_path.endswith(".json"):
-            time.sleep(0.3)
-            if db.ingest_session_file(e.src_path):
-                self.cb()
+            self._schedule(e.src_path)
 
     def on_modified(self, e):
         if not e.is_directory and e.src_path.endswith(".json"):
-            time.sleep(0.3)
-            if db.ingest_session_file(e.src_path):
-                self.cb()
+            self._schedule(e.src_path)
 
 
 class GsmWalHandler(FileSystemEventHandler):
