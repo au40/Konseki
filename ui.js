@@ -7,7 +7,6 @@ let selectedAtype = 'Reading';
 let selectedCatColor = '#5B8CFF';
 let mediaAllData  = [];
 let seriesData    = [];
-let mediaFilter   = 'all';
 let currentSeriesId = null;
 let draggedItem   = null; // {type:'title'|'series', id:string|number}
 let heatmapYear     = new Date().getFullYear();
@@ -166,6 +165,7 @@ async function doDeleteSession(id, btn) {
     btn.closest('.session-row').remove();
     statsCache = {};
     setStatus('Session deleted');
+    if (currentPage === 'dashboard') loadDashboard();
   } else {
     btn.disabled = false;
   }
@@ -844,22 +844,13 @@ async function loadMedia() {
   renderMediaGrid();
 }
 
-function setMediaFilter(f) {
-  mediaFilter = f;
-  document.querySelectorAll('.filter-btn').forEach(b =>
-    b.classList.toggle('active', b.dataset.filter === f));
-  renderMediaGrid();
-}
-
 function renderMediaGrid() {
   const grid = document.getElementById('media-grid');
 
   // Titles that belong to a series — hidden as standalone cards
   const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
 
-  const filtered = mediaFilter === 'all'
-    ? mediaAllData
-    : mediaAllData.filter(m => m.activity_type === mediaFilter || m.source === mediaFilter);
+  const filtered = mediaAllData;
 
   grid.innerHTML = '';
 
