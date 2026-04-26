@@ -131,6 +131,7 @@ class Api:
         weekly = get_weekly_summary()
         totals = get_all_time_totals()
         aliases = _get_aliases()
+        cs, _  = get_streak()
         return {
             "today": [
                 {"id": r[0], "source": r[1], "title": aliases.get(r[2], r[2]),
@@ -144,7 +145,8 @@ class Api:
             "totals": {
                 "chars": totals[0], "lines": totals[1],
                 "seconds": totals[2], "days": totals[3]
-            }
+            },
+            "cur_streak": cs,
         }
 
     # ── History ───────────────────────────────────────────────────────────────

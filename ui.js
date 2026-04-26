@@ -43,7 +43,7 @@ function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function srcLabel(s) {
-  return {gsm:'Game',anki:'Anki',ttu:'ttsureader',manual:'Manual',csv:'Import'}[s?.toLowerCase()] || (s||'').toUpperCase();
+  return {gsm:'Game',anki:'Anki',ttu:'Book',ttsureader:'Book',manual:'Manual',csv:'Import'}[s?.toLowerCase()] || (s||'').toUpperCase();
 }
 function acolor(t) { return ACOLORS[t] || '#6B6B8A'; }
 function setStatus(msg) { document.getElementById('status').textContent = msg; }
@@ -95,10 +95,12 @@ async function loadDashboard() {
   document.getElementById('today-date').textContent = today();
 
   const todaySec = d.today.reduce((a,r) => a + r.seconds, 0);
+  const todayChars = d.today.reduce((a,r) => a+r.chars, 0);
+  const cph = (todaySec > 0 && todayChars > 0) ? Math.round(todayChars / (todaySec / 3600)) : 0;
   document.getElementById('d-time').textContent  = fmtTime(todaySec);
-  document.getElementById('d-chars').textContent = fmtChars(d.today.reduce((a,r) => a+r.chars, 0));
-  document.getElementById('d-lines').textContent = d.today.reduce((a,r) => a+r.lines, 0);
-  document.getElementById('d-days').textContent  = d.totals.days;
+  document.getElementById('d-chars').textContent = fmtChars(todayChars);
+  document.getElementById('d-lines').textContent = cph > 0 ? fmtChars(cph) + '/h' : '—';
+  document.getElementById('d-days').textContent  = `${d.cur_streak ?? 0}d`;
 
   const list = document.getElementById('today-sessions');
   list.innerHTML = '';
@@ -593,12 +595,35 @@ function renderDailyChart(daily) {
   const n   = daily.length;
   const cum = document.getElementById('cum-toggle').checked;
 
-  let labels, values;
-  if (n > 4*365) {
+  let labels, values, isHours;
+  const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+  if (currentRange === '1y') {
     const b = {};
     daily.forEach(({date:d,seconds:s}) => { const k=d.slice(0,7); b[k]=(b[k]||0)+s; });
     const agg = Object.entries(b).sort();
-    labels = agg.map(([k])=>k); values = agg.map(([,s])=>s/3600);
+    labels   = agg.map(([k]) => MONTH_NAMES[parseInt(k.slice(5),10)-1]);
+    values   = agg.map(([,s]) => s/3600);
+    isHours  = true;
+  } else if (currentRange === 'All') {
+    const b = {};
+    daily.forEach(({date:d,seconds:s}) => { const k=d.slice(0,7); b[k]=(b[k]||0)+s; });
+    const monthEntries = Object.entries(b).sort();
+    if (monthEntries.length <= 60) {
+      labels  = monthEntries.map(([k]) => k);
+      values  = monthEntries.map(([,s]) => s/3600);
+    } else {
+      const hb = {};
+      monthEntries.forEach(([k,s]) => {
+        const yr = k.slice(0,4), mo = parseInt(k.slice(5),10);
+        const half = mo <= 6 ? `${yr}-H1` : `${yr}-H2`;
+        hb[half] = (hb[half]||0)+s;
+      });
+      const halfEntries = Object.entries(hb).sort();
+      labels  = halfEntries.map(([k]) => k);
+      values  = halfEntries.map(([,s]) => s/3600);
+    }
+    isHours = true;
   } else if (n > 90) {
     const b = {};
     daily.forEach(({date:d,seconds:s}) => {
@@ -607,20 +632,21 @@ function renderDailyChart(daily) {
       b[w]=(b[w]||0)+s;
     });
     const agg = Object.entries(b).sort();
-    labels = agg.map(([k])=>k); values = agg.map(([,s])=>s/3600);
+    labels  = agg.map(([k])=>k); values = agg.map(([,s])=>s/3600);
+    isHours = true;
   } else {
-    labels = daily.map(r=>r.date.slice(5));
-    values = daily.map(r=>r.seconds/60);
+    labels  = daily.map(r=>r.date.slice(5));
+    values  = daily.map(r=>r.seconds/60);
+    isHours = false;
   }
 
-  const isHours = n > 90;
   const fmt  = v => isHours ? `${v.toFixed(1)}h` : fmtTime(v*60);
   const step = Math.max(1, Math.floor(labels.length/14));
   const shownLabels = labels.map((l,i) => i%step===0 ? l : '');
-  const barColors   = values.map((_,i) => i===values.length-1 ? '#8ABAFF' : '#5B8CFF');
+  const barColors   = '#5B8CFF';
 
   const datasets = [{
-    label: 'Time', data: values, backgroundColor: barColors,
+    label: 'Time', data: values, backgroundColor: '#5B8CFF',
     borderRadius: 3, borderSkipped: false,
   }];
 
@@ -1201,6 +1227,7 @@ function renderMediaDetail(d) {
 function renderDetailChart(daily, isGSM) {
   destroyChart('detail');
   destroyChart('detail-time');
+  destroyChart('detail-speed');
   if (!daily.length) return;
 
   const n = daily.length;
@@ -1233,62 +1260,75 @@ function renderDetailChart(daily, isGSM) {
   const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
   const hasSpeed    = speedVals.some(s => s > 0);
 
-  // Characters chart
-  const charDatasets = [{
-    label: 'Characters',
-    data: charVals,
-    backgroundColor: charVals.map((_, i) => i === charVals.length - 1 ? '#8ABAFF' : '#5B8CFF'),
-    borderRadius: 3,
-    borderSkipped: false,
-  }];
-
-  const charScales = {
-    x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-    y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
-  };
-
-  if (hasSpeed) {
-    charDatasets.push({
-      label: 'Read speed (chars/h)',
-      data: speedVals,
-      type: 'line',
-      borderColor: '#4ECBA0',
-      backgroundColor: 'rgba(78,203,160,0.06)',
-      borderWidth: 2,
-      pointRadius: 0,
-      fill: false,
-      tension: 0.35,
-      yAxisID: 'y2',
-    });
-    charScales.y2 = {
-      position: 'right',
-      grid: { display: false },
-      ticks: { color: '#4ECBA0', callback: v => fmtChars(v) },
-    };
-  }
-
+  // Characters chart (bars only)
   const ctx = document.getElementById('chart-detail').getContext('2d');
   charts['detail'] = new Chart(ctx, {
     type: 'bar',
-    data: { labels: shownLabels, datasets: charDatasets },
+    data: {
+      labels: shownLabels,
+      datasets: [{
+        label: 'Characters',
+        data: charVals,
+        backgroundColor: '#5B8CFF',
+        borderRadius: 3,
+        borderSkipped: false,
+      }]
+    },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
-        legend: {
-          display: hasSpeed,
-          labels: { color:'#9090A8', boxWidth:12, usePointStyle:true }
-        },
-        tooltip: {
-          callbacks: {
-            label: c => c.dataset.label === 'Characters'
-              ? `${fmtChars(c.raw)} chars`
-              : `${fmtChars(Math.round(c.raw))}/h`
-          }
-        }
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => `${fmtChars(c.raw)} chars` } }
       },
-      scales: charScales,
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
+      },
     }
   });
+
+  // Read speed chart (line with visible points)
+  const speedSection = document.getElementById('detail-speed-section');
+  if (hasSpeed) {
+    speedSection.style.display = 'block';
+    const speedCtx = document.getElementById('chart-detail-speed').getContext('2d');
+    charts['detail-speed'] = new Chart(speedCtx, {
+      type: 'line',
+      data: {
+        labels: shownLabels,
+        datasets: [{
+          label: 'Read speed',
+          data: speedVals.map(v => v > 0 ? v : null),
+          borderColor: '#4ECBA0',
+          backgroundColor: 'rgba(78,203,160,0.08)',
+          borderWidth: 2,
+          pointRadius: 4,
+          pointHoverRadius: 7,
+          pointBackgroundColor: '#4ECBA0',
+          pointBorderColor: '#24243A',
+          pointBorderWidth: 2,
+          fill: true,
+          tension: 0.35,
+          spanGaps: false,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: { label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : '' }
+          }
+        },
+        scales: {
+          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false },
+        },
+      }
+    });
+  } else {
+    speedSection.style.display = 'none';
+  }
 
   // Time chart
   const hasTime = timeVals.some(v => v > 0);
@@ -1301,7 +1341,7 @@ function renderDetailChart(daily, isGSM) {
         datasets: [{
           label: 'Time',
           data: timeVals.map(s => s / 60),
-          backgroundColor: timeVals.map((_, i) => i === timeVals.length - 1 ? '#B8A0FF' : '#7C5CBF'),
+          backgroundColor: '#7C5CBF',
           borderRadius: 3,
           borderSkipped: false,
         }]
