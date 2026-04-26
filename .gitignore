@@ -2,3 +2,6 @@ tracker.db
 sessions/
 .claude
 __pycache__
+build/
+dist/
+ImmersionTracker.spec

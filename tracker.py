@@ -246,6 +246,7 @@ class Api:
         speeds      = [s[7] for s in sessions if s[7] and s[7] > 0]
         avg_speed   = sum(speeds) / len(speeds) if speeds else 0
         total_cards = sum(s[8] for s in sessions if s[8])
+        days_count  = len(set(s[1] for s in sessions))
 
         daily = [
             {
@@ -269,6 +270,7 @@ class Api:
             "avg_speed":     avg_speed,
             "total_cards":   total_cards,
             "session_count": len(sessions),
+            "days_count":    days_count,
             "first_date":    sessions[0][1],
             "last_date":     sessions[-1][1],
             "daily":         daily,

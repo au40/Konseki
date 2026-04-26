@@ -830,6 +830,7 @@ async function doDeleteGoal(id) {
 // ── Media (grid) ────────────────────────────────────────────────────────────
 async function loadMedia() {
   destroyChart('detail');
+  destroyChart('detail-time');
   currentDetailTitle = null;
   currentSeriesId    = null;
   document.getElementById('media-grid-view').style.display   = 'block';
@@ -1082,6 +1083,7 @@ async function openMediaDetail(title) {
 
 function closeMediaDetail() {
   destroyChart('detail');
+  destroyChart('detail-time');
   currentDetailTitle = null;
   document.getElementById('media-detail-view').style.display  = 'none';
   // If we came from a series view, go back to it; otherwise go to grid
@@ -1176,8 +1178,8 @@ function renderMediaDetail(d) {
       <div class="value" style="color:var(--warn);font-size:22px">${speedDisplay}</div>
     </div>
     <div class="stat-card">
-      <div class="label">Sessions</div>
-      <div class="value" style="color:var(--dim);font-size:22px">${d.session_count}</div>
+      <div class="label">Days Read</div>
+      <div class="value" style="color:var(--dim);font-size:22px">${d.days_count}</div>
       <div class="sub">${d.first_date} → ${d.last_date}</div>
     </div>
     ${hasMining ? `
@@ -1198,37 +1200,41 @@ function renderMediaDetail(d) {
 
 function renderDetailChart(daily, isGSM) {
   destroyChart('detail');
+  destroyChart('detail-time');
   if (!daily.length) return;
 
   const n = daily.length;
-  let labels, charVals, speedVals;
+  let labels, charVals, speedVals, timeVals;
 
   if (n > 90) {
-    // Aggregate by week
-    const wb = {}, sb = {}, sc = {};
-    daily.forEach(({ date: dt, chars: c, speed: sp }) => {
+    const wb = {}, tb = {}, sb = {}, sc = {};
+    daily.forEach(({ date: dt, chars: c, seconds: sec, speed: sp }) => {
       const d  = new Date(dt);
       const wk = `${d.getFullYear()}-W${String(Math.ceil(
         (d.getDate() + new Date(d.getFullYear(), 0, 1).getDay()) / 7
       )).padStart(2,'0')}`;
       wb[wk] = (wb[wk] || 0) + c;
+      tb[wk] = (tb[wk] || 0) + sec;
       if (sp > 0) { sb[wk] = (sb[wk] || 0) + sp; sc[wk] = (sc[wk] || 0) + 1; }
     });
     const agg = Object.entries(wb).sort();
     labels    = agg.map(([k]) => k);
     charVals  = agg.map(([k]) => wb[k]);
+    timeVals  = agg.map(([k]) => tb[k]);
     speedVals = agg.map(([k]) => sc[k] ? sb[k] / sc[k] : 0);
   } else {
     labels    = daily.map(r => r.date.slice(5));
     charVals  = daily.map(r => r.chars);
+    timeVals  = daily.map(r => r.seconds);
     speedVals = daily.map(r => r.speed || 0);
   }
 
   const step        = Math.max(1, Math.floor(labels.length / 14));
   const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
-  const hasSpeed    = isGSM && speedVals.some(s => s > 0);
+  const hasSpeed    = speedVals.some(s => s > 0);
 
-  const datasets = [{
+  // Characters chart
+  const charDatasets = [{
     label: 'Characters',
     data: charVals,
     backgroundColor: charVals.map((_, i) => i === charVals.length - 1 ? '#8ABAFF' : '#5B8CFF'),
@@ -1236,13 +1242,13 @@ function renderDetailChart(daily, isGSM) {
     borderSkipped: false,
   }];
 
-  const scalesConf = {
+  const charScales = {
     x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
     y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
   };
 
   if (hasSpeed) {
-    datasets.push({
+    charDatasets.push({
       label: 'Read speed (chars/h)',
       data: speedVals,
       type: 'line',
@@ -1254,7 +1260,7 @@ function renderDetailChart(daily, isGSM) {
       tension: 0.35,
       yAxisID: 'y2',
     });
-    scalesConf.y2 = {
+    charScales.y2 = {
       position: 'right',
       grid: { display: false },
       ticks: { color: '#4ECBA0', callback: v => fmtChars(v) },
@@ -1264,7 +1270,7 @@ function renderDetailChart(daily, isGSM) {
   const ctx = document.getElementById('chart-detail').getContext('2d');
   charts['detail'] = new Chart(ctx, {
     type: 'bar',
-    data: { labels: shownLabels, datasets },
+    data: { labels: shownLabels, datasets: charDatasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
@@ -1280,9 +1286,39 @@ function renderDetailChart(daily, isGSM) {
           }
         }
       },
-      scales: scalesConf,
+      scales: charScales,
     }
   });
+
+  // Time chart
+  const hasTime = timeVals.some(v => v > 0);
+  if (hasTime) {
+    const timeCtx = document.getElementById('chart-detail-time').getContext('2d');
+    charts['detail-time'] = new Chart(timeCtx, {
+      type: 'bar',
+      data: {
+        labels: shownLabels,
+        datasets: [{
+          label: 'Time',
+          data: timeVals.map(s => s / 60),
+          backgroundColor: timeVals.map((_, i) => i === timeVals.length - 1 ? '#B8A0FF' : '#7C5CBF'),
+          borderRadius: 3,
+          borderSkipped: false,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: c => fmtTime(c.raw * 60) } }
+        },
+        scales: {
+          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v*60)} },
+        }
+      }
+    });
+  }
 }
 
 function renderDetailSessions(daily, isGSM) {
@@ -1301,8 +1337,8 @@ function renderDetailSessions(daily, isGSM) {
     const row = document.createElement('div');
     row.className = 'detail-session-row';
 
-    const speedHTML = isGSM
-      ? `<span class="dsr-speed">${s.speed > 0 ? fmtChars(Math.round(s.speed)) + '/h' : '—'}</span>`
+    const speedHTML = s.speed > 0
+      ? `<span class="dsr-speed">${fmtChars(Math.round(s.speed))}/h</span>`
       : '';
     const cardsHTML = (isGSM && s.cards > 0)
       ? `<span class="dsr-cards">${s.cards} cards</span>`

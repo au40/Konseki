@@ -10,4 +10,4 @@ pip install -r requirements.txt
 
 Intended to be an always open application in your tray, monitoring your GSM files for changes and automatically updating your tracker with the session log from GSM. Aggregates all stats GSM will give you. Can opt out of automatic logging and have it pull GSM stats only when you click a button instead.
 
-For ttsureader to be entirely automatic it would require a script or browser addon and be a little too invasive. For ttsu, you hit the export button and drag/drop into the ttsu pane on the bottom left.
+For ttsureader, I have an optional extension in the works that will just read your stats at the end of a ttsureader session. Likely can also do mokuro reader like that. As of now, its just a zip drag+drop.
