@@ -209,13 +209,25 @@ def import_ttsu_zip_data(zip_bytes):
                         float(entry.get('maxReadingSpeed',  0) or 0)
 
                 con = sqlite3.connect(DB_PATH)
-                exists = con.execute(
-                    "SELECT 1 FROM sessions WHERE source='ttsureader' AND title=? AND session_date=?",
+                existing = con.execute(
+                    "SELECT rowid, chars_read FROM sessions WHERE source='ttsureader' AND title=? AND session_date=?",
                     (title, date_key)
                 ).fetchone()
-                if exists:
-                    skipped += 1
+                if existing:
+                    existing_rowid, existing_chars = existing
+                    if chars <= existing_chars:
+                        skipped += 1
+                        con.close()
+                        continue
+                    con.execute("""
+                        UPDATE sessions
+                           SET chars_read=?, time_seconds=?, reading_speed=?, ingested_at=?
+                         WHERE rowid=?
+                    """, (chars, time_secs, speed, datetime.now().isoformat(), existing_rowid))
+                    con.commit()
                     con.close()
+                    imported += 1
+                    titles_seen.add(title)
                     continue
 
                 con.execute("""
