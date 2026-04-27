@@ -32,7 +32,7 @@ from db import (
     get_today_stats, get_weekly_summary, get_all_time_totals, get_range_totals,
     get_recent_sessions, get_daily_time_series, get_activity_breakdown,
     get_streak, get_top_titles, get_heatmap_data,
-    get_media_stats, get_series_data, get_extra_stats,
+    get_media_stats, get_series_data, get_extra_stats, get_range_extra_stats,
     db_get_goal_progress, db_add_goal, db_delete_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     _get_aliases, _q, _q1,
@@ -166,6 +166,7 @@ class Api:
         daily       = get_daily_time_series(n)
         activity    = get_activity_breakdown()
         titles      = get_top_titles(8)
+        extra       = get_range_extra_stats(n)
 
         if n is None:
             first = _q1("SELECT MIN(session_date) FROM sessions")[0]
@@ -174,14 +175,22 @@ class Api:
             w = n
 
         return {
-            "range_val":   range_val,
-            "r_chars":     rc,
-            "r_secs":      rs,
-            "cur_streak":  cs,
-            "avg_secs":    rs / max(w, 1),
-            "daily":       [{"date": d, "seconds": s, "chars": c} for d, s, c in daily],
-            "activity":    [{"type": a[0], "seconds": a[1]} for a in activity],
-            "titles":      [{"title": t[0], "hours": t[1]} for t in titles],
+            "range_val":       range_val,
+            "r_chars":         rc,
+            "r_secs":          rs,
+            "cur_streak":      cs,
+            "avg_secs":        rs / max(w, 1),
+            "chars_per_hour":  extra["chars_per_hour"],
+            "best_day_secs":   extra["best_day_secs"],
+            "best_day_date":   extra["best_day_date"],
+            "best_week_secs":  extra["best_week_secs"],
+            "best_week_start": extra["best_week_start"],
+            "consistency_pct": extra["consistency_pct"],
+            "active_days":     extra["active_days"],
+            "window_days":     extra["window_days"],
+            "daily":           [{"date": d, "seconds": s, "chars": c} for d, s, c in daily],
+            "activity":        [{"type": a[0], "seconds": a[1]} for a in activity],
+            "titles":          [{"title": t[0], "hours": t[1]} for t in titles],
         }
 
     def get_extra_stats(self):
@@ -245,8 +254,9 @@ class Api:
 
         total_chars = sum(s[4] for s in sessions)
         total_secs  = sum(s[6] for s in sessions)
-        speeds      = [s[7] for s in sessions if s[7] and s[7] > 0]
-        avg_speed   = sum(speeds) / len(speeds) if speeds else 0
+        spd_sessions   = [(s[7], s[6]) for s in sessions if s[7] and s[7] > 0 and s[6] > 0]
+        spd_total_time = sum(t for _, t in spd_sessions)
+        avg_speed      = sum(sp * t for sp, t in spd_sessions) / spd_total_time if spd_total_time > 0 else 0
         total_cards = sum(s[8] for s in sessions if s[8])
         days_count  = len(set(s[1] for s in sessions))
 

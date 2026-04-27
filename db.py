@@ -542,6 +542,82 @@ def get_extra_stats():
     }
 
 
+def get_range_extra_stats(n):
+    """Range-filtered subset of extra stats used by the Stats page cards."""
+    since = None if n is None else (get_today_date() - timedelta(days=n - 1)).isoformat()
+    base  = "(time_excluded IS NULL OR time_excluded=0)"
+
+    if since:
+        reading = _q1(
+            f"SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
+            f"WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0 "
+            f"AND {base} AND session_date>=?", since
+        )
+        best_day = _q1(
+            f"SELECT session_date, SUM(time_seconds) as t "
+            f"FROM sessions WHERE {base} AND session_date>=? "
+            f"GROUP BY session_date ORDER BY t DESC LIMIT 1", since
+        )
+        rows = _q(
+            f"SELECT session_date, SUM(time_seconds) FROM sessions "
+            f"WHERE {base} AND session_date>=? "
+            f"GROUP BY session_date ORDER BY session_date", since
+        )
+        active_days = (_q1(
+            "SELECT COUNT(DISTINCT session_date) FROM sessions "
+            "WHERE time_seconds>0 AND session_date>=?", since
+        ) or (0,))[0] or 0
+        window = n
+    else:
+        reading = _q1(
+            f"SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
+            f"WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0 AND {base}"
+        )
+        best_day = _q1(
+            f"SELECT session_date, SUM(time_seconds) as t "
+            f"FROM sessions WHERE {base} "
+            f"GROUP BY session_date ORDER BY t DESC LIMIT 1"
+        )
+        rows = _q(
+            f"SELECT session_date, SUM(time_seconds) FROM sessions "
+            f"WHERE {base} GROUP BY session_date ORDER BY session_date"
+        )
+        first = (_q1("SELECT MIN(session_date) FROM sessions") or (None,))[0]
+        active_days = (_q1(
+            "SELECT COUNT(DISTINCT session_date) FROM sessions WHERE time_seconds>0"
+        ) or (0,))[0] or 0
+        window = (get_today_date() - datetime.strptime(first, "%Y-%m-%d").date()).days + 1 if first else 1
+
+    chars_per_hour = 0
+    if reading and reading[1] and reading[1] > 0:
+        chars_per_hour = int((reading[0] or 0) / reading[1] * 3600)
+
+    best_week_start, best_week_secs = None, 0
+    if rows:
+        week_totals = {}
+        for row in rows:
+            d  = datetime.strptime(row[0], "%Y-%m-%d").date()
+            wk = d - timedelta(days=d.weekday())
+            week_totals[wk] = week_totals.get(wk, 0) + row[1]
+        if week_totals:
+            best_wk        = max(week_totals, key=week_totals.get)
+            best_week_start = str(best_wk)
+            best_week_secs  = week_totals[best_wk]
+
+    consistency = round(active_days / window * 100, 1) if window > 0 else 0
+
+    return {
+        "best_day_date":   best_day[0] if best_day else None,
+        "best_day_secs":   best_day[1] if best_day else 0,
+        "best_week_start": best_week_start,
+        "best_week_secs":  best_week_secs,
+        "chars_per_hour":  chars_per_hour,
+        "consistency_pct": consistency,
+        "active_days":     active_days,
+        "window_days":     window,
+    }
+
+
 # ── Goals ─────────────────────────────────────────────────────────────────────
 def db_get_goals():
     rows = _q(

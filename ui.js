@@ -581,8 +581,6 @@ function bucketDaily(daily, gran) {
 
 // ── Stats ──────────────────────────────────────────────────────────────────
 async function loadStats(range_val) {
-  const extraStats = await window.pywebview.api.get_extra_stats();
-  renderExtraStats(extraStats);
   await refreshStatsHeatmap();
 
   if (!statsCache[range_val]) {
@@ -641,29 +639,23 @@ async function changeHeatmapYear(delta) {
   await refreshStatsHeatmap();
 }
 
-function renderExtraStats(es) {
-  document.getElementById('es-best-day').textContent       = fmtTime(es.best_day_secs);
-  document.getElementById('es-best-day-date').textContent  = es.best_day_date || '—';
-  document.getElementById('es-best-week').textContent      = fmtTime(es.best_week_secs);
-  document.getElementById('es-best-week-date').textContent = es.best_week_start ? `w/o ${es.best_week_start}` : '—';
-  document.getElementById('es-cph').textContent            = es.chars_per_hour ? fmtChars(es.chars_per_hour) : '—';
-  document.getElementById('es-consistency').textContent    = `${es.consistency_pct}%`;
-  document.getElementById('es-consistency-sub').textContent = es.total_tracked_days ? `over ${es.total_tracked_days}d` : '';
-  document.getElementById('es-longest').textContent        = fmtTime(es.longest_session_secs);
-  document.getElementById('es-lng-streak').textContent     = `${es.longest_streak}d`;
-  document.getElementById('es-titles').textContent         = es.unique_titles;
-  document.getElementById('es-days-total').textContent     = es.total_tracked_days || '—';
-}
-
 function renderStats(d) {
-  const rl  = d.range_val === 'All' ? 'all time' : d.range_val;
-  document.getElementById('sc-time-lbl').textContent  = `Time (${rl})`;
-  document.getElementById('sc-chars-lbl').textContent = `Characters (${rl})`;
-  document.getElementById('sc-avg-lbl').textContent   = `Avg/day (${rl})`;
-  document.getElementById('sc-time').textContent      = fmtTime(d.r_secs);
-  document.getElementById('sc-chars').textContent     = fmtChars(d.r_chars);
-  document.getElementById('sc-streak').textContent    = `${d.cur_streak}d`;
-  document.getElementById('sc-avg').textContent       = fmtTime(d.avg_secs);
+  const rl = d.range_val === 'All' ? 'all time' : d.range_val;
+  document.getElementById('sc-time-lbl').textContent   = `Time (${rl})`;
+  document.getElementById('sc-chars-lbl').textContent  = `Characters (${rl})`;
+  document.getElementById('sc-cph-lbl').textContent    = `Chars / hour (${rl})`;
+  document.getElementById('sc-avg-lbl').textContent    = `Avg / day (${rl})`;
+  document.getElementById('sc-time').textContent       = fmtTime(d.r_secs);
+  document.getElementById('sc-chars').textContent      = fmtChars(d.r_chars);
+  document.getElementById('sc-cph').textContent        = d.chars_per_hour ? fmtChars(d.chars_per_hour) : '—';
+  document.getElementById('sc-streak').textContent     = `${d.cur_streak}d`;
+  document.getElementById('es-best-day').textContent   = fmtTime(d.best_day_secs);
+  document.getElementById('es-best-day-date').textContent  = d.best_day_date || '—';
+  document.getElementById('es-best-week').textContent  = fmtTime(d.best_week_secs);
+  document.getElementById('es-best-week-date').textContent = d.best_week_start ? `w/o ${d.best_week_start}` : '—';
+  document.getElementById('sc-avg').textContent        = fmtTime(d.avg_secs);
+  document.getElementById('es-consistency').textContent    = `${d.consistency_pct}%`;
+  document.getElementById('es-consistency-sub').textContent = d.active_days ? `${d.active_days}/${d.window_days}d active` : '';
   renderDailyChart(d.daily);
   renderDailyCharsChart(d.daily);
   renderDonutChart(d.activity);
