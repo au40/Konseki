@@ -319,10 +319,10 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     # ── Log ───────────────────────────────────────────────────────────────────
-    def log_session(self, atype, minutes, title, session_date):
+    def log_session(self, atype, minutes, title, session_date, chars=0):
         try:
             datetime.strptime(session_date, "%Y-%m-%d")
-            insert_manual_session(atype, float(minutes), title, session_date)
+            insert_manual_session(atype, float(minutes), title, session_date, chars)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}

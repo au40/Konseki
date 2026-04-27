@@ -316,10 +316,13 @@ async function buildLogPage() {
       b.classList.add('active');
       const col = allColors[t] || 'var(--accent)';
       b.style.background = col; b.style.borderColor = col; b.style.color = '#fff';
+      document.getElementById('log-chars-group').style.display = t === 'Reading' ? '' : 'none';
     };
     pills.appendChild(b);
   });
 
+  const charsGroup = document.getElementById('log-chars-group');
+  if (charsGroup) charsGroup.style.display = selectedAtype === 'Reading' ? '' : 'none';
   renderCustomCatList(customCats);
   buildColorSwatches();
 }
@@ -382,10 +385,12 @@ async function doDeleteCategory(name) {
 }
 
 async function doLogSession() {
-  const minutes = document.getElementById('log-minutes').value.trim();
-  const title   = document.getElementById('log-title').value.trim();
-  const dt      = document.getElementById('log-date').value.trim();
-  const fb      = document.getElementById('log-feedback');
+  const minutes   = document.getElementById('log-minutes').value.trim();
+  const title     = document.getElementById('log-title').value.trim();
+  const dt        = document.getElementById('log-date').value.trim();
+  const charsRaw  = document.getElementById('log-chars').value.trim();
+  const chars     = selectedAtype === 'Reading' && charsRaw ? Number(charsRaw) : 0;
+  const fb        = document.getElementById('log-feedback');
 
   if (!minutes || isNaN(minutes) || Number(minutes) <= 0) {
     fb.className = 'feedback err'; fb.textContent = 'Enter a positive number of minutes.'; return;
@@ -393,10 +398,12 @@ async function doLogSession() {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) {
     fb.className = 'feedback err'; fb.textContent = 'Date must be YYYY-MM-DD.'; return;
   }
-  const r = await window.pywebview.api.log_session(selectedAtype, Number(minutes), title, dt);
+  const r = await window.pywebview.api.log_session(selectedAtype, Number(minutes), title, dt, chars);
   if (r.ok) {
-    fb.className = 'feedback ok'; fb.textContent = `✓ Logged ${fmtTime(Number(minutes) * 60)} of ${selectedAtype}`;
+    const charsPart = chars > 0 ? ` · ${fmtChars(chars)} chars` : '';
+    fb.className = 'feedback ok'; fb.textContent = `✓ Logged ${fmtTime(Number(minutes) * 60)} of ${selectedAtype}${charsPart}`;
     document.getElementById('log-minutes').value = '';
+    document.getElementById('log-chars').value   = '';
     document.getElementById('log-title').value   = '';
     document.getElementById('log-date')._flatpickr?.setDate(today(), false);
     statsCache = {};

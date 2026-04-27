@@ -210,13 +210,13 @@ def ingest_session_file(fp):
         print(f"[ingest] {fp}: {e}")
         return False
 
-def insert_manual_session(atype, minutes, title, session_date):
+def insert_manual_session(atype, minutes, title, session_date, chars=0):
     con = sqlite3.connect(DB_PATH)
     con.execute("""
         INSERT INTO sessions
           (source,title,activity_type,session_date,chars_read,lines_read,time_seconds,ingested_at)
         VALUES (?,?,?,?,?,?,?,?)
-    """, ("manual", title or "", atype, session_date, 0, 0,
+    """, ("manual", title or "", atype, session_date, int(chars or 0), 0,
           minutes * 60, datetime.now().isoformat()))
     con.commit()
     con.close()

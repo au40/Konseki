@@ -96,10 +96,14 @@
           <label>Activity type</label>
           <div class="pill-group" id="atype-pills"></div>
         </div>
-        <div style="display:grid;grid-template-columns:140px 1fr;gap:16px">
+        <div style="display:grid;grid-template-columns:140px 140px 1fr;gap:16px">
           <div class="form-group">
             <label>Time (minutes)</label>
             <input type="number" id="log-minutes" min="1">
+          </div>
+          <div class="form-group" id="log-chars-group" style="display:none">
+            <label>Characters (optional)</label>
+            <input type="number" id="log-chars" min="0">
           </div>
           <div class="form-group">
             <label>Title / notes (optional)</label>
