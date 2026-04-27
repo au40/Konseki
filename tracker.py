@@ -160,7 +160,7 @@ class Api:
 
     # ── Stats ─────────────────────────────────────────────────────────────────
     def get_stats(self, range_val):
-        n           = {"30d": 30, "90d": 90, "1y": 365, "All": None}.get(range_val, 30)
+        n           = {"30d": 30, "90d": 90, "6m": 182, "1y": 365, "All": None}.get(range_val, 30)
         rc, rs, _   = get_range_totals(n)
         cs, _       = get_streak()
         daily       = get_daily_time_series(n)
@@ -179,7 +179,7 @@ class Api:
             "r_secs":      rs,
             "cur_streak":  cs,
             "avg_secs":    rs / max(w, 1),
-            "daily":       [{"date": d, "seconds": s} for d, s in daily],
+            "daily":       [{"date": d, "seconds": s, "chars": c} for d, s, c in daily],
             "activity":    [{"type": a[0], "seconds": a[1]} for a in activity],
             "titles":      [{"title": t[0], "hours": t[1]} for t in titles],
         }

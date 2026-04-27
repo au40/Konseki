@@ -331,13 +331,18 @@ def get_daily_time_series(days):
     else:
         earliest   = get_today_date() - timedelta(days=days - 1)
         total_days = days
-    sums = dict(_q(
-        "SELECT session_date,COALESCE(SUM(time_seconds),0) "
-        "FROM sessions WHERE session_date>=? AND (time_excluded IS NULL OR time_excluded=0) GROUP BY session_date",
+    rows = _q(
+        "SELECT session_date, "
+        "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0), "
+        "COALESCE(SUM(chars_read),0) "
+        "FROM sessions WHERE session_date>=? GROUP BY session_date",
         earliest.isoformat()
-    ))
-    return [(( earliest + timedelta(days=i)).isoformat(),
-              sums.get((earliest + timedelta(days=i)).isoformat(), 0))
+    )
+    secs  = {r[0]: r[1] for r in rows}
+    chars = {r[0]: r[2] for r in rows}
+    return [((earliest + timedelta(days=i)).isoformat(),
+              secs.get((earliest + timedelta(days=i)).isoformat(), 0),
+              chars.get((earliest + timedelta(days=i)).isoformat(), 0))
             for i in range(total_days)]
 
 def get_activity_breakdown():

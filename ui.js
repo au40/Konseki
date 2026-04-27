@@ -1,6 +1,7 @@
 // ── Globals ────────────────────────────────────────────────────────────────
-let currentPage   = 'dashboard';
-let currentRange  = '30d';
+let currentPage        = 'dashboard';
+let currentRange       = '30d';
+let currentGranularity = 'day';
 let statsCache    = {};
 let charts        = {};
 let selectedAtype = 'Reading';
@@ -511,6 +512,73 @@ async function loadHistory() {
   sessions.forEach(s => list.appendChild(makeSessionRow(s)));
 }
 
+// ── Stats helpers ──────────────────────────────────────────────────────────
+function autoGranularity(range) {
+  return {'30d': 'day', '90d': 'week', '6m': 'week', '1y': 'month', 'All': 'month'}[range] || 'day';
+}
+
+function updateGranularityUI() {
+  document.querySelectorAll('#gran-seg .seg-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.gran === currentGranularity));
+}
+
+function bucketDaily(daily, gran) {
+  const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  if (!daily.length) return { labels: [], secs: [], chars: [] };
+
+  if (gran === 'day') {
+    return {
+      labels: daily.map(r => r.date.slice(5)),
+      secs:   daily.map(r => r.seconds),
+      chars:  daily.map(r => r.chars),
+    };
+  }
+
+  const buckets = {}, order = [];
+  const weekStart = dt => {
+    const d = new Date(dt);
+    const day = d.getDay();
+    d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)); // snap to Monday
+    return d.toISOString().slice(0, 10);
+  };
+
+  const getKey = r => {
+    if (gran === 'week') return weekStart(r.date);
+    if (gran === '2wk') {
+      const origin = new Date(daily[0].date);
+      const dt     = new Date(r.date);
+      const idx    = Math.floor((dt - origin) / (86400000 * 14));
+      const start  = new Date(+origin + idx * 14 * 86400000);
+      return start.toISOString().slice(0, 10);
+    }
+    if (gran === 'month') return r.date.slice(0, 7);
+  };
+
+  daily.forEach(r => {
+    const k = getKey(r);
+    if (!buckets[k]) { buckets[k] = { secs: 0, chars: 0 }; order.push(k); }
+    buckets[k].secs  += r.seconds;
+    buckets[k].chars += r.chars;
+  });
+
+  const multiYear = order[0].slice(0, 4) !== order[order.length - 1].slice(0, 4);
+  let labels;
+  if (gran === 'week' || gran === '2wk') {
+    labels = order.map(k => multiYear ? k.slice(2, 10).replace(/-/g, '/') : k.slice(5));
+  } else {
+    labels = order.map(k => {
+      const mon = MONTH_NAMES[parseInt(k.slice(5), 10) - 1];
+      return multiYear ? `${mon} '${k.slice(2, 4)}` : mon;
+    });
+  }
+
+  return {
+    labels,
+    secs:  order.map(k => buckets[k].secs),
+    chars: order.map(k => buckets[k].chars),
+  };
+}
+
 // ── Stats ──────────────────────────────────────────────────────────────────
 async function loadStats(range_val) {
   const extraStats = await window.pywebview.api.get_extra_stats();
@@ -519,7 +587,7 @@ async function loadStats(range_val) {
 
   if (!statsCache[range_val]) {
     statsCache[range_val] = await window.pywebview.api.get_stats(range_val);
-    const others = ['30d','90d','1y','All'].filter(r => r !== range_val);
+    const others = ['30d','90d','6m','1y','All'].filter(r => r !== range_val);
     setTimeout(() => prefetchStats(others, 0), 500);
   }
   renderStats(statsCache[range_val]);
@@ -540,9 +608,17 @@ function prefetchStats(ranges, idx) {
 
 async function setRange(rv) {
   currentRange = rv;
-  document.querySelectorAll('.seg-btn').forEach(b =>
+  document.querySelectorAll('#range-seg .seg-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.range === rv));
+  currentGranularity = autoGranularity(rv);
+  updateGranularityUI();
   await loadStats(rv);
+}
+
+async function setGranularity(g) {
+  currentGranularity = g;
+  updateGranularityUI();
+  if (statsCache[currentRange]) renderStats(statsCache[currentRange]);
 }
 
 function onCumToggle() {
@@ -589,6 +665,7 @@ function renderStats(d) {
   document.getElementById('sc-streak').textContent    = `${d.cur_streak}d`;
   document.getElementById('sc-avg').textContent       = fmtTime(d.avg_secs);
   renderDailyChart(d.daily);
+  renderDailyCharsChart(d.daily);
   renderDonutChart(d.activity);
 }
 
@@ -599,58 +676,14 @@ function destroyChart(id) {
 
 function renderDailyChart(daily) {
   destroyChart('daily');
-  const n   = daily.length;
-  const cum = document.getElementById('cum-toggle').checked;
+  const cum     = document.getElementById('cum-toggle').checked;
+  const { labels, secs } = bucketDaily(daily, currentGranularity);
+  const isHours = currentGranularity !== 'day';
+  const values  = isHours ? secs.map(s => s / 3600) : secs.map(s => s / 60);
+  const fmt     = v => isHours ? `${v.toFixed(1)}h` : fmtTime(v * 60);
 
-  let labels, values, isHours;
-  const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-
-  if (currentRange === '1y') {
-    const b = {};
-    daily.forEach(({date:d,seconds:s}) => { const k=d.slice(0,7); b[k]=(b[k]||0)+s; });
-    const agg = Object.entries(b).sort();
-    labels   = agg.map(([k]) => MONTH_NAMES[parseInt(k.slice(5),10)-1]);
-    values   = agg.map(([,s]) => s/3600);
-    isHours  = true;
-  } else if (currentRange === 'All') {
-    const b = {};
-    daily.forEach(({date:d,seconds:s}) => { const k=d.slice(0,7); b[k]=(b[k]||0)+s; });
-    const monthEntries = Object.entries(b).sort();
-    if (monthEntries.length <= 60) {
-      labels  = monthEntries.map(([k]) => k);
-      values  = monthEntries.map(([,s]) => s/3600);
-    } else {
-      const hb = {};
-      monthEntries.forEach(([k,s]) => {
-        const yr = k.slice(0,4), mo = parseInt(k.slice(5),10);
-        const half = mo <= 6 ? `${yr}-H1` : `${yr}-H2`;
-        hb[half] = (hb[half]||0)+s;
-      });
-      const halfEntries = Object.entries(hb).sort();
-      labels  = halfEntries.map(([k]) => k);
-      values  = halfEntries.map(([,s]) => s/3600);
-    }
-    isHours = true;
-  } else if (n > 90) {
-    const b = {};
-    daily.forEach(({date:d,seconds:s}) => {
-      const dt = new Date(d);
-      const w  = `${dt.getFullYear()}-W${String(Math.ceil((dt.getDate()+new Date(dt.getFullYear(),0,1).getDay())/7)).padStart(2,'00')}`;
-      b[w]=(b[w]||0)+s;
-    });
-    const agg = Object.entries(b).sort();
-    labels  = agg.map(([k])=>k); values = agg.map(([,s])=>s/3600);
-    isHours = true;
-  } else {
-    labels  = daily.map(r=>r.date.slice(5));
-    values  = daily.map(r=>r.seconds/60);
-    isHours = false;
-  }
-
-  const fmt  = v => isHours ? `${v.toFixed(1)}h` : fmtTime(v*60);
-  const step = Math.max(1, Math.floor(labels.length/14));
-  const shownLabels = labels.map((l,i) => i%step===0 ? l : '');
-  const barColors   = '#5B8CFF';
+  const step        = Math.max(1, Math.floor(labels.length / 14));
+  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
 
   const datasets = [{
     label: 'Time', data: values, backgroundColor: '#5B8CFF',
@@ -658,7 +691,8 @@ function renderDailyChart(daily) {
   }];
 
   if (cum) {
-    let run=0; const cumVals=values.map(v=>(run+=v,run));
+    let run = 0;
+    const cumVals = values.map(v => (run += v, run));
     datasets.push({
       label: 'Cumulative', data: cumVals, type: 'line',
       borderColor: '#4ECBA0', backgroundColor: 'rgba(78,203,160,0.08)',
@@ -675,12 +709,41 @@ function renderDailyChart(daily) {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
         legend: { display: cum },
-        tooltip: { callbacks: { label: c => fmt(c.raw) } }
+        tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmt(c.raw) } }
       },
       scales: {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback:v=>fmt(v)} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmt(v)} },
         ...(cum ? {y2:{position:'right',grid:{display:false},ticks:{color:'#4ECBA0',callback:v=>fmt(v)}}} : {})
+      }
+    }
+  });
+}
+
+function renderDailyCharsChart(daily) {
+  destroyChart('daily-chars');
+  const { labels, chars } = bucketDaily(daily, currentGranularity);
+  if (!chars.some(c => c > 0)) return;
+
+  const step        = Math.max(1, Math.floor(labels.length / 14));
+  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
+
+  const ctx = document.getElementById('chart-daily-chars').getContext('2d');
+  charts['daily-chars'] = new Chart(ctx, {
+    type: 'bar',
+    data: { labels: shownLabels, datasets: [{
+      label: 'Characters', data: chars, backgroundColor: '#4ECBA0',
+      borderRadius: 3, borderSkipped: false,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtChars(c.raw) + ' chars' } }
+      },
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
       }
     }
   });
