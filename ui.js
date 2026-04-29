@@ -39,7 +39,11 @@ function fmtTime(s) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
-function fmtChars(n) { return n >= 10000 ? `${(n/1000).toFixed(1)}k` : n >= 1000 ? `${(n/1000).toFixed(1)}k` : String(n); }
+function fmtChars(n) {
+  if (n >= 1_000_000) return `${(n/1_000_000).toFixed(2)} mil`;
+  if (n >= 1000)      return `${(n/1000).toFixed(1)}k`;
+  return String(n);
+}
 function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -768,10 +772,10 @@ function renderDonutChart(activity) {
 // ── Goals ──────────────────────────────────────────────────────────────────
 function updateGoalUnit() {
   const metric = document.getElementById('goal-metric').value;
+  const chunk  = document.getElementById('goal-chunk').value;
+  const suffix = chunk === 'daily' ? '/day' : chunk === 'weekly' ? '/week' : '';
   document.getElementById('goal-target-label').textContent =
-    metric === 'time_seconds' ? 'Target (minutes)'
-    : metric === 'chars_read' ? 'Target (characters)'
-    :                            'Target (lines)';
+    metric === 'time_seconds' ? `Target (hours${suffix})` : `Target (characters${suffix})`;
 }
 
 async function populateGoalActivitySelect() {
@@ -833,19 +837,18 @@ function makeGoalCard(g) {
   }
 
   let chunkHtml = '';
-  if (g.chunk_period !== 'none' && g.chunk_needed !== null && !g.is_complete && !g.is_overdue) {
-    const needed   = fmtMetric(g.chunk_needed);
-    const original = fmtMetric(g.original_chunk);
-    const behind   = g.original_chunk && g.chunk_needed > g.original_chunk * 1.05;
-    const ahead    = g.original_chunk && g.chunk_needed < g.original_chunk * 0.95;
-    const icon     = behind ? '⚠' : ahead ? '↓' : '→';
-    const color    = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
-    const paceNote = g.original_chunk
-      ? `<span style="color:var(--muted);font-size:10px;margin-left:4px">original pace: ${original}${perUnit}</span>`
-      : '';
+  if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
+    const dailyNeeded  = g.remaining / g.days_left;
+    const originalDaily = g.original_chunk
+      ? (g.chunk_period === 'weekly' ? g.original_chunk / 7 : g.original_chunk)
+      : null;
+    const behind = originalDaily && dailyNeeded > originalDaily * 1.05;
+    const ahead  = originalDaily && dailyNeeded < originalDaily * 0.95;
+    const icon   = behind ? '⚠' : ahead ? '↓' : '→';
+    const color  = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
     chunkHtml = `
       <div class="goal-chunk" style="color:${color}">
-        <span>${icon} ${needed}${perUnit} to finish on time</span>${paceNote}
+        <span>${icon} ${fmtMetric(dailyNeeded)}/day to finish on time</span>
       </div>`;
   } else if (g.is_overdue) {
     chunkHtml = `<div class="goal-chunk" style="color:#FF6B6B">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
@@ -873,6 +876,11 @@ function makeGoalCard(g) {
   return el;
 }
 
+function toggleGoalForm() {
+  const card = document.getElementById('goal-form-card');
+  card.style.display = card.style.display === 'none' ? 'block' : 'none';
+}
+
 async function doAddGoal() {
   const label       = document.getElementById('goal-label').value.trim();
   const metric      = document.getElementById('goal-metric').value;
@@ -895,11 +903,20 @@ async function doAddGoal() {
     fb.className = 'feedback err'; fb.textContent = 'Deadline must be a future date.'; return;
   }
 
-  const target = metric === 'time_seconds' ? rawTarget * 60 : rawTarget;
+  let target = metric === 'time_seconds' ? rawTarget * 3600 : rawTarget;
+
+  if (chunkPeriod !== 'none') {
+    const daysUntil = Math.round((new Date(deadline) - new Date(today())) / 86400000);
+    const periods   = chunkPeriod === 'weekly' ? Math.ceil(daysUntil / 7) : daysUntil;
+    if (periods < 1) {
+      fb.className = 'feedback err'; fb.textContent = 'Deadline is too soon for that pace.'; return;
+    }
+    target *= periods;
+  }
 
   const r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype);
   if (r.ok) {
-    fb.className = 'feedback ok'; fb.textContent = '✓ Goal added';
+    document.getElementById('goal-form-card').style.display = 'none';
     document.getElementById('goal-label').value    = '';
     document.getElementById('goal-target').value   = '';
     document.getElementById('goal-deadline').value = '';

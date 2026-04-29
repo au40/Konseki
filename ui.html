@@ -245,8 +245,9 @@
       <div class="page-header"><h1>Goals</h1></div>
       <p class="muted" style="margin:6px 0 20px">Set a target, a deadline, and let the tracker tell you what you need to do each day or week to get there.</p>
 
-      <div class="card" style="margin-bottom:20px">
-        <h3 style="font-size:13px;font-weight:700;margin-bottom:14px">New goal</h3>
+      <button class="btn btn-primary" style="margin-bottom:16px" onclick="toggleGoalForm()">+ Add goal</button>
+
+      <div class="card" id="goal-form-card" style="margin-bottom:20px;display:none">
         <div class="form-group">
           <label>Label</label>
           <input type="text" id="goal-label">
@@ -257,12 +258,11 @@
             <select id="goal-metric" onchange="updateGoalUnit()">
               <option value="time_seconds">Time</option>
               <option value="chars_read">Characters</option>
-              <option value="lines_read">Lines</option>
             </select>
           </div>
           <div class="form-group" style="margin-bottom:0">
-            <label id="goal-target-label">Target (minutes)</label>
-            <input type="number" id="goal-target" min="1">
+            <label id="goal-target-label">Target (hours)</label>
+            <input type="number" id="goal-target" min="0.1" step="0.5">
           </div>
           <div class="form-group" style="margin-bottom:0">
             <label>Deadline</label>
@@ -271,11 +271,11 @@
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
           <div class="form-group" style="margin-bottom:0">
-            <label>Break into chunks</label>
-            <select id="goal-chunk">
-              <option value="daily">Daily — split evenly by day</option>
-              <option value="weekly">Weekly — split evenly by week</option>
-              <option value="none">None — just track overall progress</option>
+            <label>Pace</label>
+            <select id="goal-chunk" onchange="updateGoalUnit()">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="none">None — set total directly</option>
             </select>
           </div>
           <div class="form-group" style="margin-bottom:0">
