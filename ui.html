@@ -310,17 +310,36 @@
 
       <!-- Series detail view (hidden by default) -->
       <div id="media-series-view" style="display:none">
+        <!-- Back nav -->
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
           <button class="btn btn-outline btn-sm" onclick="closeSeriesDetail()">← Back</button>
           <span class="muted" style="font-size:12px">Media  ›  Series</span>
         </div>
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-          <div id="series-detail-name" style="font-size:22px;font-weight:700;color:var(--text)"></div>
-          <button class="btn btn-outline btn-sm" onclick="doRenameSeriesPrompt()">✎ Rename</button>
+
+        <!-- Hero: stacked covers + info -->
+        <div class="detail-hero">
+          <div id="series-detail-cover" class="series-detail-cover-box"></div>
+          <div class="detail-info">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+              <div id="series-detail-name" class="detail-title" style="margin-bottom:0"></div>
+              <button class="btn btn-outline btn-sm" onclick="doRenameSeriesPrompt()" style="flex-shrink:0">✎ Rename</button>
+            </div>
+            <div id="series-detail-badge"></div>
+            <!-- Members list replaces description -->
+            <div id="series-detail-members" class="series-members-inline"></div>
+          </div>
         </div>
+
+        <!-- Stat cards -->
         <div class="stat-grid" id="series-detail-stats"></div>
-        <h2 style="margin-top:20px">Books in series</h2>
-        <div class="series-members-grid" id="series-detail-members"></div>
+
+        <!-- Charts -->
+        <h2 style="margin-top:16px">Daily characters</h2>
+        <div class="chart-wrap"><canvas id="chart-series-chars" height="180"></canvas></div>
+
+        <h2 style="margin-top:20px">Daily time</h2>
+        <div class="chart-wrap"><canvas id="chart-series-time" height="180"></canvas></div>
+
         <div style="height:32px"></div>
       </div>
 

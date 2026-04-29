@@ -929,7 +929,8 @@ async function loadMedia() {
     window.pywebview.api.get_media(),
     window.pywebview.api.get_series(),
   ]);
-  document.getElementById('media-count').textContent = `${mediaAllData.length} titles`;
+  const nonManualCount = mediaAllData.filter(m => m.source !== 'manual').length;
+  document.getElementById('media-count').textContent = `${nonManualCount} titles`;
   renderMediaGrid();
 }
 
@@ -939,7 +940,7 @@ function renderMediaGrid() {
   // Titles that belong to a series — hidden as standalone cards
   const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
 
-  const filtered = mediaAllData;
+  const filtered = mediaAllData.filter(m => m.source !== 'manual');
 
   grid.innerHTML = '';
 
@@ -1101,44 +1102,178 @@ async function openSeriesDetail(seriesId) {
   if (!s) return;
   document.getElementById('media-grid-view').style.display  = 'none';
   document.getElementById('media-series-view').style.display = 'block';
-  renderSeriesDetail(s);
+  const memberDetails = await Promise.all(
+    s.members.map(m => window.pywebview.api.get_title_detail(m.title))
+  );
+  renderSeriesDetail(s, memberDetails.filter(Boolean));
 }
 
-function renderSeriesDetail(s) {
+function renderSeriesDetail(s, memberDetails = []) {
   document.getElementById('series-detail-name').textContent = s.name;
 
-  const statsEl = document.getElementById('series-detail-stats');
-  statsEl.innerHTML = `
-    <div class="stat-card"><div class="stat-label">Total time</div><div class="stat-value">${fmtTime(s.total_secs)}</div></div>
-    <div class="stat-card"><div class="stat-label">Books</div><div class="stat-value">${s.members.length}</div></div>`;
+  // Stacked cover art in hero
+  const coverEl = document.getElementById('series-detail-cover');
+  const members = s.members;
+  const front = members[0], mid = members[1], back = members[2];
+  let coverHtml = '';
+  if (back)  coverHtml += `<div class="series-layer series-layer-back">${cardLayerHTML(back)}</div>`;
+  if (mid)   coverHtml += `<div class="series-layer series-layer-mid">${cardLayerHTML(mid)}</div>`;
+  if (front) coverHtml += `<div class="series-layer series-layer-front">${cardLayerHTML(front)}</div>`;
+  if (members.length > 1) coverHtml += `<div class="series-badge">${members.length}</div>`;
+  coverEl.innerHTML = coverHtml;
 
+  // Badge
+  const label = members.length === 1 ? 'entry' : 'entries';
+  document.getElementById('series-detail-badge').innerHTML =
+    `<span class="genre-badge">Series · ${members.length} ${label}</span>`;
+
+  // Inline member list
   const membersEl = document.getElementById('series-detail-members');
   membersEl.innerHTML = '';
   s.members.forEach(m => {
-    const card = document.createElement('div');
-    card.className = 'series-member-card';
-    card.innerHTML = `
-      <div class="series-member-thumb">
-        ${m.image ? `<img src="${m.image}" alt="${escHtml(m.display_title)}">` : `<span>${(m.display_title||'?')[0].toUpperCase()}</span>`}
-      </div>
-      <div class="series-member-label">${escHtml(m.display_title)}</div>
-      <button class="series-remove-btn" title="Remove from series">✕</button>`;
-    card.querySelector('.series-member-thumb').onclick = () => openMediaDetail(m.title);
-    card.querySelector('.series-remove-btn').onclick = async e => {
+    const row = document.createElement('div');
+    row.className = 'series-member-row';
+    const thumb = m.image
+      ? `<img src="${m.image}" alt="${escHtml(m.display_title)}">`
+      : (m.display_title || '?')[0].toUpperCase();
+    row.innerHTML = `
+      <div class="series-member-mini-thumb">${thumb}</div>
+      <span class="series-member-mini-title">${escHtml(m.display_title || m.title)}</span>
+      <button class="btn btn-xs btn-danger series-remove-btn" title="Remove from series">✕</button>`;
+    const openDetail = e => { e.stopPropagation(); openMediaDetail(m.title); };
+    row.querySelector('.series-member-mini-thumb').addEventListener('click', openDetail);
+    row.querySelector('.series-member-mini-title').addEventListener('click', openDetail);
+    row.querySelector('.series-remove-btn').addEventListener('click', async e => {
       e.stopPropagation();
       const r = await window.pywebview.api.remove_from_series(s.id, m.title);
       if (r.ok) {
         seriesData = await window.pywebview.api.get_series();
         const updated = seriesData.find(x => x.id === s.id);
-        if (updated) renderSeriesDetail(updated);
-        else closeSeriesDetail();
+        if (updated) {
+          const updatedDetails = await Promise.all(
+            updated.members.map(mem => window.pywebview.api.get_title_detail(mem.title))
+          );
+          renderSeriesDetail(updated, updatedDetails.filter(Boolean));
+        } else {
+          closeSeriesDetail();
+        }
       }
-    };
-    membersEl.appendChild(card);
+    });
+    membersEl.appendChild(row);
   });
+
+  // Aggregate stats from member details
+  let totalSecs = 0, totalChars = 0, totalCards = 0;
+  const allDates = new Set();
+  const dailyMap = {};
+  memberDetails.forEach(d => {
+    totalSecs  += d.total_secs  || 0;
+    totalChars += d.total_chars || 0;
+    totalCards += d.total_cards || 0;
+    (d.daily || []).forEach(row => {
+      allDates.add(row.date);
+      if (!dailyMap[row.date]) dailyMap[row.date] = { date: row.date, chars: 0, seconds: 0 };
+      dailyMap[row.date].chars   += row.chars;
+      dailyMap[row.date].seconds += row.seconds;
+    });
+  });
+  if (!memberDetails.length) totalSecs = s.total_secs || 0;
+
+  const daily     = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+  const daysCount = allDates.size;
+  const dates     = [...allDates].sort();
+  const firstDate = dates[0] || '—';
+  const lastDate  = dates[dates.length - 1] || '—';
+  const avgSpeed  = totalSecs > 0 && totalChars > 0
+    ? Math.round(totalChars / (totalSecs / 3600)) : 0;
+
+  // Stat cards
+  const statsEl = document.getElementById('series-detail-stats');
+  const hasMining = totalCards > 0;
+  statsEl.style.gridTemplateColumns = hasMining ? 'repeat(5,1fr)' : 'repeat(4,1fr)';
+  statsEl.innerHTML = `
+    <div class="stat-card">
+      <div class="label">Total time</div>
+      <div class="value" style="color:var(--accent);font-size:22px">${fmtTime(totalSecs)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Characters</div>
+      <div class="value" style="color:var(--success);font-size:22px">${totalChars > 0 ? fmtChars(totalChars) : '—'}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Avg read speed</div>
+      <div class="value" style="color:var(--warn);font-size:22px">${avgSpeed > 0 ? fmtChars(avgSpeed) + '/h' : '—'}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Days Read</div>
+      <div class="value" style="color:var(--dim);font-size:22px">${daysCount}</div>
+      <div class="sub">${firstDate} → ${lastDate}</div>
+    </div>
+    ${hasMining ? `
+    <div class="stat-card">
+      <div class="label">Cards mined</div>
+      <div class="value" style="color:var(--purple);font-size:22px">${totalCards}</div>
+    </div>` : ''}
+  `;
+
+  renderSeriesCharts(daily);
+}
+
+function renderSeriesCharts(daily) {
+  destroyChart('series-chars');
+  destroyChart('series-time');
+  if (!daily.length) return;
+
+  const labels      = daily.map(r => r.date.slice(5));
+  const charVals    = daily.map(r => r.chars);
+  const timeVals    = daily.map(r => r.seconds);
+  const step        = Math.max(1, Math.floor(labels.length / 14));
+  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
+
+  if (charVals.some(v => v > 0)) {
+    const ctx = document.getElementById('chart-series-chars').getContext('2d');
+    charts['series-chars'] = new Chart(ctx, {
+      type: 'bar',
+      data: { labels: shownLabels, datasets: [{
+        label: 'Characters', data: charVals, backgroundColor: '#5B8CFF',
+        borderRadius: 3, borderSkipped: false,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => `${fmtChars(c.raw)} chars` } } },
+        scales: {
+          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
+        }
+      }
+    });
+  }
+
+  if (timeVals.some(v => v > 0)) {
+    const ctx = document.getElementById('chart-series-time').getContext('2d');
+    charts['series-time'] = new Chart(ctx, {
+      type: 'bar',
+      data: { labels: shownLabels, datasets: [{
+        label: 'Time', data: timeVals.map(s => s / 60), backgroundColor: '#7C5CBF',
+        borderRadius: 3, borderSkipped: false,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtTime(c.raw * 60) } } },
+        scales: {
+          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v * 60)} },
+        }
+      }
+    });
+  }
 }
 
 function closeSeriesDetail() {
+  destroyChart('series-chars');
+  destroyChart('series-time');
   currentSeriesId = null;
   document.getElementById('media-series-view').style.display = 'none';
   document.getElementById('media-grid-view').style.display   = 'block';
