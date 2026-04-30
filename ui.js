@@ -4,7 +4,7 @@ let currentRange       = '30d';
 let currentGranularity = 'day';
 let statsCache    = {};
 let charts        = {};
-let selectedAtype = 'Reading';
+let selectedAtype = 'Listening';
 let selectedCatColor = '#5B8CFF';
 let mediaAllData  = [];
 let seriesData    = [];
@@ -15,7 +15,7 @@ let dashHeatmapYear = new Date().getFullYear();
 let appSettings   = { rollover_hour: 0, gsm_url: 'http://localhost:7275/api/stats', theme: 'dark' };
 let currentDetailTitle = null;
 
-const BUILTIN_TYPES = ['Reading','Listening','Speaking','Vocabulary','Other'];
+const BUILTIN_TYPES = ['Listening','Reading','Speaking','Vocabulary','Other'];
 const ACOLORS = {
   Reading:'#5B8CFF', Listening:'#4ECBA0',
   Speaking:'#C78BFF', Vocabulary:'#FF7BAC', Other:'#6B6B8A'
@@ -838,7 +838,10 @@ function makeGoalCard(g) {
 
   let chunkHtml = '';
   if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
-    const dailyNeeded  = g.remaining / g.days_left;
+    const dailyNeeded   = g.remaining / g.days_left;
+    const todayDone     = g.today_completed || 0;
+    const dailyPct      = dailyNeeded > 0 ? Math.min(100, todayDone / dailyNeeded * 100) : 0;
+    const dailyDone     = dailyPct >= 100;
     const originalDaily = g.original_chunk
       ? (g.chunk_period === 'weekly' ? g.original_chunk / 7 : g.original_chunk)
       : null;
@@ -846,9 +849,16 @@ function makeGoalCard(g) {
     const ahead  = originalDaily && dailyNeeded < originalDaily * 0.95;
     const icon   = behind ? '⚠' : ahead ? '↓' : '→';
     const color  = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
+    const barColor = dailyDone ? '#4ECBA0' : '#5B8CFF';
     chunkHtml = `
       <div class="goal-chunk" style="color:${color}">
         <span>${icon} ${fmtMetric(dailyNeeded)}/day to finish on time</span>
+      </div>
+      <div class="daily-bar-row">
+        <span class="daily-bar-label">Today ${fmtMetric(todayDone)} / ${fmtMetric(dailyNeeded)}</span>
+        <div class="daily-bar-track">
+          <div class="daily-bar-fill" style="width:${dailyPct}%;background:${barColor}"></div>
+        </div>
       </div>`;
   } else if (g.is_overdue) {
     chunkHtml = `<div class="goal-chunk" style="color:#FF6B6B">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
@@ -1689,9 +1699,16 @@ async function loadSettings() {
   document.getElementById('sessions-dir').textContent  = await window.pywebview.api.get_sessions_dir();
   document.getElementById('gsm-url').value             = s.gsm_url || 'http://localhost:7275/api/stats';
   document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
+  document.getElementById('ext-port').value            = s.ext_port  || 18463;
+  document.getElementById('ext-token').value           = s.ext_token || '';
   const theme = s.theme || 'dark';
   document.querySelectorAll('.theme-opt').forEach(el =>
     el.classList.toggle('selected', el.dataset.theme === theme));
+}
+
+function copyExtField(id) {
+  const val = document.getElementById(id).value;
+  navigator.clipboard.writeText(val).catch(() => {});
 }
 
 /* ── GSM aggregate import JS — INACTIVE ──────────────────────────────────────

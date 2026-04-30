@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      font-size: 13px;
+      margin: 0;
+      padding: 14px;
+      width: 270px;
+      background: #1c1c28;
+      color: #ccc;
+    }
+    h3 {
+      margin: 0 0 2px;
+      font-size: 14px;
+      color: #eee;
+    }
+    p.sub {
+      margin: 0 0 12px;
+      font-size: 11px;
+      color: #666;
+    }
+    label {
+      display: block;
+      margin-top: 10px;
+      margin-bottom: 3px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #888;
+    }
+    input {
+      width: 100%;
+      padding: 5px 8px;
+      background: #2a2a3d;
+      border: 1px solid #3a3a55;
+      border-radius: 4px;
+      color: #eee;
+      font-size: 13px;
+      font-family: monospace;
+    }
+    input:focus { outline: none; border-color: #9b9bc7; }
+    button {
+      margin-top: 14px;
+      width: 100%;
+      padding: 7px;
+      background: #9b9bc7;
+      border: none;
+      border-radius: 4px;
+      color: #fff;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button:hover { background: #7b7ba7; }
+    #status {
+      margin-top: 8px;
+      font-size: 11px;
+      min-height: 14px;
+      color: #8f8;
+      text-align: center;
+    }
+    #status.err { color: #f88; }
+    .hint {
+      margin-top: 10px;
+      font-size: 10px;
+      color: #555;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h3>Immersion Tracker Sync</h3>
+  <p class="sub">Enter the port and token shown in your tracker's Settings page.</p>
+
+  <label>Port</label>
+  <input id="port" type="number" placeholder="18463" min="1024" max="65535">
+
+  <label>Token</label>
+  <input id="token" type="text" placeholder="paste token here" autocomplete="off" spellcheck="false">
+
+  <button id="save">Save</button>
+  <div id="status"></div>
+
+  <p class="hint">
+    Syncs automatically while you read on reader.ttsu.app.<br>
+    Tracker must be running to receive data.
+  </p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

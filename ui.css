@@ -263,6 +263,15 @@ select:focus { border-color: var(--accent); }
 .goal-meta { display: flex; justify-content: space-between; align-items: center; }
 .goal-numbers { font-size: 12px; color: var(--dim); }
 .goal-pct { font-size: 13px; font-weight: 700; }
+.daily-bar-row {
+  display: flex; align-items: center; gap: 8px; margin-top: 6px;
+}
+.daily-bar-label { font-size: 10px; color: var(--dim); white-space: nowrap; }
+.daily-bar-track {
+  flex: 1; height: 4px; background: var(--inset); border-radius: 2px; overflow: hidden;
+}
+.daily-bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+
 .goal-chunk {
   font-size: 12px; display: flex; align-items: center; gap: 6px;
   padding-top: 6px; border-top: 1px solid var(--grid);

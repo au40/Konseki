@@ -165,17 +165,84 @@ def pull_gsm_now(url=None):
 
 
 # ── ッツ Reader ────────────────────────────────────────────────────────────────
-def import_ttsu_zip_data(zip_bytes):
-    """Parse a ッツ Reader export zip and insert sessions. Returns {imported, skipped, titles}."""
-    imported = 0
-    skipped  = 0
+def import_ttsu_entries(entries):
+    """Insert a list of ッツ Reader stat dicts into the DB. Returns {imported, skipped, titles}."""
+    imported    = 0
+    skipped     = 0
     titles_seen = set()
 
+    for entry in entries:
+        if isinstance(entry, str):
+            try:
+                entry = json.loads(entry)
+            except Exception:
+                skipped += 1
+                continue
+
+        date_key = (entry.get('dateKey') or '').strip()
+        if not date_key:
+            skipped += 1
+            continue
+
+        title = (entry.get('title') or '').strip()
+        if not title:
+            skipped += 1
+            continue
+
+        chars     = int(entry.get('charactersRead', 0) or 0)
+        time_secs = float(entry.get('readingTime', 0) or 0)
+        if chars == 0 and time_secs == 0:
+            skipped += 1
+            continue
+
+        speed = float(entry.get('lastReadingSpeed', 0) or 0) or \
+                float(entry.get('maxReadingSpeed',  0) or 0)
+
+        con      = sqlite3.connect(DB_PATH)
+        existing = con.execute(
+            "SELECT rowid, chars_read FROM sessions WHERE source='ttsureader' AND title=? AND session_date=?",
+            (title, date_key)
+        ).fetchone()
+        if existing:
+            existing_rowid, existing_chars = existing
+            if chars <= existing_chars:
+                skipped += 1
+                con.close()
+                continue
+            con.execute("""
+                UPDATE sessions
+                   SET chars_read=?, time_seconds=?, reading_speed=?, ingested_at=?
+                 WHERE rowid=?
+            """, (chars, time_secs, speed, datetime.now().isoformat(), existing_rowid))
+            con.commit()
+            con.close()
+            imported += 1
+            titles_seen.add(title)
+            continue
+
+        con.execute("""
+            INSERT INTO sessions
+              (source, title, activity_type, session_date,
+               chars_read, time_seconds, reading_speed, ingested_at, time_excluded)
+            VALUES (?,?,?,?,?,?,?,?,0)
+        """, ('ttsureader', title, 'Reading', date_key,
+              chars, time_secs, speed, datetime.now().isoformat()))
+        con.commit()
+        con.close()
+        imported += 1
+        titles_seen.add(title)
+
+    return {"imported": imported, "skipped": skipped, "titles": sorted(titles_seen)}
+
+
+def import_ttsu_zip_data(zip_bytes):
+    """Parse a ッツ Reader export zip and insert sessions. Returns {imported, skipped, titles}."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except zipfile.BadZipFile as e:
         raise ValueError(f"Not a valid zip file: {e}")
 
+    all_entries = []
     with zf:
         import posixpath
         stat_files = [
@@ -189,60 +256,13 @@ def import_ttsu_zip_data(zip_bytes):
                 continue
             if not isinstance(entries, list):
                 continue
-
             for entry in entries:
-                date_key = (entry.get('dateKey') or '').strip()
-                if not date_key:
-                    continue
+                if not entry.get('title'):
+                    entry = dict(entry)
+                    entry['title'] = stat_path.split('/')[0]
+                all_entries.append(entry)
 
-                title = (entry.get('title') or '').strip()
-                if not title:
-                    title = stat_path.split('/')[0]
-
-                chars     = int(entry.get('charactersRead', 0) or 0)
-                time_secs = float(entry.get('readingTime', 0) or 0)
-                if chars == 0 and time_secs == 0:
-                    skipped += 1
-                    continue
-
-                speed = float(entry.get('lastReadingSpeed', 0) or 0) or \
-                        float(entry.get('maxReadingSpeed',  0) or 0)
-
-                con = sqlite3.connect(DB_PATH)
-                existing = con.execute(
-                    "SELECT rowid, chars_read FROM sessions WHERE source='ttsureader' AND title=? AND session_date=?",
-                    (title, date_key)
-                ).fetchone()
-                if existing:
-                    existing_rowid, existing_chars = existing
-                    if chars <= existing_chars:
-                        skipped += 1
-                        con.close()
-                        continue
-                    con.execute("""
-                        UPDATE sessions
-                           SET chars_read=?, time_seconds=?, reading_speed=?, ingested_at=?
-                         WHERE rowid=?
-                    """, (chars, time_secs, speed, datetime.now().isoformat(), existing_rowid))
-                    con.commit()
-                    con.close()
-                    imported += 1
-                    titles_seen.add(title)
-                    continue
-
-                con.execute("""
-                    INSERT INTO sessions
-                      (source, title, activity_type, session_date,
-                       chars_read, time_seconds, reading_speed, ingested_at, time_excluded)
-                    VALUES (?,?,?,?,?,?,?,?,0)
-                """, ('ttsureader', title, 'Reading', date_key,
-                      chars, time_secs, speed, datetime.now().isoformat()))
-                con.commit()
-                con.close()
-                imported += 1
-                titles_seen.add(title)
-
-    return {"imported": imported, "skipped": skipped, "titles": sorted(titles_seen)}
+    return import_ttsu_entries(all_entries)
 
 
 # ── GSM aggregate import — INACTIVE ──────────────────────────────────────────

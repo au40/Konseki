@@ -443,6 +443,23 @@
 
       <div class="settings-section">
         <div class="card">
+          <h3>Browser extension</h3>
+          <p class="muted" style="margin-bottom:12px">Copy these into the Immersion Tracker Sync extension popup.</p>
+          <div class="settings-row" style="margin-bottom:8px">
+            <label style="min-width:48px;color:var(--text-muted);font-size:12px">Port</label>
+            <input type="text" id="ext-port" readonly style="max-width:90px;font-family:monospace;font-size:13px">
+            <button class="btn btn-outline btn-sm" onclick="copyExtField('ext-port')">Copy</button>
+          </div>
+          <div class="settings-row">
+            <label style="min-width:48px;color:var(--text-muted);font-size:12px">Token</label>
+            <input type="text" id="ext-token" readonly style="font-family:monospace;font-size:11px">
+            <button class="btn btn-outline btn-sm" onclick="copyExtField('ext-token')">Copy</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
           <h3>Sessions folder</h3>
           <p id="sessions-dir" style="color:var(--accent);font-size:12px;margin-bottom:8px">…</p>
           <p class="muted">Drop any *.json session file here and it will be ingested automatically.</p>

@@ -668,6 +668,11 @@ def db_get_goal_progress():
 
         sql       = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(where_parts)}"
         completed = (_q1(sql, *params) or (0,))[0] or 0.0
+
+        today_where  = ["session_date=?"] + (["activity_type=?"] if g["activity_type"] else [])
+        today_params = [today_str] + ([g["activity_type"]] if g["activity_type"] else [])
+        today_sql    = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(today_where)}"
+        today_completed = (_q1(today_sql, *today_params) or (0,))[0] or 0.0
         remaining = max(0.0, g["target"] - completed)
         pct       = min(100.0, round(completed / g["target"] * 100, 1)) if g["target"] > 0 else 0.0
 
@@ -697,15 +702,16 @@ def db_get_goal_progress():
 
         results.append({
             **g,
-            "completed":      completed,
-            "remaining":      remaining,
-            "pct":            pct,
-            "days_left":      days_left,
-            "total_days":     total_days,
-            "chunk_needed":   chunk_needed,
-            "original_chunk": original_chunk,
-            "is_complete":    completed >= g["target"],
-            "is_overdue":     days_left == 0 and completed < g["target"],
+            "completed":       completed,
+            "remaining":       remaining,
+            "pct":             pct,
+            "days_left":       days_left,
+            "total_days":      total_days,
+            "chunk_needed":    chunk_needed,
+            "original_chunk":  original_chunk,
+            "today_completed": today_completed,
+            "is_complete":     completed >= g["target"],
+            "is_overdue":      days_left == 0 and completed < g["target"],
         })
     return results
 

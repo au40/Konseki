@@ -39,6 +39,7 @@ from db import (
     insert_manual_session, import_csv_file,
 )
 from imports import pull_gsm_now, import_ttsu_zip_data
+from ext_server import ExtServer
 
 
 # ── Tray icon ─────────────────────────────────────────────────────────────────
@@ -542,10 +543,13 @@ class Api:
         return str(SESSIONS_DIR)
 
     def get_all_settings(self):
+        from ext_server import _get_or_create_token, _get_port
         return {
             "rollover_hour": int(get_setting("rollover_hour", "0")),
             "gsm_url":       get_setting("gsm_url", imports.GSM_API),
             "theme":         get_setting("theme", "dark"),
+            "ext_port":      _get_port(),
+            "ext_token":     _get_or_create_token(),
         }
 
     def save_settings(self, data):
@@ -571,7 +575,10 @@ def main():
     init_db()
     scan_existing_files()
 
-    api       = Api()
+    api        = Api()
+    ext_server = ExtServer(on_import=api._notify)
+    ext_server.start()
+
     html_dir  = Path(__file__).parent
     html_path = html_dir / "ui.html"
 
@@ -658,6 +665,7 @@ def main():
             gsm_observer.join()
         if tray_icon:
             tray_icon.stop()
+        ext_server.stop()
 
 
 if __name__ == "__main__":
