@@ -101,7 +101,9 @@ async function loadDashboard() {
 
   const todaySec = d.today.reduce((a,r) => a + r.seconds, 0);
   const todayChars = d.today.reduce((a,r) => a+r.chars, 0);
-  const cph = (todaySec > 0 && todayChars > 0) ? Math.round(todayChars / (todaySec / 3600)) : 0;
+  const readingSec = d.today.filter(r => r.activity_type === 'Reading').reduce((a,r) => a + r.seconds, 0);
+  const readingChars = d.today.filter(r => r.activity_type === 'Reading').reduce((a,r) => a + r.chars, 0);
+  const cph = (readingSec > 0 && readingChars > 0) ? Math.round(readingChars / (readingSec / 3600)) : 0;
   document.getElementById('d-time').textContent  = fmtTime(todaySec);
   document.getElementById('d-chars').textContent = fmtChars(todayChars);
   document.getElementById('d-lines').textContent = cph > 0 ? fmtChars(cph) + '/h' : '—';
