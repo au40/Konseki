@@ -124,7 +124,8 @@ class Api:
     """All public methods are callable from JS via window.pywebview.api.*"""
 
     def __init__(self):
-        self._window = None
+        self._window    = None
+        self._ext_server = None
 
     # ── Dashboard ─────────────────────────────────────────────────────────────
     def get_dashboard(self):
@@ -552,6 +553,12 @@ class Api:
             "ext_token":     _get_or_create_token(),
         }
 
+    def reroll_ext_token(self):
+        if self._ext_server:
+            new_token = self._ext_server.reroll_token()
+            return {"ok": True, "token": new_token}
+        return {"ok": False}
+
     def save_settings(self, data):
         for key, value in data.items():
             set_setting(key, str(value))
@@ -575,8 +582,9 @@ def main():
     init_db()
     scan_existing_files()
 
-    api        = Api()
-    ext_server = ExtServer(on_import=api._notify)
+    api              = Api()
+    ext_server       = ExtServer(on_import=api._notify)
+    api._ext_server  = ext_server
     ext_server.start()
 
     html_dir  = Path(__file__).parent

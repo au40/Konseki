@@ -1235,7 +1235,7 @@ function renderSeriesDetail(s, memberDetails = []) {
     </div>
     <div class="stat-card">
       <div class="label">Days Read</div>
-      <div class="value" style="color:var(--dim);font-size:22px">${daysCount}</div>
+      <div class="value" style="color:var(--purple);font-size:22px">${daysCount}</div>
       <div class="sub">${firstDate} → ${lastDate}</div>
     </div>
     ${hasMining ? `
@@ -1431,7 +1431,7 @@ function renderMediaDetail(d) {
     </div>
     <div class="stat-card">
       <div class="label">Days Read</div>
-      <div class="value" style="color:var(--dim);font-size:22px">${d.days_count}</div>
+      <div class="value" style="color:var(--purple);font-size:22px">${d.days_count}</div>
       <div class="sub">${d.first_date} → ${d.last_date}</div>
     </div>
     ${hasMining ? `
@@ -1711,6 +1711,15 @@ async function loadSettings() {
 function copyExtField(id) {
   const val = document.getElementById(id).value;
   navigator.clipboard.writeText(val).catch(() => {});
+}
+
+async function rerollExtToken() {
+  if (!confirm('Reroll the token? You will need to paste the new token into the extension.')) return;
+  const res = await window.pywebview.api.reroll_ext_token();
+  if (res.ok) {
+    document.getElementById('ext-token').value = res.token;
+    setStatus('Token rerolled — update your extension');
+  }
 }
 
 /* ── GSM aggregate import JS — INACTIVE ──────────────────────────────────────

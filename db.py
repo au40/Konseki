@@ -482,8 +482,7 @@ def get_extra_stats():
     )
     reading = _q1(
         "SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
-        "WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0 "
-        "AND (time_excluded IS NULL OR time_excluded=0)"
+        "WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0"
     )
     chars_per_hour = 0
     if reading and reading[1] and reading[1] > 0:
@@ -551,7 +550,7 @@ def get_range_extra_stats(n):
         reading = _q1(
             f"SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
             f"WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0 "
-            f"AND {base} AND session_date>=?", since
+            f"AND session_date>=?", since
         )
         best_day = _q1(
             f"SELECT session_date, SUM(time_seconds) as t "
@@ -571,7 +570,7 @@ def get_range_extra_stats(n):
     else:
         reading = _q1(
             f"SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
-            f"WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0 AND {base}"
+            f"WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0"
         )
         best_day = _q1(
             f"SELECT session_date, SUM(time_seconds) as t "

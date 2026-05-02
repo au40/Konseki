@@ -133,6 +133,13 @@ class ExtServer:
         })
         self._server = HTTPServer(("127.0.0.1", self.port), handler)
 
+    def reroll_token(self):
+        new_token = secrets.token_hex(32)
+        set_setting("ext_token", new_token)
+        self.token = new_token
+        self._server.RequestHandlerClass._token = new_token
+        return new_token
+
     def start(self):
         self._thread = threading.Thread(
             target=self._server.serve_forever, daemon=True, name="ext-server"
