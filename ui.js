@@ -711,7 +711,7 @@ function renderDailyChart(daily) {
       },
       scales: {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmt(v)} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
         ...(cum ? {y2:{position:'right',grid:{display:false},ticks:{color:'#4ECBA0',callback:v=>fmt(v)}}} : {})
       }
     }
@@ -741,7 +741,7 @@ function renderDailyCharsChart(daily) {
       },
       scales: {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
       }
     }
   });
@@ -772,10 +772,20 @@ function renderDonutChart(activity) {
 }
 
 // ── Goals ──────────────────────────────────────────────────────────────────
+let goalPaceView = 'daily';
+
+function setGoalPaceView(pace) {
+  goalPaceView = pace;
+  document.querySelectorAll('#goal-pace-seg .seg-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.pace === pace);
+  });
+  loadGoals();
+}
+
 function updateGoalUnit() {
   const metric = document.getElementById('goal-metric').value;
   const chunk  = document.getElementById('goal-chunk').value;
-  const suffix = chunk === 'daily' ? '/day' : chunk === 'weekly' ? '/week' : '';
+  const suffix = chunk === 'daily' ? '/day' : chunk === 'weekly' ? '/week' : chunk === 'monthly' ? '/month' : '';
   document.getElementById('goal-target-label').textContent =
     metric === 'time_seconds' ? `Target (hours${suffix})` : `Target (characters${suffix})`;
 }
@@ -812,7 +822,7 @@ function makeGoalCard(g) {
 
   const isTime  = g.metric === 'time_seconds';
   const isChars = g.metric === 'chars_read';
-  const perUnit = g.chunk_period === 'daily' ? '/day' : g.chunk_period === 'weekly' ? '/week' : '';
+  const perUnit = g.chunk_period === 'daily' ? '/day' : g.chunk_period === 'weekly' ? '/week' : g.chunk_period === 'monthly' ? '/month' : '';
 
   function fmtMetric(v) {
     if (!v && v !== 0) return '—';
@@ -840,26 +850,40 @@ function makeGoalCard(g) {
 
   let chunkHtml = '';
   if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
-    const dailyNeeded   = g.remaining / g.days_left;
-    const todayDone     = g.today_completed || 0;
-    const dailyPct      = dailyNeeded > 0 ? Math.min(100, todayDone / dailyNeeded * 100) : 0;
-    const dailyDone     = dailyPct >= 100;
-    const originalDaily = g.original_chunk
-      ? (g.chunk_period === 'weekly' ? g.original_chunk / 7 : g.original_chunk)
-      : null;
-    const behind = originalDaily && dailyNeeded > originalDaily * 1.05;
-    const ahead  = originalDaily && dailyNeeded < originalDaily * 0.95;
-    const icon   = behind ? '⚠' : ahead ? '↓' : '→';
-    const color  = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
-    const barColor = dailyDone ? '#4ECBA0' : '#5B8CFF';
+    let chunkNeeded, originalChunk, periodDone, periodLabel, periodUnit;
+    if (goalPaceView === 'daily') {
+      chunkNeeded   = g.remaining / g.days_left;
+      originalChunk = g.target / Math.max(1, g.total_days);
+      periodDone    = g.today_completed || 0;
+      periodLabel   = 'Today';
+      periodUnit    = '/day';
+    } else if (goalPaceView === 'weekly') {
+      chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 7);
+      originalChunk = g.target / Math.max(1, g.total_days / 7);
+      periodDone    = g.week_completed || 0;
+      periodLabel   = 'This week';
+      periodUnit    = '/week';
+    } else {
+      chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 30.44);
+      originalChunk = g.target / Math.max(1, g.total_days / 30.44);
+      periodDone    = g.month_completed || 0;
+      periodLabel   = 'This month';
+      periodUnit    = '/month';
+    }
+    const behind   = chunkNeeded > originalChunk * 1.05;
+    const ahead    = chunkNeeded < originalChunk * 0.95;
+    const icon     = behind ? '⚠' : ahead ? '↓' : '→';
+    const color    = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
+    const periodPct = chunkNeeded > 0 ? Math.min(100, periodDone / chunkNeeded * 100) : 0;
+    const barColor  = periodPct >= 100 ? '#4ECBA0' : '#5B8CFF';
     chunkHtml = `
       <div class="goal-chunk" style="color:${color}">
-        <span>${icon} ${fmtMetric(dailyNeeded)}/day to finish on time</span>
+        <span>${icon} ${fmtMetric(chunkNeeded)}${periodUnit} to finish on time</span>
       </div>
       <div class="daily-bar-row">
-        <span class="daily-bar-label">Today ${fmtMetric(todayDone)} / ${fmtMetric(dailyNeeded)}</span>
+        <span class="daily-bar-label">${periodLabel} ${fmtMetric(periodDone)} / ${fmtMetric(chunkNeeded)}</span>
         <div class="daily-bar-track">
-          <div class="daily-bar-fill" style="width:${dailyPct}%;background:${barColor}"></div>
+          <div class="daily-bar-fill" style="width:${periodPct}%;background:${barColor}"></div>
         </div>
       </div>`;
   } else if (g.is_overdue) {
@@ -919,7 +943,7 @@ async function doAddGoal() {
 
   if (chunkPeriod !== 'none') {
     const daysUntil = Math.round((new Date(deadline) - new Date(today())) / 86400000);
-    const periods   = chunkPeriod === 'weekly' ? Math.ceil(daysUntil / 7) : daysUntil;
+    const periods   = chunkPeriod === 'weekly' ? Math.ceil(daysUntil / 7) : chunkPeriod === 'monthly' ? Math.ceil(daysUntil / 30.44) : daysUntil;
     if (periods < 1) {
       fb.className = 'feedback err'; fb.textContent = 'Deadline is too soon for that pace.'; return;
     }
@@ -1273,7 +1297,7 @@ function renderSeriesCharts(daily) {
           tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => `${fmtChars(c.raw)} chars` } } },
         scales: {
           x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
         }
       }
     });
@@ -1293,7 +1317,7 @@ function renderSeriesCharts(daily) {
           tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtTime(c.raw * 60) } } },
         scales: {
           x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v * 60)} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v * 60)}, afterFit: s => { s.width = 62; } },
         }
       }
     });
@@ -1508,7 +1532,7 @@ function renderDetailChart(daily, isGSM) {
       },
       scales: {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
       },
     }
   });
@@ -1548,7 +1572,7 @@ function renderDetailChart(daily, isGSM) {
         },
         scales: {
           x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false, afterFit: s => { s.width = 62; } },
         },
       }
     });
@@ -1580,7 +1604,7 @@ function renderDetailChart(daily, isGSM) {
         },
         scales: {
           x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v*60)} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v*60)}, afterFit: s => { s.width = 62; } },
         }
       }
     });

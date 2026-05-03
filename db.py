@@ -672,6 +672,19 @@ def db_get_goal_progress():
         today_params = [today_str] + ([g["activity_type"]] if g["activity_type"] else [])
         today_sql    = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(today_where)}"
         today_completed = (_q1(today_sql, *today_params) or (0,))[0] or 0.0
+
+        week_start_str  = (today_d - timedelta(days=today_d.weekday())).strftime("%Y-%m-%d")
+        week_where       = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
+        week_params      = [week_start_str, today_str] + ([g["activity_type"]] if g["activity_type"] else [])
+        week_sql         = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(week_where)}"
+        week_completed   = (_q1(week_sql, *week_params) or (0,))[0] or 0.0
+
+        month_start_str  = today_d.strftime("%Y-%m-01")
+        month_where      = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
+        month_params     = [month_start_str, today_str] + ([g["activity_type"]] if g["activity_type"] else [])
+        month_sql        = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(month_where)}"
+        month_completed  = (_q1(month_sql, *month_params) or (0,))[0] or 0.0
+
         remaining = max(0.0, g["target"] - completed)
         pct       = min(100.0, round(completed / g["target"] * 100, 1)) if g["target"] > 0 else 0.0
 
@@ -698,6 +711,11 @@ def db_get_goal_progress():
             weeks_left     = days_left / 7.0
             original_chunk = g["target"] / total_weeks
             chunk_needed   = remaining / weeks_left if weeks_left > 0 else 0.0
+        elif g["chunk_period"] == "monthly":
+            total_months   = max(1.0, total_days / 30.44)
+            months_left    = days_left / 30.44
+            original_chunk = g["target"] / total_months
+            chunk_needed   = remaining / months_left if months_left > 0 else 0.0
 
         results.append({
             **g,
@@ -708,7 +726,9 @@ def db_get_goal_progress():
             "total_days":      total_days,
             "chunk_needed":    chunk_needed,
             "original_chunk":  original_chunk,
-            "today_completed": today_completed,
+            "today_completed":  today_completed,
+            "week_completed":   week_completed,
+            "month_completed":  month_completed,
             "is_complete":     completed >= g["target"],
             "is_overdue":      days_left == 0 and completed < g["target"],
         })

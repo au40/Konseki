@@ -242,7 +242,14 @@
 
     <!-- ── Goals ──────────────────────────────────────────────────────────── -->
     <div id="page-goals" class="page">
-      <div class="page-header"><h1>Goals</h1></div>
+      <div class="page-header">
+        <h1>Goals</h1>
+        <div class="seg" id="goal-pace-seg">
+          <button class="seg-btn active" data-pace="daily"   onclick="setGoalPaceView('daily')">Daily</button>
+          <button class="seg-btn"        data-pace="weekly"  onclick="setGoalPaceView('weekly')">Weekly</button>
+          <button class="seg-btn"        data-pace="monthly" onclick="setGoalPaceView('monthly')">Monthly</button>
+        </div>
+      </div>
       <p class="muted" style="margin:6px 0 20px">Set a target, a deadline, and let the tracker tell you what you need to do each day or week to get there.</p>
 
       <button class="btn btn-primary" style="margin-bottom:16px" onclick="toggleGoalForm()">+ Add goal</button>
@@ -275,6 +282,7 @@
             <select id="goal-chunk" onchange="updateGoalUnit()">
               <option value="daily">Daily</option>
               <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
               <option value="none">None — set total directly</option>
             </select>
           </div>
@@ -287,7 +295,6 @@
         <button class="btn btn-primary" style="margin-top:14px" onclick="doAddGoal()">Add goal</button>
       </div>
 
-      <h2 style="margin-top:4px">Active goals</h2>
       <div class="goal-list" id="goal-list">
         <p class="empty-msg">No goals yet. Add one above.</p>
       </div>
