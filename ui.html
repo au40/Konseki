@@ -244,17 +244,22 @@
     <div id="page-goals" class="page">
       <div class="page-header">
         <h1>Goals</h1>
-        <div class="seg" id="goal-pace-seg">
-          <button class="seg-btn active" data-pace="daily"   onclick="setGoalPaceView('daily')">Daily</button>
-          <button class="seg-btn"        data-pace="weekly"  onclick="setGoalPaceView('weekly')">Weekly</button>
-          <button class="seg-btn"        data-pace="monthly" onclick="setGoalPaceView('monthly')">Monthly</button>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+          <div class="seg" id="goal-pace-seg">
+            <button class="seg-btn active" data-pace="daily"   onclick="setGoalPaceView('daily')">Daily</button>
+            <button class="seg-btn"        data-pace="weekly"  onclick="setGoalPaceView('weekly')">Weekly</button>
+            <button class="seg-btn"        data-pace="monthly" onclick="setGoalPaceView('monthly')">Monthly</button>
+          </div>
+          <div style="display:flex;gap:8px;width:100%">
+            <button class="btn btn-sm btn-seg" style="flex:1;justify-content:center" id="completed-btn" onclick="showCompletedGoals()">Completed</button>
+            <button class="btn btn-sm btn-seg" style="flex:1;justify-content:center" id="new-goal-btn"   onclick="toggleGoalForm()">New Goal</button>
+          </div>
         </div>
       </div>
       <p class="muted" style="margin:6px 0 20px">Set a target, a deadline, and let the tracker tell you what you need to do each day or week to get there.</p>
 
-      <button class="btn btn-primary" style="margin-bottom:16px" onclick="toggleGoalForm()">+ Add goal</button>
-
-      <div class="card" id="goal-form-card" style="margin-bottom:20px;display:none">
+      <div class="card" id="goal-form-card" style="margin-bottom:20px;display:none;position:relative">
+        <button onclick="toggleGoalForm()" style="position:absolute;top:12px;right:14px;background:none;border:none;color:var(--dim);font-size:16px;cursor:pointer;line-height:1;padding:0" title="Cancel">✕</button>
         <div class="form-group">
           <label>Label</label>
           <input type="text" id="goal-label">
@@ -295,8 +300,20 @@
         <button class="btn btn-primary" style="margin-top:14px" onclick="doAddGoal()">Add goal</button>
       </div>
 
-      <div class="goal-list" id="goal-list">
-        <p class="empty-msg">No goals yet. Add one above.</p>
+      <div id="goal-active-view">
+        <div class="goal-list" id="goal-list">
+          <p class="empty-msg">No goals yet. Add one above.</p>
+        </div>
+      </div>
+
+      <div id="goal-completed-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <button class="btn btn-outline btn-sm" onclick="hideCompletedGoals()">← Back</button>
+          <h2 style="margin:0">Completed goals</h2>
+        </div>
+        <div class="goal-list" id="goal-completed-list">
+          <p class="empty-msg">No completed goals yet.</p>
+        </div>
       </div>
     </div>
 
@@ -498,6 +515,17 @@
     </div>
 
   </main>
+</div>
+
+<!-- ── Confirm dialog ──────────────────────────────────────────────────── -->
+<div id="confirm-overlay" style="display:none">
+  <div id="confirm-dialog" class="card">
+    <p id="confirm-message"></p>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="confirmResolve(false)">Cancel</button>
+      <button class="btn btn-sm" id="confirm-ok-btn" onclick="confirmResolve(true)">Delete</button>
+    </div>
+  </div>
 </div>
 
 <script src="ui.js"></script>

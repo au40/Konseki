@@ -122,6 +122,9 @@ h2 { font-size: 14px; font-weight: 700; color: var(--text); margin: 20px 0 8px; 
 .btn-sm       { padding: 5px 12px; font-size: 12px; }
 .btn-xs       { padding: 3px 9px; font-size: 11px; border-radius: 6px; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-seg { background: var(--input-bg); color: var(--dim); border: none; }
+.btn-seg:hover:not(.active) { color: var(--text); opacity: 1; }
+.btn-seg.active { background: var(--accent); color: #fff; }
 
 /* ── Segment control ─────────────────────────────────────────────────────── */
 .seg { display: flex; background: var(--input-bg); border-radius: 8px; padding: 3px; gap: 2px; }
@@ -530,6 +533,18 @@ select:focus { border-color: var(--accent); }
   transition: border-color 0.15s; flex-shrink: 0;
 }
 .swatch.selected { border-color: #fff; }
+
+/* ── Confirm dialog ──────────────────────────────────────────────────────── */
+#confirm-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+}
+#confirm-dialog {
+  width: 320px; padding: 24px 24px 20px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+#confirm-message { font-size: 14px; color: var(--text); line-height: 1.5; }
 
 /* ── Divider ─────────────────────────────────────────────────────────────── */
 .divider { height: 1px; background: var(--grid); margin: 20px 0; }

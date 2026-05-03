@@ -807,13 +807,39 @@ async function loadGoals() {
   const goals = await window.pywebview.api.get_goals();
   const list  = document.getElementById('goal-list');
   list.innerHTML = '';
-  if (!goals.length) {
+  const active = goals.filter(g => !g.user_finished);
+  if (!active.length) {
     list.innerHTML = '<p class="empty-msg">No goals yet. Add one above.</p>'; return;
   }
-  const active   = goals.filter(g => !g.is_complete && !g.is_overdue);
-  const complete = goals.filter(g => g.is_complete);
-  const overdue  = goals.filter(g => g.is_overdue);
-  [...active, ...overdue, ...complete].forEach(g => list.appendChild(makeGoalCard(g)));
+  const inProgress = active.filter(g => !g.is_overdue);
+  const overdue    = active.filter(g => g.is_overdue);
+  [...inProgress, ...overdue].forEach(g => list.appendChild(makeGoalCard(g)));
+}
+
+function setGoalPanelBtn(active) {
+  document.getElementById('completed-btn').classList.toggle('active', active === 'completed');
+  document.getElementById('new-goal-btn').classList.toggle('active', active === 'new');
+}
+
+async function showCompletedGoals() {
+  document.getElementById('goal-active-view').style.display    = 'none';
+  document.getElementById('goal-form-card').style.display      = 'none';
+  document.getElementById('goal-completed-view').style.display = 'block';
+  setGoalPanelBtn('completed');
+  const goals = await window.pywebview.api.get_goals();
+  const list  = document.getElementById('goal-completed-list');
+  list.innerHTML = '';
+  const finished = goals.filter(g => g.user_finished);
+  if (!finished.length) {
+    list.innerHTML = '<p class="empty-msg">No completed goals yet.</p>'; return;
+  }
+  finished.forEach(g => list.appendChild(makeGoalCard(g)));
+}
+
+function hideCompletedGoals() {
+  document.getElementById('goal-completed-view').style.display = 'none';
+  document.getElementById('goal-active-view').style.display    = 'block';
+  setGoalPanelBtn(null);
 }
 
 function makeGoalCard(g) {
@@ -851,24 +877,33 @@ function makeGoalCard(g) {
   let chunkHtml = '';
   if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
     let chunkNeeded, originalChunk, periodDone, periodLabel, periodUnit;
+    const now      = new Date();
+    const shortFmt = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    let periodRange;
     if (goalPaceView === 'daily') {
       chunkNeeded   = g.remaining / g.days_left;
       originalChunk = g.target / Math.max(1, g.total_days);
       periodDone    = g.today_completed || 0;
       periodLabel   = 'Today';
       periodUnit    = '/day';
+      periodRange   = shortFmt(now);
     } else if (goalPaceView === 'weekly') {
       chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 7);
       originalChunk = g.target / Math.max(1, g.total_days / 7);
       periodDone    = g.week_completed || 0;
       periodLabel   = 'This week';
       periodUnit    = '/week';
+      const monOffset = (now.getDay() + 6) % 7;
+      const mon = new Date(now); mon.setDate(now.getDate() - monOffset);
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+      periodRange   = `${shortFmt(mon)} – ${shortFmt(sun)}`;
     } else {
       chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 30.44);
       originalChunk = g.target / Math.max(1, g.total_days / 30.44);
       periodDone    = g.month_completed || 0;
       periodLabel   = 'This month';
       periodUnit    = '/month';
+      periodRange   = now.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
     }
     const behind   = chunkNeeded > originalChunk * 1.05;
     const ahead    = chunkNeeded < originalChunk * 0.95;
@@ -885,18 +920,24 @@ function makeGoalCard(g) {
         <div class="daily-bar-track">
           <div class="daily-bar-fill" style="width:${periodPct}%;background:${barColor}"></div>
         </div>
-      </div>`;
+      </div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${periodRange}</div>`;
   } else if (g.is_overdue) {
     chunkHtml = `<div class="goal-chunk" style="color:#FF6B6B">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
   }
 
   const actLabel = g.activity_type ? ` · ${g.activity_type}` : '';
 
+  const finishBtn = g.is_complete && !g.user_finished
+    ? `<button class="btn btn-xs btn-outline" style="border-color:#4ECBA0;color:#4ECBA0" onclick="doFinishGoal(${g.id})">Mark finished</button>`
+    : '';
+
   el.innerHTML = `
     <div class="goal-card-header">
       <span class="goal-label">${g.label}</span>
       <div class="goal-badges">
         ${statusBadge}
+        ${finishBtn}
         <button class="btn btn-xs btn-danger" onclick="doDeleteGoal(${g.id})">✕</button>
       </div>
     </div>
@@ -913,8 +954,10 @@ function makeGoalCard(g) {
 }
 
 function toggleGoalForm() {
-  const card = document.getElementById('goal-form-card');
-  card.style.display = card.style.display === 'none' ? 'block' : 'none';
+  const card   = document.getElementById('goal-form-card');
+  const isOpen = card.style.display !== 'none';
+  card.style.display = isOpen ? 'none' : 'block';
+  setGoalPanelBtn(isOpen ? null : 'new');
 }
 
 async function doAddGoal() {
@@ -956,6 +999,7 @@ async function doAddGoal() {
     document.getElementById('goal-label').value    = '';
     document.getElementById('goal-target').value   = '';
     document.getElementById('goal-deadline').value = '';
+    setGoalPanelBtn(null);
     statsCache = {};
     await loadGoals();
   } else {
@@ -963,8 +1007,32 @@ async function doAddGoal() {
   }
 }
 
+let confirmResolve = null;
+
+function showConfirm(message, okLabel = 'Delete', okColor = '#FF6B6B') {
+  return new Promise(resolve => {
+    document.getElementById('confirm-message').textContent = message;
+    const btn = document.getElementById('confirm-ok-btn');
+    btn.textContent = okLabel;
+    btn.style.background = okColor;
+    btn.style.color = '#fff';
+    btn.style.border = 'none';
+    document.getElementById('confirm-overlay').style.display = 'flex';
+    confirmResolve = result => {
+      document.getElementById('confirm-overlay').style.display = 'none';
+      resolve(result);
+    };
+  });
+}
+
 async function doDeleteGoal(id) {
+  if (!await showConfirm('Delete this goal? This cannot be undone.')) return;
   const r = await window.pywebview.api.delete_goal(id);
+  if (r.ok) await loadGoals();
+}
+
+async function doFinishGoal(id) {
+  const r = await window.pywebview.api.finish_goal(id);
   if (r.ok) await loadGoals();
 }
 

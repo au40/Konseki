@@ -86,6 +86,10 @@ def init_db():
         )
     """)
 
+    goal_cols = [r[1] for r in con.execute("PRAGMA table_info(goals)").fetchall()]
+    if "user_finished" not in goal_cols:
+        con.execute("ALTER TABLE goals ADD COLUMN user_finished INTEGER NOT NULL DEFAULT 0")
+
     # GSM game metadata table — stores cover images, descriptions, genres etc.
     con.execute("""
         CREATE TABLE IF NOT EXISTS gsm_games (
@@ -618,14 +622,21 @@ def get_range_extra_stats(n):
 
 
 # ── Goals ─────────────────────────────────────────────────────────────────────
+def db_finish_goal(goal_id):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("UPDATE goals SET user_finished=1 WHERE id=?", (int(goal_id),))
+    con.commit()
+    con.close()
+
 def db_get_goals():
     rows = _q(
-        "SELECT id,label,metric,target_value,deadline,chunk_period,activity_type,start_date "
+        "SELECT id,label,metric,target_value,deadline,chunk_period,activity_type,start_date,user_finished "
         "FROM goals ORDER BY deadline"
     )
     return [
         {"id": r[0], "label": r[1], "metric": r[2], "target": r[3],
-         "deadline": r[4], "chunk_period": r[5], "activity_type": r[6], "start_date": r[7]}
+         "deadline": r[4], "chunk_period": r[5], "activity_type": r[6], "start_date": r[7],
+         "user_finished": bool(r[8])}
         for r in rows
     ]
 
