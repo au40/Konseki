@@ -32,7 +32,7 @@
       letter-spacing: 0.05em;
       color: #888;
     }
-    input {
+    input, select {
       width: 100%;
       padding: 5px 8px;
       background: #2a2a3d;
@@ -42,10 +42,15 @@
       font-size: 13px;
       font-family: monospace;
     }
-    input:focus { outline: none; border-color: #9b9bc7; }
+    input:focus, select:focus { outline: none; border-color: #9b9bc7; }
+    select { font-family: system-ui, sans-serif; cursor: pointer; }
+    .btn-row {
+      display: flex;
+      gap: 6px;
+      margin-top: 10px;
+    }
     button {
-      margin-top: 14px;
-      width: 100%;
+      flex: 1;
       padding: 7px;
       background: #9b9bc7;
       border: none;
@@ -53,41 +58,110 @@
       color: #fff;
       font-size: 13px;
       cursor: pointer;
+      transition: background 0.15s;
     }
     button:hover { background: #7b7ba7; }
-    #status {
+    button.stop-btn  { background: #c05555; }
+    button.stop-btn:hover  { background: #a03a3a; }
+    button.pause-btn { background: #7a6eaa; }
+    button.pause-btn:hover { background: #5e5490; }
+    #status, #timer-status {
       margin-top: 8px;
       font-size: 11px;
       min-height: 14px;
       color: #8f8;
       text-align: center;
     }
-    #status.err { color: #f88; }
+    #status.err, #timer-status.err { color: #f88; }
     .hint {
       margin-top: 10px;
       font-size: 10px;
       color: #555;
       line-height: 1.5;
     }
+    #timer-display {
+      font-family: monospace;
+      font-size: 38px;
+      font-weight: bold;
+      text-align: center;
+      color: #eee;
+      letter-spacing: 3px;
+      margin: 6px 0 10px;
+      user-select: none;
+    }
+    #timer-display.running { color: #a0d4a0; }
+    #timer-display.paused  { color: #c8b85a; }
+    hr {
+      border: none;
+      border-top: 1px solid #2a2a3d;
+      margin: 14px 0;
+    }
+    details summary {
+      cursor: pointer;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #666;
+      list-style: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+    details summary::before {
+      content: "▶";
+      font-size: 9px;
+      transition: transform 0.15s;
+    }
+    details[open] summary::before { transform: rotate(90deg); }
+    details summary::-webkit-details-marker { display: none; }
   </style>
 </head>
 <body>
-  <h3>Immersion Tracker Sync</h3>
-  <p class="sub">Enter the port and token shown in your tracker's Settings page.</p>
+  <h3>Immersion Tracker</h3>
 
-  <label>Port</label>
-  <input id="port" type="number" placeholder="18463" min="1024" max="65535">
+  <!-- Stopwatch -->
+  <div id="timer-display">00:00:00</div>
 
-  <label>Token</label>
-  <input id="token" type="text" placeholder="paste token here" autocomplete="off" spellcheck="false">
+  <label>Activity</label>
+  <select id="activity-select">
+    <option value="Listening">Listening</option>
+    <option value="Reading">Reading</option>
+    <option value="Anime">Anime</option>
+    <option value="YouTube">YouTube</option>
+    <option value="Podcast">Podcast</option>
+    <option value="Other">Other</option>
+  </select>
 
-  <button id="save">Save</button>
-  <div id="status"></div>
+  <div class="btn-row">
+    <button id="pause-btn" style="display:none" class="pause-btn">Pause</button>
+    <button id="start-stop-btn">Start</button>
+  </div>
+  <div id="timer-status"></div>
 
-  <p class="hint">
-    Syncs automatically while you read on reader.ttsu.app.<br>
-    Tracker must be running to receive data.
-  </p>
+  <hr>
+
+  <!-- Settings (collapsed by default) -->
+  <details>
+    <summary>Extension Settings</summary>
+
+    <p class="sub" style="margin-top:10px;">Port and token from your tracker's Settings page.</p>
+
+    <label>Port</label>
+    <input id="port" type="number" placeholder="18463" min="1024" max="65535">
+
+    <label>Token</label>
+    <input id="token" type="text" placeholder="paste token here" autocomplete="off" spellcheck="false">
+
+    <div class="btn-row">
+      <button id="save">Save</button>
+    </div>
+    <div id="status"></div>
+
+    <p class="hint">
+      Also syncs automatically while you read on reader.ttsu.app.<br>
+      Tracker must be running to receive data.
+    </p>
+  </details>
 
   <script src="popup.js"></script>
 </body>

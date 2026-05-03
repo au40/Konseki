@@ -11,7 +11,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from db import get_setting, set_setting
-from imports import import_ttsu_entries
+from imports import import_ttsu_entries, log_manual_session
 
 DEFAULT_PORT    = 18463
 ALLOWED_ORIGINS = {
@@ -88,7 +88,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reject(403)
         if not self._token_ok():
             return self._reject(403)
-        if self.path != "/import":
+        if self.path not in ("/import", "/log-manual"):
             return self._reject(404)
 
         content_type = self.headers.get("Content-Type", "")
@@ -96,18 +96,28 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reject(415)
 
         try:
-            length  = int(self.headers.get("Content-Length", 0))
-            body    = json.loads(self.rfile.read(length))
-            source  = body.get("source", "")
-            entries = body.get("entries", [])
+            length = int(self.headers.get("Content-Length", 0))
+            body   = json.loads(self.rfile.read(length))
 
-            if source == "ttsureader":
-                result = import_ttsu_entries(entries)
-                if self._on_import and result.get("imported", 0) > 0:
+            if self.path == "/import":
+                source  = body.get("source", "")
+                entries = body.get("entries", [])
+                if source == "ttsureader":
+                    result = import_ttsu_entries(entries)
+                    if self._on_import and result.get("imported", 0) > 0:
+                        self._on_import()
+                    resp = json.dumps({"ok": True, **result}).encode()
+                else:
+                    return self._reject(400)
+            else:  # /log-manual
+                result = log_manual_session(
+                    body.get("activity_type", ""),
+                    body.get("time_seconds", 0),
+                    body.get("session_date", ""),
+                )
+                if self._on_import and result.get("logged"):
                     self._on_import()
                 resp = json.dumps({"ok": True, **result}).encode()
-            else:
-                return self._reject(400)
 
             self.send_response(200)
             self._send_cors(origin)

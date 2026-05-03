@@ -165,6 +165,27 @@ def pull_gsm_now(url=None):
 
 
 # ── ッツ Reader ────────────────────────────────────────────────────────────────
+def log_manual_session(activity_type, time_seconds, session_date):
+    """Insert a manually timed stopwatch session into the DB."""
+    if not activity_type:
+        return {"error": "activity_type is required"}
+    if not session_date:
+        session_date = get_today()
+    time_secs = float(time_seconds or 0)
+    if time_secs <= 0:
+        return {"error": "time_seconds must be > 0"}
+
+    con = sqlite3.connect(DB_PATH)
+    con.execute("""
+        INSERT INTO sessions
+          (source, title, activity_type, session_date, time_seconds, ingested_at, time_excluded)
+        VALUES (?,?,?,?,?,?,0)
+    """, ("manual", None, activity_type, session_date, time_secs, datetime.now().isoformat()))
+    con.commit()
+    con.close()
+    return {"logged": True}
+
+
 def import_ttsu_entries(entries):
     """Insert a list of ッツ Reader stat dicts into the DB. Returns {imported, skipped, titles}."""
     imported    = 0
