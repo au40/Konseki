@@ -44,6 +44,15 @@ function fmtChars(n) {
   if (n >= 1000)      return `${(n/1000).toFixed(1)}k`;
   return String(n);
 }
+function twRolling(charArr, secsArr, window) {
+  return charArr.map((_, i) => {
+    const start = Math.max(0, i - window + 1);
+    let c = 0, s = 0;
+    for (let j = start; j <= i; j++) { c += charArr[j]; s += secsArr[j]; }
+    return s > 0 && c > 0 ? c / (s / 3600) : null;
+  });
+}
+
 function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
@@ -1296,6 +1305,7 @@ function renderSeriesDetail(s, memberDetails = []) {
       if (!dailyMap[row.date]) dailyMap[row.date] = { date: row.date, chars: 0, seconds: 0 };
       dailyMap[row.date].chars   += row.chars;
       dailyMap[row.date].seconds += row.seconds;
+      // speed is recomputed per-day from aggregated chars/seconds
     });
   });
   if (!memberDetails.length) totalSecs = s.total_secs || 0;
@@ -1307,6 +1317,12 @@ function renderSeriesDetail(s, memberDetails = []) {
   const lastDate  = dates[dates.length - 1] || '—';
   const avgSpeed  = totalSecs > 0 && totalChars > 0
     ? Math.round(totalChars / (totalSecs / 3600)) : 0;
+
+  const last7s = daily.slice(-7);
+  const l7chars = last7s.reduce((s, r) => s + r.chars, 0);
+  const l7secs  = last7s.reduce((s, r) => s + r.seconds, 0);
+  const l7speed = l7secs > 0 && l7chars > 0 ? Math.round(l7chars / (l7secs / 3600)) : 0;
+  const l7display = l7speed > 0 ? `${fmtChars(l7speed)}/h` : '—';
 
   // Stat cards
   const statsEl = document.getElementById('series-detail-stats');
@@ -1326,9 +1342,8 @@ function renderSeriesDetail(s, memberDetails = []) {
       <div class="value" style="color:var(--warn);font-size:22px">${avgSpeed > 0 ? fmtChars(avgSpeed) + '/h' : '—'}</div>
     </div>
     <div class="stat-card">
-      <div class="label">Days Read</div>
-      <div class="value" style="color:var(--purple);font-size:22px">${daysCount}</div>
-      <div class="sub">${firstDate} → ${lastDate}</div>
+      <div class="label">Speed last 7d</div>
+      <div class="value" style="color:var(--purple);font-size:22px">${l7display}</div>
     </div>
     ${hasMining ? `
     <div class="stat-card">
@@ -1343,11 +1358,15 @@ function renderSeriesDetail(s, memberDetails = []) {
 function renderSeriesCharts(daily) {
   destroyChart('series-chars');
   destroyChart('series-time');
+  destroyChart('series-speed');
+  destroyChart('series-speed-rolling');
   if (!daily.length) return;
 
   const labels      = daily.map(r => r.date.slice(5));
   const charVals    = daily.map(r => r.chars);
   const timeVals    = daily.map(r => r.seconds);
+  const speedVals   = daily.map(r => r.seconds > 0 && r.chars > 0 ? r.chars / (r.seconds / 3600) : 0);
+  const twSpeedVals = twRolling(charVals, timeVals, 7);
   const step        = Math.max(1, Math.floor(labels.length / 14));
   const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
 
@@ -1390,13 +1409,88 @@ function renderSeriesCharts(daily) {
       }
     });
   }
+
+  const speedSection = document.getElementById('series-speed-section');
+  if (speedVals.some(v => v > 0)) {
+    speedSection.style.display = 'block';
+    const seriesSpeedOpts = {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: c => labels[c[0].dataIndex],
+            label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : ''
+          }
+        }
+      },
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false, afterFit: s => { s.width = 62; } },
+      },
+    };
+    const speedCtx = document.getElementById('chart-series-speed').getContext('2d');
+    charts['series-speed'] = new Chart(speedCtx, {
+      type: 'line',
+      data: {
+        labels: shownLabels,
+        datasets: [{
+          label: 'Read speed',
+          data: speedVals.map(v => v > 0 ? v : null),
+          borderColor: '#4ECBA0',
+          backgroundColor: 'rgba(78,203,160,0.08)',
+          borderWidth: 2,
+          pointRadius: 4,
+          pointHoverRadius: 7,
+          pointBackgroundColor: '#4ECBA0',
+          pointBorderColor: '#24243A',
+          pointBorderWidth: 2,
+          fill: true,
+          tension: 0.35,
+          spanGaps: false,
+        }]
+      },
+      options: seriesSpeedOpts,
+    });
+    const rollingCtx = document.getElementById('chart-series-speed-rolling').getContext('2d');
+    charts['series-speed-rolling'] = new Chart(rollingCtx, {
+      type: 'line',
+      data: {
+        labels: shownLabels,
+        datasets: [{
+          label: 'Read speed (7d rolling)',
+          data: twSpeedVals,
+          borderColor: '#4ECBA0',
+          backgroundColor: 'rgba(78,203,160,0.08)',
+          borderWidth: 2,
+          pointRadius: 4,
+          pointHoverRadius: 7,
+          pointBackgroundColor: '#4ECBA0',
+          pointBorderColor: '#24243A',
+          pointBorderWidth: 2,
+          fill: true,
+          tension: 0.35,
+          spanGaps: true,
+        }]
+      },
+      options: seriesSpeedOpts,
+    });
+  } else {
+    speedSection.style.display = 'none';
+  }
 }
 
 function closeSeriesDetail() {
   destroyChart('series-chars');
   destroyChart('series-time');
-  currentSeriesId = null;
+  destroyChart('series-speed');
+  destroyChart('series-speed-rolling');
+  destroyChart('detail');
+  destroyChart('detail-time');
+  currentSeriesId    = null;
+  currentDetailTitle = null;
   document.getElementById('media-series-view').style.display = 'none';
+  document.getElementById('media-detail-view').style.display = 'none';
   document.getElementById('media-grid-view').style.display   = 'block';
   renderMediaGrid();
 }
@@ -1420,7 +1514,8 @@ async function openMediaDetail(title) {
   if (!detail) return;
   currentDetailTitle = title;
 
-  document.getElementById('media-grid-view').style.display  = 'none';
+  document.getElementById('media-grid-view').style.display   = 'none';
+  document.getElementById('media-series-view').style.display = 'none';
   document.getElementById('media-detail-view').style.display = 'block';
   renderMediaDetail(detail);
 }
@@ -1504,6 +1599,12 @@ function renderMediaDetail(d) {
     : '—';
 
   // Stats grid — always show 4 base cards; add cards mined if present
+  const last7 = (d.daily || []).slice(-7);
+  const l7chars = last7.reduce((s, r) => s + r.chars, 0);
+  const l7secs  = last7.reduce((s, r) => s + r.seconds, 0);
+  const l7speed = l7secs > 0 && l7chars > 0 ? Math.round(l7chars / (l7secs / 3600)) : 0;
+  const l7display = l7speed > 0 ? `${fmtChars(l7speed)}/h` : '—';
+
   const statsGrid = document.getElementById('detail-stats-grid');
   const hasMining = isGSM && d.total_cards > 0;
   statsGrid.style.gridTemplateColumns = hasMining ? 'repeat(5,1fr)' : 'repeat(4,1fr)';
@@ -1522,9 +1623,8 @@ function renderMediaDetail(d) {
       <div class="value" style="color:var(--warn);font-size:22px">${speedDisplay}</div>
     </div>
     <div class="stat-card">
-      <div class="label">Days Read</div>
-      <div class="value" style="color:var(--purple);font-size:22px">${d.days_count}</div>
-      <div class="sub">${d.first_date} → ${d.last_date}</div>
+      <div class="label">Speed last 7d</div>
+      <div class="value" style="color:var(--purple);font-size:22px">${l7display}</div>
     </div>
     ${hasMining ? `
     <div class="stat-card">
@@ -1546,33 +1646,35 @@ function renderDetailChart(daily, isGSM) {
   destroyChart('detail');
   destroyChart('detail-time');
   destroyChart('detail-speed');
+  destroyChart('detail-speed-rolling');
   if (!daily.length) return;
 
   const n = daily.length;
   let labels, charVals, speedVals, timeVals;
 
   if (n > 90) {
-    const wb = {}, tb = {}, sb = {}, sc = {};
-    daily.forEach(({ date: dt, chars: c, seconds: sec, speed: sp }) => {
+    const wb = {}, tb = {};
+    daily.forEach(({ date: dt, chars: c, seconds: sec }) => {
       const d  = new Date(dt);
       const wk = `${d.getFullYear()}-W${String(Math.ceil(
         (d.getDate() + new Date(d.getFullYear(), 0, 1).getDay()) / 7
       )).padStart(2,'0')}`;
       wb[wk] = (wb[wk] || 0) + c;
       tb[wk] = (tb[wk] || 0) + sec;
-      if (sp > 0) { sb[wk] = (sb[wk] || 0) + sp; sc[wk] = (sc[wk] || 0) + 1; }
     });
     const agg = Object.entries(wb).sort();
     labels    = agg.map(([k]) => k);
     charVals  = agg.map(([k]) => wb[k]);
     timeVals  = agg.map(([k]) => tb[k]);
-    speedVals = agg.map(([k]) => sc[k] ? sb[k] / sc[k] : 0);
+    speedVals = charVals.map((c, i) => timeVals[i] > 0 ? c / (timeVals[i] / 3600) : 0);
   } else {
     labels    = daily.map(r => r.date.slice(5));
     charVals  = daily.map(r => r.chars);
     timeVals  = daily.map(r => r.seconds);
     speedVals = daily.map(r => r.speed || 0);
   }
+
+  const twSpeedVals = twRolling(charVals, timeVals, 7);
 
   const step        = Math.max(1, Math.floor(labels.length / 14));
   const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
@@ -1610,6 +1712,17 @@ function renderDetailChart(daily, isGSM) {
   if (hasSpeed) {
     speedSection.style.display = 'block';
     const speedCtx = document.getElementById('chart-detail-speed').getContext('2d');
+    const speedLineOpts = {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : '' } }
+      },
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false, afterFit: s => { s.width = 62; } },
+      },
+    };
     charts['detail-speed'] = new Chart(speedCtx, {
       type: 'line',
       data: {
@@ -1630,19 +1743,31 @@ function renderDetailChart(daily, isGSM) {
           spanGaps: false,
         }]
       },
-      options: {
-        responsive: true, maintainAspectRatio: false, animation: false,
-        plugins: {
-          legend: { display: false },
-          tooltip: {
-            callbacks: { label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : '' }
-          }
-        },
-        scales: {
-          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false, afterFit: s => { s.width = 62; } },
-        },
-      }
+      options: speedLineOpts,
+    });
+
+    const rollingCtx = document.getElementById('chart-detail-speed-rolling').getContext('2d');
+    charts['detail-speed-rolling'] = new Chart(rollingCtx, {
+      type: 'line',
+      data: {
+        labels: shownLabels,
+        datasets: [{
+          label: 'Read speed (7d rolling)',
+          data: twSpeedVals,
+          borderColor: '#4ECBA0',
+          backgroundColor: 'rgba(78,203,160,0.08)',
+          borderWidth: 2,
+          pointRadius: 4,
+          pointHoverRadius: 7,
+          pointBackgroundColor: '#4ECBA0',
+          pointBorderColor: '#24243A',
+          pointBorderWidth: 2,
+          fill: true,
+          tension: 0.35,
+          spanGaps: true,
+        }]
+      },
+      options: speedLineOpts,
     });
   } else {
     speedSection.style.display = 'none';
