@@ -670,8 +670,20 @@ def db_get_goal_progress():
         if g["metric"] not in SAFE_METRICS:
             continue
 
+        try:
+            deadline_d = datetime.strptime(g["deadline"], "%Y-%m-%d").date()
+        except Exception:
+            deadline_d = today_d
+        try:
+            start_d = datetime.strptime(g["start_date"], "%Y-%m-%d").date()
+        except Exception:
+            start_d = today_d
+
+        # For past-deadline goals, don't count sessions recorded after the deadline
+        count_up_to = min(today_str, g["deadline"])
+
         where_parts = ["session_date >= ?", "session_date <= ?"]
-        params      = [g["start_date"], today_str]
+        params      = [g["start_date"], count_up_to]
         if g["activity_type"]:
             where_parts.append("activity_type=?")
             params.append(g["activity_type"])
@@ -686,27 +698,18 @@ def db_get_goal_progress():
 
         week_start_str  = (today_d - timedelta(days=today_d.weekday())).strftime("%Y-%m-%d")
         week_where       = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
-        week_params      = [week_start_str, today_str] + ([g["activity_type"]] if g["activity_type"] else [])
+        week_params      = [week_start_str, count_up_to] + ([g["activity_type"]] if g["activity_type"] else [])
         week_sql         = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(week_where)}"
         week_completed   = (_q1(week_sql, *week_params) or (0,))[0] or 0.0
 
         month_start_str  = today_d.strftime("%Y-%m-01")
         month_where      = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
-        month_params     = [month_start_str, today_str] + ([g["activity_type"]] if g["activity_type"] else [])
+        month_params     = [month_start_str, count_up_to] + ([g["activity_type"]] if g["activity_type"] else [])
         month_sql        = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(month_where)}"
         month_completed  = (_q1(month_sql, *month_params) or (0,))[0] or 0.0
 
         remaining = max(0.0, g["target"] - completed)
         pct       = min(100.0, round(completed / g["target"] * 100, 1)) if g["target"] > 0 else 0.0
-
-        try:
-            deadline_d = datetime.strptime(g["deadline"], "%Y-%m-%d").date()
-        except Exception:
-            deadline_d = today_d
-        try:
-            start_d = datetime.strptime(g["start_date"], "%Y-%m-%d").date()
-        except Exception:
-            start_d = today_d
 
         days_left  = max(0, (deadline_d - today_d).days)
         total_days = max(1, (deadline_d - start_d).days)
