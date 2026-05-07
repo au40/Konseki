@@ -123,7 +123,20 @@ async function loadDashboard() {
   if (!d.today.length) {
     list.innerHTML = '<p class="empty-msg">No sessions yet today. Use Log entry, pull from GSM, or drop a session file.</p>';
   } else {
-    d.today.forEach(s => list.appendChild(makeSessionRow(s)));
+    const grouped = [];
+    const seen = {};
+    d.today.forEach(s => {
+      const key = (s.title || '') + '\x00' + (s.activity_type || '') + '\x00' + (s.source || '');
+      if (seen[key] !== undefined) {
+        grouped[seen[key]].push(s);
+      } else {
+        seen[key] = grouped.length;
+        grouped.push([s]);
+      }
+    });
+    grouped.forEach(group => list.appendChild(
+      group.length === 1 ? makeSessionRow(group[0]) : makeGroupedSessionRow(group)
+    ));
   }
 
   const bars = document.getElementById('weekly-bars');
@@ -175,8 +188,32 @@ function makeSessionRow(s) {
   return el;
 }
 
+function makeGroupedSessionRow(sessions) {
+  const s = sessions[0];
+  const totalSeconds = sessions.reduce((a, r) => a + r.seconds, 0);
+  const totalChars   = sessions.reduce((a, r) => a + r.chars, 0);
+  const color = acolor(s.activity_type);
+  const ids   = sessions.map(r => r.id);
+  const el    = document.createElement('div');
+  el.className = 'session-row';
+  el.innerHTML = `
+    <div class="session-badge" style="background:${color}"></div>
+    <div class="session-body">
+      <div class="session-title">${s.title || s.activity_type || '—'}</div>
+      <div class="session-meta">${srcLabel(s.source)} · ${s.activity_type || ''} · ${s.date || today()}</div>
+      <div class="session-group-count">${sessions.length} sessions</div>
+    </div>
+    <div class="session-right">
+      ${totalSeconds > 0 ? `<span class="session-time" style="color:${color}">${fmtTime(totalSeconds)}</span>` : ''}
+      ${totalChars   > 0 ? `<span class="session-chars">${fmtChars(totalChars)} chars</span>` : ''}
+      <button class="btn btn-xs btn-danger" style="margin-top:4px" onclick="doDeleteSessionGroup([${ids.join(',')}], this)">✕</button>
+    </div>`;
+  return el;
+}
+
 // ── Delete session ─────────────────────────────────────────────────────────
 async function doDeleteSession(id, btn) {
+  if (!await showConfirm('Delete this session? This cannot be undone.')) return;
   btn.disabled = true;
   const r = await window.pywebview.api.delete_session(id);
   if (r.ok) {
@@ -187,6 +224,19 @@ async function doDeleteSession(id, btn) {
   } else {
     btn.disabled = false;
   }
+}
+
+async function doDeleteSessionGroup(ids, btn) {
+  if (!await showConfirm(ids.length > 1 ? `Delete ${ids.length} sessions? This cannot be undone.` : 'Delete this session? This cannot be undone.')) return;
+  btn.disabled = true;
+  for (const id of ids) {
+    const r = await window.pywebview.api.delete_session(id);
+    if (!r.ok) { btn.disabled = false; return; }
+  }
+  btn.closest('.session-row').remove();
+  statsCache = {};
+  setStatus(ids.length > 1 ? `${ids.length} sessions deleted` : 'Session deleted');
+  if (currentPage === 'dashboard') loadDashboard();
 }
 
 // ── Heatmap renderer ────────────────────────────────────────────────────────
