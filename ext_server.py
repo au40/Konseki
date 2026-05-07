@@ -10,8 +10,10 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-from db import get_setting, set_setting
+from db import get_setting, set_setting, db_get_custom_categories
 from imports import import_ttsu_entries, log_manual_session
+
+BUILTIN_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"]
 
 DEFAULT_PORT    = 18463
 ALLOWED_ORIGINS = {
@@ -63,7 +65,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_cors(self, origin):
         if self._origin_ok(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Tracker-Token")
         self.send_header("Access-Control-Max-Age", "86400")
 
@@ -78,6 +80,25 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self._send_cors(origin)
         self.end_headers()
+
+    def do_GET(self):
+        origin = self.headers.get("Origin", "")
+        if not self._host_ok() or not self._origin_ok(origin):
+            return self._reject(403)
+        if not self._token_ok():
+            return self._reject(403)
+        if self.path != "/activity-types":
+            return self._reject(404)
+
+        custom = [c["name"] for c in db_get_custom_categories()]
+        types  = BUILTIN_ACTIVITY_TYPES + [c for c in custom if c not in BUILTIN_ACTIVITY_TYPES]
+        resp   = json.dumps(types).encode()
+
+        self.send_response(200)
+        self._send_cors(origin)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(resp)
 
     def do_POST(self):
         origin = self.headers.get("Origin", "")

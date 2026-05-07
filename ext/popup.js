@@ -4,6 +4,40 @@ const tokenEl  = document.getElementById("token");
 const saveBtn  = document.getElementById("save");
 const statusEl = document.getElementById("status");
 
+const FALLBACK_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"];
+
+function populateActivitySelect(types) {
+  const prev = activitySelect.value;
+  activitySelect.innerHTML = "";
+  for (const t of types) {
+    const opt = document.createElement("option");
+    opt.value = opt.textContent = t;
+    activitySelect.appendChild(opt);
+  }
+  // Restore previous selection if still present
+  if ([...activitySelect.options].some(o => o.value === prev)) {
+    activitySelect.value = prev;
+  }
+}
+
+async function fetchActivityTypes() {
+  const cfg   = await browser.storage.local.get(["port", "token"]);
+  const port  = cfg.port  || 18463;
+  const token = (cfg.token || "").trim();
+  if (!token) return;
+  try {
+    const resp  = await fetch(`http://127.0.0.1:${port}/activity-types`, {
+      headers: { "X-Tracker-Token": token },
+    });
+    if (resp.ok) {
+      const types = await resp.json();
+      if (Array.isArray(types) && types.length) populateActivitySelect(types);
+    }
+  } catch {
+    // Tracker not running — keep fallback list
+  }
+}
+
 browser.storage.local.get(["port", "token"]).then(cfg => {
   portEl.value  = cfg.port  || 18463;
   tokenEl.value = cfg.token || "";
@@ -109,13 +143,17 @@ function applyState(cfg) {
   }
 }
 
-// Restore state when popup opens
+// Restore state and fetch activity types when popup opens
 browser.storage.local.get(
   ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity"]
 ).then(cfg => {
   if (cfg.timerActivity) activitySelect.value = cfg.timerActivity;
   applyState(cfg);
 });
+
+// Populate with fallback immediately, then overwrite with live list
+populateActivitySelect(FALLBACK_ACTIVITY_TYPES);
+fetchActivityTypes();
 
 // ── Pause / Resume ────────────────────────────────────────────────────────────
 pauseBtn.addEventListener("click", async () => {
