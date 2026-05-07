@@ -4,7 +4,11 @@
   "version": "1.0",
   "description": "Passively syncs ッツ Reader session data to your local Immersion Tracker.",
 
-  "permissions": ["storage"],
+  "permissions": ["storage", "activeTab", "scripting"],
+
+  "background": {
+    "scripts": ["background.js"]
+  },
   "host_permissions": [
     "https://reader.ttsu.app/*",
     "https://app.yatsu.moe/*",

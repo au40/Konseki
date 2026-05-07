@@ -65,6 +65,31 @@
     button.stop-btn:hover  { background: #a03a3a; }
     button.pause-btn { background: #7a6eaa; }
     button.pause-btn:hover { background: #5e5490; }
+.manual-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .manual-row input[type="checkbox"] {
+      width: auto;
+      accent-color: #9b9bc7;
+      cursor: pointer;
+    }
+    .manual-row label {
+      margin: 0;
+      font-size: 11px;
+      text-transform: none;
+      letter-spacing: normal;
+      color: #666;
+      cursor: pointer;
+    }
+    #timer-status.prompt {
+      color: #9b9bc7;
+      cursor: pointer;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
     #status, #timer-status {
       margin-top: 8px;
       font-size: 11px;
@@ -131,6 +156,11 @@
     <option value="Podcast">Podcast</option>
     <option value="Other">Other</option>
   </select>
+
+  <div class="manual-row">
+    <input type="checkbox" id="manual-check">
+    <label for="manual-check">Manual logging</label>
+  </div>
 
   <div class="btn-row">
     <button id="pause-btn" style="display:none" class="pause-btn">Pause</button>

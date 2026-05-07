@@ -36,6 +36,7 @@ const activitySelect = document.getElementById("activity-select");
 const pauseBtn       = document.getElementById("pause-btn");
 const startStopBtn   = document.getElementById("start-stop-btn");
 const timerStatus    = document.getElementById("timer-status");
+const manualCheck    = document.getElementById("manual-check");
 
 let timerInterval = null;
 
@@ -85,6 +86,17 @@ function applyState(cfg) {
     activitySelect.disabled = true;
     timerDisplay.textContent = formatTime(cfg.timerElapsed || 0);
 
+  } else if (cfg.timerWaiting) {
+    // Armed — waiting for first play event
+    timerDisplay.classList.remove("running", "paused");
+    timerDisplay.textContent = "00:00:00";
+    pauseBtn.style.display = "none";
+    startStopBtn.textContent = "Stop";
+    startStopBtn.className = "stop-btn";
+    activitySelect.disabled = true;
+    timerStatus.textContent = "Waiting for playback…";
+    timerStatus.className   = "";
+
   } else {
     // Idle
     timerDisplay.classList.remove("running", "paused");
@@ -93,12 +105,13 @@ function applyState(cfg) {
     startStopBtn.textContent = "Start";
     startStopBtn.className = "";
     activitySelect.disabled = false;
+    timerStatus.textContent = "";
   }
 }
 
 // Restore state when popup opens
 browser.storage.local.get(
-  ["timerRunning", "timerPaused", "timerStart", "timerElapsed", "timerActivity"]
+  ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity"]
 ).then(cfg => {
   if (cfg.timerActivity) activitySelect.value = cfg.timerActivity;
   applyState(cfg);
@@ -136,29 +149,98 @@ pauseBtn.addEventListener("click", async () => {
 // ── Start / Stop ──────────────────────────────────────────────────────────────
 startStopBtn.addEventListener("click", async () => {
   const cfg = await browser.storage.local.get(
-    ["timerRunning", "timerPaused", "timerStart", "timerElapsed", "port", "token"]
+    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "port", "token"]
   );
 
-  if (!cfg.timerRunning && !cfg.timerPaused) {
+  if (!cfg.timerRunning && !cfg.timerPaused && !cfg.timerWaiting) {
     // → Start
-    const timerStart = Date.now();
-    await browser.storage.local.set({
-      timerRunning: true,
-      timerPaused:  false,
-      timerStart,
-      timerElapsed: 0,
-      timerActivity: activitySelect.value,
-    });
-    applyState({ timerRunning: true, timerStart, timerElapsed: 0 });
+    const activity = activitySelect.value;
+
+    async function startRunning(tabId) {
+      const timerStart = Date.now();
+      await browser.storage.local.set({
+        timerRunning: true, timerPaused: false,
+        timerStart, timerElapsed: 0, timerActivity: activity,
+      });
+      applyState({ timerRunning: true, timerStart, timerElapsed: 0 });
+      if (tabId) {
+        try { await browser.scripting.executeScript({ target: { tabId }, files: ["timer-overlay.js"] }); } catch {}
+      }
+    }
+
+    async function startWaiting(tabId) {
+      await browser.storage.local.set({
+        timerWaiting: true, timerRunning: false,
+        timerPaused: false, timerElapsed: 0, timerActivity: activity,
+      });
+      applyState({ timerWaiting: true, timerElapsed: 0 });
+      try { await browser.scripting.executeScript({ target: { tabId }, files: ["timer-overlay.js"] }); } catch {}
+    }
+
+    // Get current tab id (best-effort)
+    let tabId = null;
+    try {
+      const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+      tabId = tab?.id ?? null;
+    } catch {}
+
+    // Manual checkbox — skip detection entirely
+    if (manualCheck.checked) {
+      await startRunning(tabId);
+      return;
+    }
+
+    // Inject listener (best-effort — failures don't block detection)
+    if (tabId) {
+      try { await browser.scripting.executeScript({ target: { tabId }, files: ["media-listener.js"] }); } catch {}
+    }
+
+    // Detect video state: exists? already playing?
+    let videoState = { found: false, playing: false };
+    if (tabId) {
+      try {
+        const check = await browser.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            const els = Array.from(document.querySelectorAll("video, audio"));
+            return {
+              found:   els.length > 0,
+              playing: els.some(el => !el.paused && !el.ended && el.readyState > 2),
+            };
+          },
+        });
+        videoState = check?.[0]?.result ?? videoState;
+      } catch {}
+    }
+
+    if (videoState.playing) {
+      // Video already playing — start ticking immediately
+      await startRunning(tabId);
+    } else if (videoState.found) {
+      // Video exists but paused — wait for play event
+      await startWaiting(tabId);
+    } else {
+      // No video found — prompt
+      timerStatus.textContent = "No video detected! Activate manual logging?";
+      timerStatus.className   = "prompt";
+      timerStatus.onclick = async () => {
+        timerStatus.onclick     = null;
+        timerStatus.className   = "";
+        timerStatus.textContent = "";
+        manualCheck.checked     = true;
+        await startRunning(tabId);
+      };
+    }
     return;
   }
 
-  // → Stop (from running or paused)
+  // → Stop (from running, paused, or waiting)
+  timerStatus.onclick = null;
   const elapsed  = getElapsed(cfg);
   const activity = activitySelect.value;
 
   await browser.storage.local.remove(
-    ["timerRunning", "timerPaused", "timerStart", "timerElapsed", "timerActivity"]
+    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerAutoPaused"]
   );
   applyState({});
 

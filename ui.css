@@ -21,19 +21,19 @@
 
 [data-theme="mint"] {
   --accent:    #2EAA92;
-  --surface:   #EEF8F5;
-  --card:      #FFFFFF;
-  --muted:     #6B9E99;
-  --success:   #28A07A;
+  --surface:   #DDF2EC;
+  --card:      #F2F2F5;
+  --muted:     #6B6B8A;
+  --success:   #4ECBA0;
   --text:      #1E3A35;
-  --dim:       #8AADA9;
-  --warn:      #D4812A;
-  --grid:      #C2E4DC;
-  --hover:     #DDF2EC;
-  --purple:    #9A82D4;
-  --pink:      #E896B8;
-  --input-bg:  #DFF0EC;
-  --inset:     #DDF2EC;
+  --dim:       #9090A8;
+  --warn:      #FF9F5B;
+  --grid:      #D0D0D8;
+  --hover:     #E8E8EE;
+  --purple:    #C78BFF;
+  --pink:      #FF7BAC;
+  --input-bg:  #E8E8EE;
+  --inset:     #E4E4EA;
 }
 
 html, body { height: 100%; background: var(--surface); color: var(--text);
@@ -580,16 +580,19 @@ span.flatpickr-weekday { color: var(--dim) !important; background: #2a2a42 !impo
 .numInputWrapper span.arrowUp:after  { border-bottom-color: var(--dim) !important; }
 .numInputWrapper span.arrowDown:after { border-top-color: var(--dim) !important; }
 
+/* ── Mint theme — hardcoded color overrides ──────────────────────────────── */
+[data-theme="mint"] .genre-badge { background: var(--inset); }
+
 /* ── Mint theme — flatpickr overrides ────────────────────────────────────── */
 [data-theme="mint"] .flatpickr-calendar {
-  background: #FFFFFF !important;
+  background: #F2F2F5 !important;
   box-shadow: 0 8px 24px rgba(46,170,146,0.15) !important;
 }
 [data-theme="mint"] .flatpickr-months,
 [data-theme="mint"] .flatpickr-weekdays,
 [data-theme="mint"] span.flatpickr-weekday,
 [data-theme="mint"] .flatpickr-current-month .flatpickr-monthDropdown-months {
-  background: #FFFFFF !important;
+  background: #F2F2F5 !important;
 }
 
 /* ── Theme toggle button ─────────────────────────────────────────────────── */

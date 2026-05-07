@@ -3,6 +3,42 @@
 // touch the page context.
 
 browser.runtime.onMessage.addListener(async (msg) => {
+  if (msg.type === "media-pause") {
+    const cfg = await browser.storage.local.get(["timerRunning", "timerStart", "timerElapsed"]);
+    if (!cfg.timerRunning) return;
+    const elapsed = (cfg.timerElapsed || 0) + Math.floor((Date.now() - cfg.timerStart) / 1000);
+    await browser.storage.local.set({
+      timerRunning:   false,
+      timerPaused:    true,
+      timerAutoPaused: true,
+      timerElapsed:   elapsed,
+      timerStart:     null,
+    });
+    return;
+  }
+
+  if (msg.type === "media-play") {
+    const cfg = await browser.storage.local.get(["timerWaiting", "timerPaused", "timerAutoPaused"]);
+    if (cfg.timerWaiting) {
+      // First play after Start — begin ticking for the first time
+      await browser.storage.local.set({
+        timerWaiting: false,
+        timerRunning: true,
+        timerPaused:  false,
+        timerStart:   Date.now(),
+      });
+      return;
+    }
+    if (!cfg.timerPaused || !cfg.timerAutoPaused) return;
+    await browser.storage.local.set({
+      timerRunning:    true,
+      timerPaused:     false,
+      timerAutoPaused: false,
+      timerStart:      Date.now(),
+    });
+    return;
+  }
+
   if (msg.type !== "sync") return;
 
   const cfg   = await browser.storage.local.get(["port", "token"]);
