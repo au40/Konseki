@@ -8,9 +8,9 @@ import json
 import zipfile
 import io
 import requests
-from datetime import datetime
-
-from db import DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1, ingest_session_file
+from datetime import datetime, date
+from db import (DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1,
+                ingest_session_file, in_rollover_window, upsert_gsm_attribution)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 GSM_API = "http://localhost:7275/api/stats"
@@ -49,7 +49,7 @@ def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_hea
     """
     if not daily_activity:
         return 0
-    today_str = get_today()
+    today_str = str(date.today())
     existing  = {
         r[0] for r in con.execute(
             "SELECT DISTINCT session_date FROM sessions WHERE title=? AND source='gsm'",
@@ -85,8 +85,8 @@ def pull_gsm_now(url=None):
         r.raise_for_status()
         data = r.json()
 
-        today_str  = get_today()
-        today_year = today_str[:4]
+        real_date  = str(date.today())
+        today_year = real_date[:4]
 
         cur       = data.get("currentGameStats") or {}
         game_name = cur.get("game_name", "Unknown game")
@@ -96,15 +96,15 @@ def pull_gsm_now(url=None):
         if game_id:
             _upsert_gsm_game(cur)
 
-        # Today's characters — try all-games combined first, fall back to current game
+        # Today's characters (keyed by real calendar date in GSM's response)
         today_chars = (data.get("characterActivityData") or {}) \
-                          .get(today_year, {}).get(today_str, 0)
+                          .get(today_year, {}).get(real_date, 0)
         if not today_chars:
-            today_chars = cur.get("daily_activity", {}).get(today_str, 0)
+            today_chars = cur.get("daily_activity", {}).get(real_date, 0)
 
         # Today's reading speed from heatmap, fall back to global average
         today_speed = (data.get("readingSpeedHeatmapData") or {}) \
-                          .get(today_year, {}).get(today_str, 0)
+                          .get(today_year, {}).get(real_date, 0)
         if not today_speed:
             today_speed = (data.get("allGamesStats") or {}).get("reading_speed", 0)
         time_seconds = (today_chars / today_speed * 3600) if today_speed > 0 else 0
@@ -113,14 +113,16 @@ def pull_gsm_now(url=None):
         cards_data  = data.get("cardsMinedLast30Days") or {}
         cl          = cards_data.get("labels", [])
         ct          = cards_data.get("totals", [])
-        today_cards = ct[cl.index(today_str)] if today_str in cl else 0
+        today_cards = ct[cl.index(real_date)] if real_date in cl else 0
 
+        # Session is stored at the real calendar date. Rollover bucketing happens at
+        # display time via gsm_rollover_attributions (captured below).
         s = {
             "source":        "gsm",
             "activity_type": "Reading",
             "title":         game_name,
             "game_id":       game_id,
-            "session_date":  today_str,
+            "session_date":  real_date,
             "chars_read":    int(today_chars),
             "lines_read":    0,
             "time_seconds":  float(time_seconds),
@@ -128,7 +130,7 @@ def pull_gsm_now(url=None):
             "cards_mined":   int(today_cards),
         }
 
-        out = SESSIONS_DIR / f"gsm_{today_str}.json"
+        out = SESSIONS_DIR / f"gsm_{real_date}.json"
         json.dump(s, open(out, "w", encoding="utf-8"), indent=2)
 
         # Clear old entry so re-pulls always refresh with latest data
@@ -136,12 +138,24 @@ def pull_gsm_now(url=None):
         con.execute("DELETE FROM ingested_files WHERE filepath=?", (str(out),))
         con.execute(
             "DELETE FROM sessions WHERE source='gsm' AND session_date=?",
-            (today_str,)
+            (real_date,)
         )
         con.commit()
         con.close()
 
         ingest_session_file(str(out))
+
+        # If we're in the rollover window, snapshot today's GSM totals for attribution to
+        # yesterday's bucket. Once the rollover hour passes, future pulls won't touch this
+        # row, so the early-morning chars stay attributed to yesterday permanently.
+        if in_rollover_window():
+            upsert_gsm_attribution(
+                rollover_date=get_today(),
+                source_date=real_date,
+                chars=int(today_chars),
+                time_seconds=float(time_seconds),
+                cards=int(today_cards),
+            )
 
         # Backfill historical dates for the current game (time_excluded=1)
         speed_heatmap = data.get("readingSpeedHeatmapData") or {}

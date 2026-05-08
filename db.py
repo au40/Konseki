@@ -103,6 +103,21 @@ def init_db():
         )
     """)
 
+    # GSM rollover attributions: when a pull happens during the rollover window,
+    # we capture (chars, time, cards) for that GSM real_date so they display under
+    # the rollover_date instead of source_date. PK ensures one row per (rollover, source) pair.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS gsm_rollover_attributions (
+            rollover_date TEXT NOT NULL,
+            source_date   TEXT NOT NULL,
+            chars         INTEGER NOT NULL DEFAULT 0,
+            time_seconds  REAL    NOT NULL DEFAULT 0,
+            cards         INTEGER NOT NULL DEFAULT 0,
+            updated_at    TEXT    NOT NULL,
+            PRIMARY KEY (rollover_date, source_date)
+        )
+    """)
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS title_aliases (
             original_title TEXT PRIMARY KEY,
@@ -161,6 +176,49 @@ def get_today():
 
 def get_today_date():
     return datetime.strptime(get_today(), "%Y-%m-%d").date()
+
+
+def in_rollover_window():
+    """True when the rollover hour shifts get_today() to the previous calendar date."""
+    return get_today() != str(date.today())
+
+
+def upsert_gsm_attribution(rollover_date, source_date, chars, time_seconds, cards):
+    """Record (or refresh) chars/time/cards from GSM source_date that should display under rollover_date.
+    Called only when pulling during the rollover window."""
+    con = sqlite3.connect(DB_PATH)
+    con.execute("""
+        INSERT INTO gsm_rollover_attributions
+          (rollover_date, source_date, chars, time_seconds, cards, updated_at)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(rollover_date, source_date) DO UPDATE SET
+          chars=excluded.chars,
+          time_seconds=excluded.time_seconds,
+          cards=excluded.cards,
+          updated_at=excluded.updated_at
+    """, (rollover_date, source_date, int(chars), float(time_seconds),
+          int(cards), datetime.now().isoformat()))
+    con.commit()
+    con.close()
+
+
+def get_gsm_day_adjustment(d):
+    """Return (chars, time_seconds, cards) net adjustment to apply to date d's GSM totals.
+    Adds attributions where rollover_date=d (chars belonging to d from another source_date),
+    subtracts attributions where source_date=d (chars belonging elsewhere)."""
+    con = sqlite3.connect(DB_PATH)
+    add = con.execute(
+        "SELECT COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0), COALESCE(SUM(cards),0) "
+        "FROM gsm_rollover_attributions WHERE rollover_date=? AND source_date<>?",
+        (d, d)
+    ).fetchone()
+    sub = con.execute(
+        "SELECT COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0), COALESCE(SUM(cards),0) "
+        "FROM gsm_rollover_attributions WHERE source_date=? AND rollover_date<>?",
+        (d, d)
+    ).fetchone()
+    con.close()
+    return (add[0] - sub[0], add[1] - sub[1], add[2] - sub[2])
 
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
@@ -285,20 +343,71 @@ def _get_aliases():
 
 # ── Queries ───────────────────────────────────────────────────────────────────
 def get_today_stats():
-    return _q("""
-        SELECT id,source,title,activity_type,chars_read,lines_read,time_seconds
-        FROM sessions WHERE session_date=? AND (time_excluded IS NULL OR time_excluded=0)
+    # Today's bucket = get_today(). When rollover is active, also include sessions at
+    # real calendar date — attributions between those two dates cancel out within the bucket
+    # (chars stay accounted for in the listed rows). For attributions where only one of
+    # rollover_date/source_date falls in the bucket, adjust per-row or synthesize phantom rows.
+    today = get_today()
+    real  = str(date.today())
+    bucket = (today,) if today == real else (today, real)
+    placeholders = ",".join("?" * len(bucket))
+    rows = _q(f"""
+        SELECT id,source,title,activity_type,chars_read,lines_read,time_seconds,session_date
+        FROM sessions WHERE session_date IN ({placeholders})
+          AND (time_excluded IS NULL OR time_excluded=0)
         ORDER BY ingested_at DESC
-    """, get_today())
+    """, *bucket)
+
+    # Outgoing attributions: chars leaving any date in the bucket toward a date outside
+    out_chars, out_secs = 0, 0
+    out_row = _q1(
+        f"SELECT COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
+        f"FROM gsm_rollover_attributions WHERE source_date IN ({placeholders}) "
+        f"AND rollover_date NOT IN ({placeholders})",
+        *bucket, *bucket
+    )
+    if out_row:
+        out_chars, out_secs = out_row
+
+    result = []
+    deducted = False
+    for r in rows:
+        rid, src, title, atype, chars, lines, secs, _sd = r
+        if src == 'gsm' and not deducted and (out_chars or out_secs):
+            chars = max(0, chars - int(out_chars))
+            secs  = max(0, secs - float(out_secs))
+            deducted = True
+        result.append((rid, src, title, atype, chars, lines, secs))
+
+    # Incoming attributions: chars coming from outside the bucket → add phantom rows
+    in_rows = _q(
+        f"SELECT source_date, SUM(chars), SUM(time_seconds) "
+        f"FROM gsm_rollover_attributions WHERE rollover_date IN ({placeholders}) "
+        f"AND source_date NOT IN ({placeholders}) GROUP BY source_date",
+        *bucket, *bucket
+    )
+    for sd, ch, sec in in_rows:
+        if (ch or 0) > 0 or (sec or 0) > 0:
+            game_row = _q1(
+                "SELECT title FROM sessions WHERE source='gsm' AND session_date=? "
+                "ORDER BY ingested_at DESC LIMIT 1", sd
+            )
+            game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
+            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0)))
+
+    return result
 
 def get_weekly_summary():
     days = [(get_today_date() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
     con  = sqlite3.connect(DB_PATH)
-    out  = [(d,) + con.execute(
-        "SELECT COALESCE(SUM(chars_read),0), "
-        "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0) "
-        "FROM sessions WHERE session_date=?", (d,)).fetchone()
-        for d in days]
+    out  = []
+    for d in days:
+        chars, secs = con.execute(
+            "SELECT COALESCE(SUM(chars_read),0), "
+            "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0) "
+            "FROM sessions WHERE session_date=?", (d,)).fetchone()
+        adj_c, adj_t, _ = get_gsm_day_adjustment(d)
+        out.append((d, max(0, chars + adj_c), max(0, secs + adj_t)))
     con.close()
     return out
 
@@ -344,10 +453,14 @@ def get_daily_time_series(days):
     )
     secs  = {r[0]: r[1] for r in rows}
     chars = {r[0]: r[2] for r in rows}
-    return [((earliest + timedelta(days=i)).isoformat(),
-              secs.get((earliest + timedelta(days=i)).isoformat(), 0),
-              chars.get((earliest + timedelta(days=i)).isoformat(), 0))
-            for i in range(total_days)]
+    out = []
+    for i in range(total_days):
+        d = (earliest + timedelta(days=i)).isoformat()
+        adj_c, adj_t, _ = get_gsm_day_adjustment(d)
+        out.append((d,
+                    max(0, secs.get(d, 0) + adj_t),
+                    max(0, chars.get(d, 0) + adj_c)))
+    return out
 
 def get_activity_breakdown():
     return [(r[0], r[1]) for r in _q("""
@@ -391,13 +504,25 @@ def get_top_titles(limit=8):
 
 # ── Heatmap ───────────────────────────────────────────────────────────────────
 def get_heatmap_data(days=371):
-    earliest = (get_today_date() - timedelta(days=days - 1)).isoformat()
+    earliest_d = get_today_date() - timedelta(days=days - 1)
+    earliest   = earliest_d.isoformat()
     rows = _q(
         "SELECT session_date, COALESCE(SUM(time_seconds),0) "
         "FROM sessions WHERE session_date>=? AND (time_excluded IS NULL OR time_excluded=0) GROUP BY session_date",
         earliest
     )
-    return {r[0]: r[1] for r in rows}
+    base = {r[0]: r[1] for r in rows}
+    adj_rows = _q(
+        "SELECT rollover_date, source_date, time_seconds "
+        "FROM gsm_rollover_attributions WHERE rollover_date<>source_date "
+        "AND (rollover_date>=? OR source_date>=?)", earliest, earliest
+    )
+    for rd, sd, t in adj_rows:
+        if rd >= earliest:
+            base[rd] = base.get(rd, 0) + t
+        if sd >= earliest:
+            base[sd] = base.get(sd, 0) - t
+    return {d: v for d, v in base.items() if v > 0}
 
 
 # ── Media stats ───────────────────────────────────────────────────────────────
@@ -704,6 +829,12 @@ def db_get_goal_progress():
         today_params = [today_str] + ([g["activity_type"]] if g["activity_type"] else [])
         today_sql    = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(today_where)}"
         today_completed = (_q1(today_sql, *today_params) or (0,))[0] or 0.0
+
+        # Apply GSM rollover attribution to today's number (GSM is always 'Reading')
+        if (not g["activity_type"]) or g["activity_type"] == "Reading":
+            adj_c, adj_t, adj_cards = get_gsm_day_adjustment(today_str)
+            metric_adj = {"chars_read": adj_c, "time_seconds": adj_t, "cards_mined": adj_cards}.get(g["metric"], 0)
+            today_completed = max(0.0, today_completed + metric_adj)
 
         week_start_str  = (today_d - timedelta(days=today_d.weekday())).strftime("%Y-%m-%d")
         week_where       = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
