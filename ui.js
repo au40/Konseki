@@ -861,9 +861,12 @@ async function populateGoalActivitySelect() {
   });
 }
 
+const goalDataCache = {};
+
 async function loadGoals() {
   await populateGoalActivitySelect();
   const goals = await window.pywebview.api.get_goals();
+  goals.forEach(g => { goalDataCache[g.id] = g; });
   const list  = document.getElementById('goal-list');
   list.innerHTML = '';
   const active = goals.filter(g => !g.user_finished);
@@ -886,6 +889,7 @@ async function showCompletedGoals() {
   document.getElementById('goal-completed-view').style.display = 'block';
   setGoalPanelBtn('completed');
   const goals = await window.pywebview.api.get_goals();
+  goals.forEach(g => { goalDataCache[g.id] = g; });
   const list  = document.getElementById('goal-completed-list');
   list.innerHTML = '';
   const finished = goals.filter(g => g.user_finished);
@@ -1008,15 +1012,54 @@ function makeGoalCard(g) {
       <span class="goal-pct" style="color:${fillColor}">${g.is_complete ? '100%' : pct + '%'}</span>
     </div>
     ${chunkHtml}
-    <div style="font-size:10px;color:var(--muted)">deadline: ${g.deadline} · started: ${g.start_date}</div>`;
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
+      <div style="font-size:10px;color:var(--muted)">deadline: ${g.deadline} · started: ${g.start_date}</div>
+      <button class="btn btn-xs" style="background:none;border:none;color:var(--dim);font-size:11px;padding:0 2px;cursor:pointer;opacity:0.55" title="Edit goal" onclick="openGoalEdit(${g.id})">✎</button>
+    </div>`;
   return el;
 }
+
+let editingGoalId = null;
 
 function toggleGoalForm() {
   const card   = document.getElementById('goal-form-card');
   const isOpen = card.style.display !== 'none';
+  if (!isOpen) editingGoalId = null;
+  _resetGoalFormMode();
   card.style.display = isOpen ? 'none' : 'block';
   setGoalPanelBtn(isOpen ? null : 'new');
+}
+
+function _resetGoalFormMode() {
+  editingGoalId = null;
+  document.getElementById('goal-metric').disabled  = false;
+  document.getElementById('goal-chunk').disabled   = false;
+  document.getElementById('goal-add-btn').textContent = 'Add goal';
+  document.getElementById('goal-feedback').textContent = '';
+}
+
+async function openGoalEdit(id) {
+  const g = goalDataCache[id];
+  if (!g) return;
+  editingGoalId = g.id;
+  const card = document.getElementById('goal-form-card');
+
+  document.getElementById('goal-label').value    = g.label;
+  document.getElementById('goal-metric').value   = g.metric;
+  document.getElementById('goal-metric').disabled = true;
+  const rawTarget = g.metric === 'time_seconds' ? +(g.target / 3600).toFixed(2) : g.target;
+  document.getElementById('goal-target').value   = rawTarget;
+  document.getElementById('goal-deadline').value = g.deadline;
+  document.getElementById('goal-chunk').value    = g.chunk_period || 'none';
+  document.getElementById('goal-chunk').disabled  = true;
+  document.getElementById('goal-activity').value  = g.activity_type || '';
+  document.getElementById('goal-feedback').textContent = '';
+  document.getElementById('goal-add-btn').textContent  = 'Save changes';
+  updateGoalUnit();
+
+  card.style.display = 'block';
+  setGoalPanelBtn('new');
+  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 async function doAddGoal() {
@@ -1037,27 +1080,33 @@ async function doAddGoal() {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(deadline)) {
     fb.className = 'feedback err'; fb.textContent = 'Deadline must be YYYY-MM-DD.'; return;
   }
-  if (deadline <= today()) {
+  if (editingGoalId === null && deadline <= today()) {
     fb.className = 'feedback err'; fb.textContent = 'Deadline must be a future date.'; return;
   }
 
   let target = metric === 'time_seconds' ? rawTarget * 3600 : rawTarget;
 
-  if (chunkPeriod !== 'none') {
-    const daysUntil = Math.round((new Date(deadline) - new Date(today())) / 86400000);
-    const periods   = chunkPeriod === 'weekly' ? Math.ceil(daysUntil / 7) : chunkPeriod === 'monthly' ? Math.ceil(daysUntil / 30.44) : daysUntil;
-    if (periods < 1) {
-      fb.className = 'feedback err'; fb.textContent = 'Deadline is too soon for that pace.'; return;
+  let r;
+  if (editingGoalId !== null) {
+    r = await window.pywebview.api.update_goal(editingGoalId, label, target, deadline, atype);
+  } else {
+    if (chunkPeriod !== 'none') {
+      const daysUntil = Math.round((new Date(deadline) - new Date(today())) / 86400000);
+      const periods   = chunkPeriod === 'weekly' ? Math.ceil(daysUntil / 7) : chunkPeriod === 'monthly' ? Math.ceil(daysUntil / 30.44) : daysUntil;
+      if (periods < 1) {
+        fb.className = 'feedback err'; fb.textContent = 'Deadline is too soon for that pace.'; return;
+      }
+      target *= periods;
     }
-    target *= periods;
+    r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype);
   }
 
-  const r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype);
   if (r.ok) {
     document.getElementById('goal-form-card').style.display = 'none';
     document.getElementById('goal-label').value    = '';
     document.getElementById('goal-target').value   = '';
     document.getElementById('goal-deadline').value = '';
+    _resetGoalFormMode();
     setGoalPanelBtn(null);
     statsCache = {};
     await loadGoals();

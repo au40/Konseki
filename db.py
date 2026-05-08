@@ -654,6 +654,15 @@ def db_add_goal(label, metric, target, deadline, chunk_period="daily", activity_
     con.commit()
     con.close()
 
+def db_update_goal(goal_id, label, target, deadline, activity_type):
+    con = sqlite3.connect(DB_PATH)
+    con.execute(
+        "UPDATE goals SET label=?, target_value=?, deadline=?, activity_type=? WHERE id=?",
+        (label, float(target), deadline, activity_type or None, int(goal_id))
+    )
+    con.commit()
+    con.close()
+
 def db_delete_goal(goal_id):
     con = sqlite3.connect(DB_PATH)
     con.execute("DELETE FROM goals WHERE id=?", (int(goal_id),))

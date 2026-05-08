@@ -33,7 +33,7 @@ from db import (
     get_recent_sessions, get_daily_time_series, get_activity_breakdown,
     get_streak, get_top_titles, get_heatmap_data,
     get_media_stats, get_series_data, get_extra_stats, get_range_extra_stats,
-    db_get_goal_progress, db_add_goal, db_delete_goal, db_finish_goal,
+    db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     _get_aliases, _q, _q1,
     insert_manual_session, import_csv_file,
@@ -301,6 +301,13 @@ class Api:
     def add_goal(self, label, metric, target, deadline, chunk_period="daily", activity_type=None):
         try:
             db_add_goal(label, metric, float(target), deadline, chunk_period, activity_type)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def update_goal(self, goal_id, label, target, deadline, activity_type=None):
+        try:
+            db_update_goal(goal_id, label, float(target), deadline, activity_type)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
