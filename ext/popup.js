@@ -70,7 +70,12 @@ const activitySelect = document.getElementById("activity-select");
 const pauseBtn       = document.getElementById("pause-btn");
 const startStopBtn   = document.getElementById("start-stop-btn");
 const timerStatus    = document.getElementById("timer-status");
-const manualCheck    = document.getElementById("manual-check");
+const manualCheck        = document.getElementById("manual-check");
+const audioDetectCheck   = document.getElementById("audio-detect-check");
+
+// Mutually exclusive checkboxes
+manualCheck.addEventListener("change", () => { if (manualCheck.checked) audioDetectCheck.checked = false; });
+audioDetectCheck.addEventListener("change", () => { if (audioDetectCheck.checked) manualCheck.checked = false; });
 
 let timerInterval = null;
 
@@ -151,6 +156,14 @@ browser.storage.local.get(
   applyState(cfg);
 });
 
+// Keep popup in sync when background.js mutates timer state (e.g. audio detect pause)
+const TIMER_KEYS = ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerAutoPaused"];
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (!TIMER_KEYS.some(k => k in changes)) return;
+  browser.storage.local.get(TIMER_KEYS).then(applyState);
+});
+
 // Populate with fallback immediately, then overwrite with live list
 populateActivitySelect(FALLBACK_ACTIVITY_TYPES);
 fetchActivityTypes();
@@ -228,6 +241,22 @@ startStopBtn.addEventListener("click", async () => {
       return;
     }
 
+    // Audio detect — watch tab audible state instead of video elements
+    if (audioDetectCheck.checked && tabId) {
+      let currentlyAudible = false;
+      try {
+        const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+        currentlyAudible = tab?.audible || false;
+      } catch {}
+      await browser.storage.local.set({ timerAudioDetect: true, timerTabId: tabId });
+      if (currentlyAudible) {
+        await startRunning(tabId);
+      } else {
+        await startWaiting(tabId);
+      }
+      return;
+    }
+
     // Inject listener (best-effort — failures don't block detection)
     if (tabId) {
       try { await browser.scripting.executeScript({ target: { tabId }, files: ["media-listener.js"] }); } catch {}
@@ -278,7 +307,7 @@ startStopBtn.addEventListener("click", async () => {
   const activity = activitySelect.value;
 
   await browser.storage.local.remove(
-    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerAutoPaused"]
+    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerAutoPaused", "timerAudioDetect", "timerTabId"]
   );
   applyState({});
 
