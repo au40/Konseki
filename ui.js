@@ -578,10 +578,6 @@ async function loadHistory() {
 }
 
 // ── Stats helpers ──────────────────────────────────────────────────────────
-function autoGranularity(range) {
-  return {'30d': 'day', '90d': 'week', '6m': 'week', '1y': 'month', 'All': 'month'}[range] || 'day';
-}
-
 function updateGranularityUI() {
   document.querySelectorAll('#gran-seg .seg-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.gran === currentGranularity));
@@ -673,8 +669,6 @@ async function setRange(rv) {
   currentRange = rv;
   document.querySelectorAll('#range-seg .seg-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.range === rv));
-  currentGranularity = autoGranularity(rv);
-  updateGranularityUI();
   await loadStats(rv);
 }
 
@@ -731,8 +725,152 @@ function destroyChart(id) {
   if (charts[id]) { charts[id].destroy(); delete charts[id]; }
 }
 
+const CHART_ANIM = { duration: 400, easing: 'easeOutQuart' };
+const MORPH_MS   = 500;
+const morphState = {};
+
+function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+function roundedTopRect(ctx, x, y, w, h, r) {
+  if (h <= 0 || w <= 0) return;
+  r = Math.min(r, w / 2, h);
+  ctx.beginPath();
+  ctx.moveTo(x, y + h);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function morphBars(id, chart, canvas, newConfig) {
+  if (morphState[id]) morphState[id].finish();
+
+  const oldBars  = chart.getDatasetMeta(0).data.map(b => ({ x:b.x, y:b.y, base:b.base, width:b.width }));
+  const N        = oldBars.length;
+  const oldColor = typeof chart.data.datasets[0].backgroundColor === 'string'
+                   ? chart.data.datasets[0].backgroundColor : '#5B8CFF';
+
+  const morphData = {
+    labels: newConfig.data.labels,
+    datasets: newConfig.data.datasets.map((d, i) => ({
+      ...d,
+      backgroundColor: 'rgba(0,0,0,0)',
+      ...(i > 0 ? { borderColor: 'rgba(0,0,0,0)' } : {})
+    }))
+  };
+  chart.data    = morphData;
+  chart.options = { ...newConfig.options, animation: false };
+  chart.update();
+
+  const newBars  = chart.getDatasetMeta(0).data.map(b => ({ x:b.x, y:b.y, base:b.base, width:b.width }));
+  const M        = newBars.length;
+  const newColor = typeof newConfig.data.datasets[0].backgroundColor === 'string'
+                   ? newConfig.data.datasets[0].backgroundColor : oldColor;
+
+  const wrap = canvas.parentElement;
+  wrap.querySelectorAll('.chart-morph-overlay').forEach(o => o.remove());
+
+  const W = canvas.offsetWidth;
+  const H = canvas.offsetHeight;
+  const dpr = window.devicePixelRatio || 1;
+  const overlay = document.createElement('canvas');
+  overlay.className = 'chart-morph-overlay';
+  overlay.style.cssText =
+    `position:absolute;left:${canvas.offsetLeft}px;top:${canvas.offsetTop}px;` +
+    `width:${W}px;height:${H}px;pointer-events:none;`;
+  overlay.width  = W * dpr;
+  overlay.height = H * dpr;
+  const octx = overlay.getContext('2d');
+  octx.scale(dpr, dpr);
+  wrap.appendChild(overlay);
+
+  const offRight = W + 60;
+  const items    = [];
+  const morphN   = Math.min(N, M);
+
+  for (let i = 0; i < morphN; i++) {
+    items.push({
+      sx:oldBars[i].x, sy:oldBars[i].y, sb:oldBars[i].base, sw:oldBars[i].width,
+      ex:newBars[i].x, ey:newBars[i].y, eb:newBars[i].base, ew:newBars[i].width,
+      color: oldColor, fade: false
+    });
+  }
+  for (let i = M; i < N; i++) {
+    items.push({
+      sx:oldBars[i].x, sy:oldBars[i].y, sb:oldBars[i].base, sw:oldBars[i].width,
+      ex:offRight,     ey:oldBars[i].y, eb:oldBars[i].base, ew:oldBars[i].width,
+      color: oldColor, fade: true
+    });
+  }
+  for (let i = N; i < M; i++) {
+    items.push({
+      sx:offRight,     sy:newBars[i].y, sb:newBars[i].base, sw:newBars[i].width,
+      ex:newBars[i].x, ey:newBars[i].y, eb:newBars[i].base, ew:newBars[i].width,
+      color: newColor, fade: false
+    });
+  }
+
+  const state = { done: false };
+  morphState[id] = state;
+  state.finish = () => {
+    if (state.done) return;
+    state.done = true;
+    chart.data    = newConfig.data;
+    chart.options = newConfig.options;
+    chart.update('none');
+    overlay.remove();
+    if (morphState[id] === state) delete morphState[id];
+  };
+
+  const t0 = performance.now();
+  function frame(t) {
+    if (state.done) return;
+    const p = Math.min(1, (t - t0) / MORPH_MS);
+    const e = easeOutCubic(p);
+    octx.clearRect(0, 0, W, H);
+    let lastColor = null;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const x      = it.sx + (it.ex - it.sx) * e;
+      const y      = it.sy + (it.ey - it.sy) * e;
+      const base   = it.sb + (it.eb - it.sb) * e;
+      const width  = it.sw + (it.ew - it.sw) * e;
+      const height = base - y;
+      if (height <= 0 || width <= 0) continue;
+      octx.globalAlpha = it.fade ? 1 - e : 1;
+      if (it.color !== lastColor) { octx.fillStyle = it.color; lastColor = it.color; }
+      roundedTopRect(octx, x - width / 2, y, width, height, 3);
+    }
+    if (p < 1) requestAnimationFrame(frame);
+    else state.finish();
+  }
+  requestAnimationFrame(frame);
+}
+
+function upsertChart(id, ctxId, config) {
+  const existing = charts[id];
+  const canvas   = document.getElementById(ctxId);
+  if (existing && existing.config.type === config.type) {
+    const oldLen = existing.data.labels?.length ?? 0;
+    const newLen = config.data.labels?.length ?? 0;
+    if (config.type === 'bar' && oldLen > 0 && newLen > 0 && oldLen !== newLen) {
+      morphBars(id, existing, canvas, config);
+      return existing;
+    }
+    existing.data = config.data;
+    existing.options = config.options;
+    existing.update();
+    return existing;
+  }
+  if (existing) { existing.destroy(); delete charts[id]; }
+  charts[id] = new Chart(canvas.getContext('2d'), config);
+  return charts[id];
+}
+
 function renderDailyChart(daily) {
-  destroyChart('daily');
   const cum     = document.getElementById('cum-toggle').checked;
   const { labels, secs } = bucketDaily(daily, currentGranularity);
   const isHours = currentGranularity !== 'day';
@@ -758,12 +896,11 @@ function renderDailyChart(daily) {
     });
   }
 
-  const ctx = document.getElementById('chart-daily').getContext('2d');
-  charts['daily'] = new Chart(ctx, {
+  upsertChart('daily', 'chart-daily', {
     type: 'bar',
     data: { labels: shownLabels, datasets },
     options: {
-      responsive: true, maintainAspectRatio: false, animation: false,
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
       plugins: {
         legend: { display: cum },
         tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmt(c.raw) } }
@@ -778,22 +915,20 @@ function renderDailyChart(daily) {
 }
 
 function renderDailyCharsChart(daily) {
-  destroyChart('daily-chars');
   const { labels, chars } = bucketDaily(daily, currentGranularity);
-  if (!chars.some(c => c > 0)) return;
+  if (!chars.some(c => c > 0)) { destroyChart('daily-chars'); return; }
 
   const step        = Math.max(1, Math.floor(labels.length / 14));
   const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
 
-  const ctx = document.getElementById('chart-daily-chars').getContext('2d');
-  charts['daily-chars'] = new Chart(ctx, {
+  upsertChart('daily-chars', 'chart-daily-chars', {
     type: 'bar',
     data: { labels: shownLabels, datasets: [{
       label: 'Characters', data: chars, backgroundColor: '#4ECBA0',
       borderRadius: 3, borderSkipped: false,
     }]},
     options: {
-      responsive: true, maintainAspectRatio: false, animation: false,
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
       plugins: {
         legend: { display: false },
         tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtChars(c.raw) + ' chars' } }
@@ -807,13 +942,11 @@ function renderDailyCharsChart(daily) {
 }
 
 function renderDonutChart(activity) {
-  destroyChart('donut');
-  if (!activity.length) return;
+  if (!activity.length) { destroyChart('donut'); return; }
   const labels = activity.map(a=>a.type);
   const values = activity.map(a=>a.seconds);
   const colors = labels.map(acolor);
-  const ctx    = document.getElementById('chart-donut').getContext('2d');
-  charts['donut'] = new Chart(ctx, {
+  upsertChart('donut', 'chart-donut', {
     type: 'doughnut',
     data: {
       labels,
@@ -821,7 +954,7 @@ function renderDonutChart(activity) {
                    borderColor:'#24243A', borderWidth:2, hoverOffset:4 }]
     },
     options: {
-      responsive: true, maintainAspectRatio: false, animation: false, cutout: '60%',
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM, cutout: '60%',
       plugins: {
         legend: { position:'bottom', labels:{color:'#9090A8',padding:10,boxWidth:12,boxHeight:12,usePointStyle:true} },
         tooltip: { callbacks: { label: c => `${c.label}: ${fmtTime(c.raw)}` } }
