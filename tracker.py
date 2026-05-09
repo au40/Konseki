@@ -25,6 +25,7 @@ except ImportError:
 
 import db
 import imports
+import backup
 from db import (
     APP_NAME, DB_PATH, SESSIONS_DIR,
     init_db, scan_existing_files,
@@ -95,7 +96,7 @@ class GsmWalHandler(FileSystemEventHandler):
 
     _WATCHED = {"gsm.db-wal", "gsm.db"}
 
-    def __init__(self, cb, debounce_secs=10):
+    def __init__(self, cb, debounce_secs=60):
         self._cb = cb
         self._debounce_secs = debounce_secs
         self._timer = None
@@ -209,7 +210,19 @@ class Api:
                 "GROUP BY session_date",
                 start, end
             )
-            return {r[0]: r[1] for r in rows}
+            base = {r[0]: r[1] for r in rows}
+            adj_rows = _q(
+                "SELECT rollover_date, source_date, time_seconds "
+                "FROM gsm_rollover_attributions WHERE rollover_date<>source_date "
+                "AND ((rollover_date>=? AND rollover_date<=?) OR (source_date>=? AND source_date<=?))",
+                start, end, start, end
+            )
+            for rd, sd, t in adj_rows:
+                if start <= rd <= end:
+                    base[rd] = base.get(rd, 0) + t
+                if start <= sd <= end:
+                    base[sd] = base.get(sd, 0) - t
+            return {d: v for d, v in base.items() if v > 0}
         return get_heatmap_data(int(days) if days else 371)
 
     # ── Media ─────────────────────────────────────────────────────────────────
@@ -254,25 +267,82 @@ class Api:
             else:
                 game_meta = {"game_id": None, "desc": "", "image": book_cover[0], "genres": [], "first_date": ""}
 
-        total_chars = sum(s[4] for s in sessions)
-        total_secs  = sum(s[6] for s in sessions)
-        spd_sessions   = [(s[7], s[6]) for s in sessions if s[7] and s[7] > 0 and s[6] > 0]
-        spd_total_time = sum(t for _, t in spd_sessions)
-        avg_speed      = sum(sp * t for sp, t in spd_sessions) / spd_total_time if spd_total_time > 0 else 0
-        total_cards = sum(s[8] for s in sessions if s[8])
-        days_count  = len(set(s[1] for s in sessions))
+        # Apply GSM rollover attribution overlay: chars/time/cards from a session_date
+        # may belong (partly or wholly) to a different rollover_date for display purposes.
+        out_by_sd = {}  # source_date -> [chars, secs, cards] subtracted from this date
+        in_by_rd  = {}  # rollover_date -> list of (source_date, chars, secs, cards)
+        gsm_sds = [s[1] for s in sessions if s[2] == 'gsm']
+        if gsm_sds:
+            ph = ",".join("?" * len(gsm_sds))
+            attr_rows = _q(
+                f"SELECT rollover_date, source_date, chars, time_seconds, cards "
+                f"FROM gsm_rollover_attributions "
+                f"WHERE source_date IN ({ph}) AND rollover_date <> source_date",
+                *gsm_sds
+            )
+            for rd, sd, c, t, cards in attr_rows:
+                out_by_sd.setdefault(sd, [0, 0, 0])
+                out_by_sd[sd][0] += c; out_by_sd[sd][1] += t; out_by_sd[sd][2] += cards
+                in_by_rd.setdefault(rd, []).append((sd, c, t, cards))
 
-        daily = [
-            {
-                "date":      s[1],
-                "chars":     s[4],
-                "seconds":   s[6],
-                "speed":     s[7] or 0,
-                "cards":     s[8] or 0,
-                "sentences": s[9] or 0,
-            }
-            for s in sessions
-        ]
+        # Build daily aggregation by effective date
+        daily_map = {}
+        def _bump(d, chars, secs, cards, sentences, speed):
+            v = daily_map.setdefault(d, {"chars": 0, "secs": 0, "cards": 0, "sentences": 0,
+                                          "spd_w": 0, "spd_t": 0})
+            v["chars"]     += chars
+            v["secs"]      += secs
+            v["cards"]     += cards
+            v["sentences"] += sentences
+            if speed > 0 and secs > 0:
+                v["spd_w"] += speed * secs
+                v["spd_t"] += secs
+
+        for s in sessions:
+            sd = s[1]
+            chars, secs = s[4], s[6]
+            speed = s[7] or 0
+            cards = s[8] or 0
+            sentences = s[9] or 0
+            if s[2] == 'gsm' and sd in out_by_sd:
+                oc, ot, ocards = out_by_sd[sd]
+                chars = max(0, chars - oc)
+                secs  = max(0.0, secs - ot)
+                cards = max(0, cards - ocards)
+            if chars > 0 or secs > 0 or cards > 0:
+                _bump(sd, chars, secs, cards, sentences, speed)
+
+        # Phantom rows for chars attributed in to a rollover_date
+        for rd, attrs in in_by_rd.items():
+            for sd, c, t, cards in attrs:
+                if c <= 0 and t <= 0 and cards <= 0:
+                    continue
+                src = next((s for s in sessions if s[1] == sd and s[2] == 'gsm'), None)
+                spd = src[7] if src and src[7] else 0
+                _bump(rd, int(c), float(t), int(cards), 0, float(spd))
+
+        daily = []
+        for d in sorted(daily_map.keys()):
+            v = daily_map[d]
+            spd = (v["spd_w"] / v["spd_t"]) if v["spd_t"] > 0 else 0
+            daily.append({
+                "date":      d,
+                "chars":     int(v["chars"]),
+                "seconds":   v["secs"],
+                "speed":     spd,
+                "cards":     int(v["cards"]),
+                "sentences": int(v["sentences"]),
+            })
+
+        total_chars = sum(d["chars"]   for d in daily)
+        total_secs  = sum(d["seconds"] for d in daily)
+        total_cards = sum(d["cards"]   for d in daily)
+        spd_total_time = sum(d["seconds"] for d in daily if d["speed"] > 0)
+        avg_speed      = (sum(d["speed"] * d["seconds"] for d in daily if d["speed"] > 0)
+                          / spd_total_time) if spd_total_time > 0 else 0
+        days_count = len(daily)
+        first_date = daily[0]["date"]  if daily else (sessions[0][1]  if sessions else "")
+        last_date  = daily[-1]["date"] if daily else (sessions[-1][1] if sessions else "")
 
         return {
             "title":         title,
@@ -285,8 +355,8 @@ class Api:
             "total_cards":   total_cards,
             "session_count": len(sessions),
             "days_count":    days_count,
-            "first_date":    sessions[0][1],
-            "last_date":     sessions[-1][1],
+            "first_date":    first_date,
+            "last_date":     last_date,
             "daily":         daily,
             "description":   game_meta["desc"]   if game_meta else "",
             "image":         game_meta["image"]  if game_meta else "",
@@ -560,11 +630,12 @@ class Api:
     def get_all_settings(self):
         from ext_server import _get_or_create_token, _get_port
         return {
-            "rollover_hour": int(get_setting("rollover_hour", "0")),
-            "gsm_url":       get_setting("gsm_url", imports.GSM_API),
-            "theme":         get_setting("theme", "dark"),
-            "ext_port":      _get_port(),
-            "ext_token":     _get_or_create_token(),
+            "rollover_hour":    int(get_setting("rollover_hour", "0")),
+            "gsm_url":          get_setting("gsm_url", imports.GSM_API),
+            "theme":            get_setting("theme", "dark"),
+            "ext_port":         _get_port(),
+            "ext_token":        _get_or_create_token(),
+            "gsm_debounce_secs": int(get_setting("gsm_debounce_secs", "60")),
         }
 
     def reroll_ext_token(self):
@@ -578,6 +649,8 @@ class Api:
             set_setting(key, str(value))
         if "gsm_url" in data:
             imports.GSM_API = data["gsm_url"]
+        if "gsm_debounce_secs" in data and gsm_wal_handler is not None:
+            gsm_wal_handler._debounce_secs = int(data["gsm_debounce_secs"])
         return {"ok": True}
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -591,10 +664,16 @@ class Api:
                 pass
 
 
+gsm_wal_handler = None  # set in main(); read by Api.save_settings
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
+    global gsm_wal_handler
     init_db()
     scan_existing_files()
+    backup.ensure_backup()
+    backup.schedule_daily()
 
     api              = Api()
     ext_server       = ExtServer(on_import=api._notify)
@@ -625,6 +704,7 @@ def main():
     appdata     = os.getenv("APPDATA") or os.path.expanduser("~/.config")
     gsm_dir     = os.path.join(appdata, "GameSentenceMiner")
     gsm_observer = None
+    gsm_wal_handler = None
     if os.path.isdir(gsm_dir):
         def _on_gsm_change():
             result = pull_gsm_now()
@@ -632,10 +712,12 @@ def main():
                 print(f"[gsm-watch] Auto-pulled: {result.get('chars_read', 0)} chars  "
                       f"| {result.get('title', '')}")
                 api._notify()
+        debounce = int(get_setting("gsm_debounce_secs", "60"))
+        gsm_wal_handler = GsmWalHandler(_on_gsm_change, debounce_secs=debounce)
         gsm_observer = Observer()
-        gsm_observer.schedule(GsmWalHandler(_on_gsm_change), gsm_dir, recursive=False)
+        gsm_observer.schedule(gsm_wal_handler, gsm_dir, recursive=False)
         gsm_observer.start()
-        print(f"[gsm-watch] Watching {gsm_dir}")
+        print(f"[gsm-watch] Watching {gsm_dir} (debounce={debounce}s)")
     else:
         print(f"[gsm-watch] {gsm_dir} not found — watcher disabled")
 

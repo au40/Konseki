@@ -4,4 +4,4 @@ sessions/
 __pycache__
 build/
 dist/
-ImmersionTracker.spec
+backups/

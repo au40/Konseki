@@ -2017,6 +2017,7 @@ async function loadSettings() {
   document.getElementById('sessions-dir').textContent  = await window.pywebview.api.get_sessions_dir();
   document.getElementById('gsm-url').value             = s.gsm_url || 'http://localhost:7275/api/stats';
   document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
+  document.getElementById('gsm-debounce').value        = s.gsm_debounce_secs || 60;
   document.getElementById('ext-port').value            = s.ext_port  || 18463;
   document.getElementById('ext-token').value           = s.ext_token || '';
   const theme = s.theme || 'dark';
@@ -2046,10 +2047,11 @@ async function doImportGSMHistory()  { ... }
 ── ────────────────────────────────────────────────────────────────────────── */
 
 async function saveSettings() {
-  const rollover = parseInt(document.getElementById('rollover-hour').value) || 0;
-  const gsm_url  = document.getElementById('gsm-url').value.trim();
-  appSettings = { ...appSettings, rollover_hour: rollover, gsm_url };
-  await window.pywebview.api.save_settings({ rollover_hour: rollover, gsm_url });
+  const rollover         = parseInt(document.getElementById('rollover-hour').value) || 0;
+  const gsm_url          = document.getElementById('gsm-url').value.trim();
+  const gsm_debounce_secs = parseInt(document.getElementById('gsm-debounce').value) || 60;
+  appSettings = { ...appSettings, rollover_hour: rollover, gsm_url, gsm_debounce_secs };
+  await window.pywebview.api.save_settings({ rollover_hour: rollover, gsm_url, gsm_debounce_secs });
   setStatus('Settings saved');
 }
 

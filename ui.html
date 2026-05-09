@@ -500,6 +500,20 @@
         </div>
       </div>
 
+      <div class="settings-section">
+        <div class="card">
+          <h3 style="color:var(--text-muted)">Advanced</h3>
+          <p class="muted" style="margin-bottom:16px">For power users. Defaults are fine for most setups.</p>
+
+          <label style="display:block;margin-bottom:6px;font-size:13px">GSM pull debounce</label>
+          <p class="muted" style="margin-bottom:8px">How long GSM must be idle before the tracker pulls new stats. Increase this if GSM is resource-heavy while you're playing.</p>
+          <div class="settings-row">
+            <input type="number" id="gsm-debounce" min="5" max="3600" placeholder="60" onchange="saveSettings()" style="max-width:100px">
+            <span style="color:var(--text-muted);font-size:13px">seconds</span>
+          </div>
+        </div>
+      </div>
+
       <!-- ── GSM aggregate import — INACTIVE ────────────────────────────────
            Commented out alongside gsm_aggregate_import() in tracker.py.
            Problem: totalCharsPerGame labels don't match currentGameStats.game_name.

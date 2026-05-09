@@ -377,6 +377,9 @@ def get_today_stats():
             chars = max(0, chars - int(out_chars))
             secs  = max(0, secs - float(out_secs))
             deducted = True
+        # Drop sessions whose displayed values are all zero (e.g. fully attributed-away GSM rows)
+        if chars == 0 and secs == 0 and (lines or 0) == 0:
+            continue
         result.append((rid, src, title, atype, chars, lines, secs))
 
     # Incoming attributions: chars coming from outside the bucket → add phantom rows

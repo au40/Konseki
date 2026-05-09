@@ -150,10 +150,14 @@ function applyState(cfg) {
 
 // Restore state and fetch activity types when popup opens
 browser.storage.local.get(
-  ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity"]
+  ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "token"]
 ).then(cfg => {
   if (cfg.timerActivity) activitySelect.value = cfg.timerActivity;
   applyState(cfg);
+  if (!(cfg.token || "").trim()) {
+    timerStatus.textContent = "Paste your token in Extension Settings below.";
+    timerStatus.className   = "err";
+  }
 });
 
 // Keep popup in sync when background.js mutates timer state (e.g. audio detect pause)
