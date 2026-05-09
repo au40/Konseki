@@ -8,7 +8,7 @@ async function updateBadge() {
     browser.action.setBadgeText({ text: "" });
     return;
   }
-  browser.action.setBadgeBackgroundColor({ color: "#e53935" });
+  browser.action.setBadgeBackgroundColor({ color: [0, 0, 0, 0] });
   if (browser.action.setBadgeTextColor) {
     browser.action.setBadgeTextColor({ color: "#e53935" });
   }
@@ -18,6 +18,87 @@ async function updateBadge() {
 updateBadge();
 browser.runtime.onStartup.addListener(updateBadge);
 browser.runtime.onInstalled.addListener(updateBadge);
+
+// Recover a session that was running/paused/waiting when the browser was last closed.
+// Freezes the elapsed time and parks it in a "paused + recovered" state so the popup
+// can prompt the user to log or discard it.
+async function recoverStaleTimer() {
+  const cfg = await browser.storage.local.get([
+    "timerRunning", "timerPaused", "timerWaiting",
+    "timerStart", "timerElapsed", "timerActivity", "timerLastTick",
+  ]);
+
+  const wasActive = cfg.timerRunning || cfg.timerPaused || cfg.timerWaiting;
+  if (!wasActive) return;
+
+  // Nothing meaningful to recover — clear and bail.
+  if (!cfg.timerActivity) {
+    await browser.storage.local.remove([
+      "timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed",
+      "timerActivity", "timerAutoPaused", "timerAudioDetect", "timerTabId", "timerMode",
+      "timerRecovered", "timerLastTick",
+    ]);
+    return;
+  }
+
+  let elapsed = cfg.timerElapsed || 0;
+  if (cfg.timerRunning && cfg.timerStart) {
+    // Use the last heartbeat as the "alive until" timestamp. Falls back to
+    // timerStart (zero gain) if no heartbeat ever fired (session < HEARTBEAT_MS).
+    const lastAlive = cfg.timerLastTick || cfg.timerStart;
+    elapsed += Math.max(0, Math.floor((lastAlive - cfg.timerStart) / 1000));
+  }
+
+  await browser.storage.local.set({
+    timerRunning:    false,
+    timerPaused:     true,
+    timerWaiting:    false,
+    timerAutoPaused: false,
+    timerStart:      null,
+    timerElapsed:    elapsed,
+    timerRecovered:  true,
+  });
+  await browser.storage.local.remove("timerLastTick");
+}
+
+browser.runtime.onStartup.addListener(recoverStaleTimer);
+
+// Heartbeat: while the timer is running, persist a "last alive" timestamp every
+// ~10s so recovery after a crash doesn't have to guess how long the session ran.
+const HEARTBEAT_MS = 10000;
+let heartbeatInterval = null;
+
+async function writeHeartbeat() {
+  const cfg = await browser.storage.local.get("timerRunning");
+  if (!cfg.timerRunning) {
+    stopHeartbeat();
+    return;
+  }
+  await browser.storage.local.set({ timerLastTick: Date.now() });
+}
+
+function startHeartbeat() {
+  if (heartbeatInterval) return;
+  writeHeartbeat();
+  heartbeatInterval = setInterval(writeHeartbeat, HEARTBEAT_MS);
+}
+
+function stopHeartbeat() {
+  if (!heartbeatInterval) return;
+  clearInterval(heartbeatInterval);
+  heartbeatInterval = null;
+}
+
+// Re-attach the heartbeat after a background-script reload if the timer is running.
+browser.storage.local.get("timerRunning").then(cfg => {
+  if (cfg.timerRunning) startHeartbeat();
+});
+
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !("timerRunning" in changes)) return;
+  if (changes.timerRunning.newValue) startHeartbeat();
+  else stopHeartbeat();
+});
 
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (changeInfo.audible === undefined) return;

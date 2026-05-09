@@ -62,6 +62,14 @@ saveBtn.addEventListener("click", async () => {
   browser.action.setBadgeText({ text: "" });
   statusEl.textContent = "Saved.";
   statusEl.className   = "";
+
+  // Dismiss the "paste your token" / "no token set" prompt if it's showing
+  if (timerStatus.classList.contains("err") && /token/i.test(timerStatus.textContent)) {
+    timerStatus.textContent = "";
+    timerStatus.className   = "";
+  }
+
+  fetchActivityTypes();
   setTimeout(() => { statusEl.textContent = ""; }, 2000);
 });
 
@@ -73,12 +81,23 @@ const startStopBtn   = document.getElementById("start-stop-btn");
 const timerStatus    = document.getElementById("timer-status");
 const manualCheck        = document.getElementById("manual-check");
 const audioDetectCheck   = document.getElementById("audio-detect-check");
+const discardBtn         = document.getElementById("discard-btn");
+const discardRow         = document.getElementById("discard-row");
 
 // Mutually exclusive checkboxes
 manualCheck.addEventListener("change", () => { if (manualCheck.checked) audioDetectCheck.checked = false; });
 audioDetectCheck.addEventListener("change", () => { if (audioDetectCheck.checked) manualCheck.checked = false; });
 
 let timerInterval = null;
+let discardConfirmTimeout = null;
+
+function resetDiscardBtn() {
+  clearTimeout(discardConfirmTimeout);
+  discardConfirmTimeout = null;
+  discardBtn.dataset.confirming = "";
+  discardBtn.classList.remove("confirm");
+  discardBtn.textContent = "Discard";
+}
 
 function formatTime(totalSeconds) {
   const h = Math.floor(totalSeconds / 3600);
@@ -103,35 +122,45 @@ function applyState(cfg) {
   clearInterval(timerInterval);
   timerInterval = null;
 
+  const active = cfg.timerRunning || cfg.timerPaused || cfg.timerWaiting;
+  manualCheck.disabled      = !!active;
+  audioDetectCheck.disabled = !!active;
+  discardRow.style.display  = active ? "" : "none";
+  if (!active) resetDiscardBtn();
+
   if (cfg.timerRunning) {
     // Running
     timerDisplay.classList.remove("paused");
     timerDisplay.classList.add("running");
     pauseBtn.textContent = "Pause";
     pauseBtn.style.display = "";
-    startStopBtn.textContent = "Stop";
+    startStopBtn.textContent = "Log";
     startStopBtn.className = "stop-btn";
     activitySelect.disabled = true;
     tick(cfg);
     timerInterval = setInterval(() => tick(cfg), 1000);
 
   } else if (cfg.timerPaused) {
-    // Paused
+    // Paused (or recovered from a closed/crashed browser)
     timerDisplay.classList.remove("running");
     timerDisplay.classList.add("paused");
     pauseBtn.textContent = "Resume";
-    pauseBtn.style.display = "";
-    startStopBtn.textContent = "Stop";
+    pauseBtn.style.display = cfg.timerRecovered ? "none" : "";
+    startStopBtn.textContent = "Log";
     startStopBtn.className = "stop-btn";
     activitySelect.disabled = true;
     timerDisplay.textContent = formatTime(cfg.timerElapsed || 0);
+    if (cfg.timerRecovered) {
+      timerStatus.textContent = "Recovered session — log or discard?";
+      timerStatus.className   = "";
+    }
 
   } else if (cfg.timerWaiting) {
     // Armed — waiting for first play event
     timerDisplay.classList.remove("running", "paused");
-    timerDisplay.textContent = "00:00:00";
+    timerDisplay.textContent = formatTime(cfg.timerElapsed || 0);
     pauseBtn.style.display = "none";
-    startStopBtn.textContent = "Stop";
+    startStopBtn.textContent = "Log";
     startStopBtn.className = "stop-btn";
     activitySelect.disabled = true;
     timerStatus.textContent = "Waiting for playback…";
@@ -151,7 +180,7 @@ function applyState(cfg) {
 
 // Restore state and fetch activity types when popup opens
 browser.storage.local.get(
-  ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "token"]
+  ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerRecovered", "token"]
 ).then(cfg => {
   if (cfg.timerActivity) activitySelect.value = cfg.timerActivity;
   applyState(cfg);
@@ -162,7 +191,7 @@ browser.storage.local.get(
 });
 
 // Keep popup in sync when background.js mutates timer state (e.g. audio detect pause)
-const TIMER_KEYS = ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerAutoPaused"];
+const TIMER_KEYS = ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerAutoPaused", "timerRecovered"];
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (!TIMER_KEYS.some(k => k in changes)) return;
@@ -176,7 +205,7 @@ fetchActivityTypes();
 // ── Pause / Resume ────────────────────────────────────────────────────────────
 pauseBtn.addEventListener("click", async () => {
   const cfg = await browser.storage.local.get(
-    ["timerRunning", "timerPaused", "timerStart", "timerElapsed"]
+    ["timerRunning", "timerPaused", "timerStart", "timerElapsed", "timerMode", "timerTabId"]
   );
 
   if (cfg.timerRunning) {
@@ -189,20 +218,114 @@ pauseBtn.addEventListener("click", async () => {
       timerStart:   null,
     });
     applyState({ timerRunning: false, timerPaused: true, timerElapsed: elapsed });
+    return;
+  }
 
-  } else if (cfg.timerPaused) {
-    // → Resume: start a new active period
+  if (!cfg.timerPaused) return;
+
+  // → Resume: behavior depends on the mode the session was started in
+  const mode    = cfg.timerMode || "manual";
+  const tabId   = cfg.timerTabId;
+  const elapsed = cfg.timerElapsed || 0;
+
+  async function resumeRunning() {
     const timerStart = Date.now();
     await browser.storage.local.set({
-      timerRunning: true,
-      timerPaused:  false,
+      timerRunning:    true,
+      timerPaused:     false,
+      timerWaiting:    false,
+      timerAutoPaused: false,
       timerStart,
     });
-    applyState({ timerRunning: true, timerStart, timerElapsed: cfg.timerElapsed || 0 });
+    applyState({ timerRunning: true, timerStart, timerElapsed: elapsed });
   }
+
+  async function resumeWaiting() {
+    await browser.storage.local.set({
+      timerRunning:    false,
+      timerPaused:     false,
+      timerWaiting:    true,
+      timerAutoPaused: false,
+      timerStart:      null,
+    });
+    applyState({ timerWaiting: true, timerElapsed: elapsed });
+  }
+
+  if (mode === "manual") {
+    await resumeRunning();
+    return;
+  }
+
+  if (mode === "audio") {
+    let audible = false;
+    if (tabId) {
+      try {
+        const tab = await browser.tabs.get(tabId);
+        audible = tab?.audible || false;
+      } catch {}
+    }
+    if (audible) await resumeRunning();
+    else         await resumeWaiting();
+    return;
+  }
+
+  // mode === "video": re-probe the page for an actively playing media element
+  if (tabId) {
+    try { await browser.scripting.executeScript({ target: { tabId }, files: ["media-listener.js"] }); } catch {}
+  }
+  let videoState = { found: false, playing: false };
+  if (tabId) {
+    try {
+      const check = await browser.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const els = Array.from(document.querySelectorAll("video, audio"));
+          return {
+            found:   els.length > 0,
+            playing: els.some(el => !el.paused && !el.ended && el.readyState > 2),
+          };
+        },
+      });
+      videoState = check?.[0]?.result ?? videoState;
+    } catch {}
+  }
+
+  if (videoState.playing) await resumeRunning();
+  else                    await resumeWaiting();
 });
 
-// ── Start / Stop ──────────────────────────────────────────────────────────────
+// ── Discard ───────────────────────────────────────────────────────────────────
+discardBtn.addEventListener("click", async () => {
+  const cfg = await browser.storage.local.get(
+    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed"]
+  );
+  const elapsed = getElapsed(cfg);
+  const trivial = elapsed <= 30;
+  const confirming = discardBtn.dataset.confirming === "1";
+
+  if (trivial || confirming) {
+    resetDiscardBtn();
+    timerStatus.onclick = null;
+    await browser.storage.local.remove(
+      ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerAutoPaused", "timerAudioDetect", "timerTabId", "timerMode", "timerRecovered", "timerLastTick"]
+    );
+    applyState({});
+    if (elapsed >= 1) {
+      timerStatus.textContent = `Discarded ${formatTime(elapsed)}.`;
+      timerStatus.className   = "";
+      setTimeout(() => { timerStatus.textContent = ""; }, 2500);
+    }
+    return;
+  }
+
+  // First click on a non-trivial session — request confirmation
+  discardBtn.dataset.confirming = "1";
+  discardBtn.classList.add("confirm");
+  discardBtn.textContent = `Discard ${formatTime(elapsed)}?`;
+  discardConfirmTimeout = setTimeout(resetDiscardBtn, 4000);
+});
+
+// ── Start / Log ───────────────────────────────────────────────────────────────
 startStopBtn.addEventListener("click", async () => {
   const cfg = await browser.storage.local.get(
     ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "port", "token"]
@@ -212,11 +335,12 @@ startStopBtn.addEventListener("click", async () => {
     // → Start
     const activity = activitySelect.value;
 
-    async function startRunning(tabId) {
+    async function startRunning(tabId, mode) {
       const timerStart = Date.now();
       await browser.storage.local.set({
         timerRunning: true, timerPaused: false,
         timerStart, timerElapsed: 0, timerActivity: activity,
+        timerMode: mode, timerTabId: tabId ?? null,
       });
       applyState({ timerRunning: true, timerStart, timerElapsed: 0 });
       if (tabId) {
@@ -224,10 +348,11 @@ startStopBtn.addEventListener("click", async () => {
       }
     }
 
-    async function startWaiting(tabId) {
+    async function startWaiting(tabId, mode) {
       await browser.storage.local.set({
         timerWaiting: true, timerRunning: false,
         timerPaused: false, timerElapsed: 0, timerActivity: activity,
+        timerMode: mode, timerTabId: tabId ?? null,
       });
       applyState({ timerWaiting: true, timerElapsed: 0 });
       try { await browser.scripting.executeScript({ target: { tabId }, files: ["timer-overlay.js"] }); } catch {}
@@ -242,7 +367,7 @@ startStopBtn.addEventListener("click", async () => {
 
     // Manual checkbox — skip detection entirely
     if (manualCheck.checked) {
-      await startRunning(tabId);
+      await startRunning(tabId, "manual");
       return;
     }
 
@@ -253,11 +378,11 @@ startStopBtn.addEventListener("click", async () => {
         const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
         currentlyAudible = tab?.audible || false;
       } catch {}
-      await browser.storage.local.set({ timerAudioDetect: true, timerTabId: tabId });
+      await browser.storage.local.set({ timerAudioDetect: true });
       if (currentlyAudible) {
-        await startRunning(tabId);
+        await startRunning(tabId, "audio");
       } else {
-        await startWaiting(tabId);
+        await startWaiting(tabId, "audio");
       }
       return;
     }
@@ -287,10 +412,10 @@ startStopBtn.addEventListener("click", async () => {
 
     if (videoState.playing) {
       // Video already playing — start ticking immediately
-      await startRunning(tabId);
+      await startRunning(tabId, "video");
     } else if (videoState.found) {
       // Video exists but paused — wait for play event
-      await startWaiting(tabId);
+      await startWaiting(tabId, "video");
     } else {
       // No video found — prompt
       timerStatus.textContent = "No video detected! Activate manual logging?";
@@ -300,7 +425,7 @@ startStopBtn.addEventListener("click", async () => {
         timerStatus.className   = "";
         timerStatus.textContent = "";
         manualCheck.checked     = true;
-        await startRunning(tabId);
+        await startRunning(tabId, "manual");
       };
     }
     return;
@@ -312,7 +437,7 @@ startStopBtn.addEventListener("click", async () => {
   const activity = activitySelect.value;
 
   await browser.storage.local.remove(
-    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerAutoPaused", "timerAudioDetect", "timerTabId"]
+    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerAutoPaused", "timerAudioDetect", "timerTabId", "timerMode", "timerRecovered", "timerLastTick"]
   );
   applyState({});
 
