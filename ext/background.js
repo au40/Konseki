@@ -2,6 +2,23 @@
 // Holds settings (port + token) in browser.storage.local so they never
 // touch the page context.
 
+async function updateBadge() {
+  const { token } = await browser.storage.local.get("token");
+  if ((token || "").trim()) {
+    browser.action.setBadgeText({ text: "" });
+    return;
+  }
+  browser.action.setBadgeBackgroundColor({ color: "#e53935" });
+  if (browser.action.setBadgeTextColor) {
+    browser.action.setBadgeTextColor({ color: "#e53935" });
+  }
+  browser.action.setBadgeText({ text: "●" });
+}
+
+updateBadge();
+browser.runtime.onStartup.addListener(updateBadge);
+browser.runtime.onInstalled.addListener(updateBadge);
+
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
   if (changeInfo.audible === undefined) return;
 

@@ -59,6 +59,7 @@ saveBtn.addEventListener("click", async () => {
   }
 
   await browser.storage.local.set({ port, token });
+  browser.action.setBadgeText({ text: "" });
   statusEl.textContent = "Saved.";
   statusEl.className   = "";
   setTimeout(() => { statusEl.textContent = ""; }, 2000);
