@@ -79,25 +79,30 @@
       color: #fff;
     }
     button.discard-btn.confirm:hover { background: #a03a3a; }
-.manual-row {
+    .seg {
       display: flex;
-      align-items: center;
-      gap: 6px;
+      background: #2a2a3d;
+      border-radius: 8px;
+      padding: 3px;
+      gap: 2px;
       margin-top: 8px;
     }
-    .manual-row input[type="checkbox"] {
-      width: auto;
-      accent-color: #9b9bc7;
+    .seg-btn {
+      flex: 1;
+      padding: 5px 10px;
+      border-radius: 6px;
+      border: none;
       cursor: pointer;
+      background: transparent;
+      color: #888;
+      font-size: 12px;
+      font-family: inherit;
+      font-weight: 500;
+      transition: background 0.15s, color 0.15s;
     }
-    .manual-row label {
-      margin: 0;
-      font-size: 11px;
-      text-transform: none;
-      letter-spacing: normal;
-      color: #666;
-      cursor: pointer;
-    }
+    .seg-btn:hover:not(.active):not(:disabled) { color: #ccc; }
+    .seg-btn.active { background: #9b9bc7; color: #fff; }
+    .seg-btn:disabled { cursor: not-allowed; opacity: 0.5; }
     #timer-status.prompt {
       color: #9b9bc7;
       cursor: pointer;
@@ -164,13 +169,10 @@
   <label>Activity</label>
   <select id="activity-select"></select>
 
-  <div class="manual-row">
-    <input type="checkbox" id="manual-check">
-    <label for="manual-check">Manual logging</label>
-  </div>
-  <div class="manual-row">
-    <input type="checkbox" id="audio-detect-check">
-    <label for="audio-detect-check">Audio detect</label>
+  <div class="seg" id="mode-seg">
+    <button class="seg-btn active" data-mode="video"  title="Track based on the page's video play / pause events">Auto</button>
+    <button class="seg-btn"        data-mode="manual" title="Track manually with Pause / Resume — no media detection">Manual</button>
+    <button class="seg-btn"        data-mode="audio"  title="Track based on whether the tab is producing sound">Audio</button>
   </div>
 
   <div class="btn-row">

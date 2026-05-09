@@ -79,14 +79,22 @@ const activitySelect = document.getElementById("activity-select");
 const pauseBtn       = document.getElementById("pause-btn");
 const startStopBtn   = document.getElementById("start-stop-btn");
 const timerStatus    = document.getElementById("timer-status");
-const manualCheck        = document.getElementById("manual-check");
-const audioDetectCheck   = document.getElementById("audio-detect-check");
+const modeSeg            = document.getElementById("mode-seg");
+const modeBtns           = Array.from(modeSeg.querySelectorAll(".seg-btn"));
 const discardBtn         = document.getElementById("discard-btn");
 const discardRow         = document.getElementById("discard-row");
 
-// Mutually exclusive checkboxes
-manualCheck.addEventListener("change", () => { if (manualCheck.checked) audioDetectCheck.checked = false; });
-audioDetectCheck.addEventListener("change", () => { if (audioDetectCheck.checked) manualCheck.checked = false; });
+function getSelectedMode() {
+  return modeSeg.querySelector(".seg-btn.active")?.dataset.mode || "video";
+}
+
+modeBtns.forEach(btn => {
+  btn.addEventListener("click", () => {
+    if (btn.disabled || btn.classList.contains("active")) return;
+    modeBtns.forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+  });
+});
 
 let timerInterval = null;
 let discardConfirmTimeout = null;
@@ -123,9 +131,11 @@ function applyState(cfg) {
   timerInterval = null;
 
   const active = cfg.timerRunning || cfg.timerPaused || cfg.timerWaiting;
-  manualCheck.disabled      = !!active;
-  audioDetectCheck.disabled = !!active;
-  discardRow.style.display  = active ? "" : "none";
+  modeBtns.forEach(b => { b.disabled = !!active; });
+  if (active && cfg.timerMode) {
+    modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === cfg.timerMode));
+  }
+  discardRow.style.display = active ? "" : "none";
   if (!active) resetDiscardBtn();
 
   if (cfg.timerRunning) {
@@ -180,7 +190,7 @@ function applyState(cfg) {
 
 // Restore state and fetch activity types when popup opens
 browser.storage.local.get(
-  ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerRecovered", "token"]
+  ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerMode", "timerRecovered", "token"]
 ).then(cfg => {
   if (cfg.timerActivity) activitySelect.value = cfg.timerActivity;
   applyState(cfg);
@@ -191,7 +201,7 @@ browser.storage.local.get(
 });
 
 // Keep popup in sync when background.js mutates timer state (e.g. audio detect pause)
-const TIMER_KEYS = ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerAutoPaused", "timerRecovered"];
+const TIMER_KEYS = ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerAutoPaused", "timerRecovered", "timerMode"];
 browser.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (!TIMER_KEYS.some(k => k in changes)) return;
@@ -365,14 +375,16 @@ startStopBtn.addEventListener("click", async () => {
       tabId = tab?.id ?? null;
     } catch {}
 
-    // Manual checkbox — skip detection entirely
-    if (manualCheck.checked) {
+    const mode = getSelectedMode();
+
+    // Manual mode — skip detection entirely
+    if (mode === "manual") {
       await startRunning(tabId, "manual");
       return;
     }
 
-    // Audio detect — watch tab audible state instead of video elements
-    if (audioDetectCheck.checked && tabId) {
+    // Audio mode — watch tab audible state instead of video elements
+    if (mode === "audio" && tabId) {
       let currentlyAudible = false;
       try {
         const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
@@ -424,7 +436,7 @@ startStopBtn.addEventListener("click", async () => {
         timerStatus.onclick     = null;
         timerStatus.className   = "";
         timerStatus.textContent = "";
-        manualCheck.checked     = true;
+        modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "manual"));
         await startRunning(tabId, "manual");
       };
     }
