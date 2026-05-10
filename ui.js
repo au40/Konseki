@@ -2188,6 +2188,7 @@ async function saveSettings() {
   const gsm_debounce_secs = parseInt(document.getElementById('gsm-debounce').value) || 60;
   appSettings = { ...appSettings, rollover_hour: rollover, gsm_url, gsm_debounce_secs };
   await window.pywebview.api.save_settings({ rollover_hour: rollover, gsm_url, gsm_debounce_secs });
+  scheduleRolloverRefresh();
   setStatus('Settings saved');
 }
 
@@ -2198,6 +2199,22 @@ async function doTestGSM() {
   const r = await window.pywebview.api.test_gsm(url);
   fb.className = r.ok ? 'feedback ok' : 'feedback err';
   fb.textContent = r.ok ? '✓ Connected' : `✗ ${r.error || 'Could not connect — is GSM running?'}`;
+}
+
+// ── Rollover refresh ───────────────────────────────────────────────────────
+let rolloverTimer = null;
+function scheduleRolloverRefresh() {
+  if (rolloverTimer) { clearTimeout(rolloverTimer); rolloverTimer = null; }
+  const rollover = appSettings.rollover_hour || 0;
+  const now  = new Date();
+  const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), rollover, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const ms = (next - now) + 1000;
+  rolloverTimer = setTimeout(() => {
+    rolloverTimer = null;
+    loadPage(currentPage);
+    scheduleRolloverRefresh();
+  }, ms);
 }
 
 // ── Data changed (file watcher) ────────────────────────────────────────────
@@ -2239,6 +2256,7 @@ async function init() {
   await buildLogPage();
   setStatus('Ready');
   loadPage('dashboard');
+  scheduleRolloverRefresh();
 }
 
 if (window.pywebview) {
