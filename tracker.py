@@ -638,7 +638,14 @@ class Api:
             "ext_port":         _get_port(),
             "ext_token":        _get_or_create_token(),
             "gsm_debounce_secs": int(get_setting("gsm_debounce_secs", "60")),
+            "first_run_complete":         get_setting("first_run_complete", "0") == "1",
+            "gsm_history_include_time":   get_setting("gsm_history_include_time", "0") == "1",
+            "ttsu_history_include_time":  get_setting("ttsu_history_include_time", "0") == "1",
         }
+
+    def complete_first_run(self):
+        set_setting("first_run_complete", "1")
+        return {"ok": True}
 
     def reroll_ext_token(self):
         if self._ext_server:
@@ -648,6 +655,8 @@ class Api:
 
     def save_settings(self, data):
         for key, value in data.items():
+            if isinstance(value, bool):
+                value = "1" if value else "0"
             set_setting(key, str(value))
         if "gsm_url" in data:
             imports.GSM_API = data["gsm_url"]
@@ -676,6 +685,11 @@ def main():
     scan_existing_files()
     backup.ensure_backup()
     backup.schedule_daily()
+
+    # Auto-mark existing users as having completed first-run setup so they don't see the prompt
+    if get_setting("first_run_complete", "") == "":
+        has_data = (_q1("SELECT 1 FROM sessions LIMIT 1") is not None)
+        set_setting("first_run_complete", "1" if has_data else "0")
 
     api              = Api()
     ext_server       = ExtServer(on_import=api._notify)
@@ -769,7 +783,7 @@ def main():
         win.events.closing += _on_closing
 
     try:
-        webview.start()
+        webview.start(debug=bool(os.environ.get("IMMERSION_TRACKER_DATA_DIR")))
     finally:
         observer.stop()
         observer.join()

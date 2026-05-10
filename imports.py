@@ -10,7 +10,8 @@ import io
 import requests
 from datetime import datetime, date
 from db import (DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1,
-                ingest_session_file, in_rollover_window, upsert_gsm_attribution)
+                ingest_session_file, in_rollover_window, upsert_gsm_attribution,
+                get_setting)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 GSM_API = "http://localhost:7275/api/stats"
@@ -44,12 +45,14 @@ def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_hea
     """
     Backfill per-day historical sessions for the current game directly into
     the DB — no JSON files, no file-watcher pipeline.
-    time_excluded=1: visible in Media tab only, not Stats/heatmap/streak.
+    time_excluded follows gsm_history_include_time setting (default 1 = chars-only).
     Skips today and any date already present for this game.
     """
     if not daily_activity:
         return 0
     today_str = str(date.today())
+    include_time = get_setting("gsm_history_include_time", "0") == "1"
+    excl = 0 if include_time else 1
     existing  = {
         r[0] for r in con.execute(
             "SELECT DISTINCT session_date FROM sessions WHERE title=? AND source='gsm'",
@@ -72,7 +75,7 @@ def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_hea
             "gsm", game_name, "Reading", date_str,
             int(chars), 0, (chars / speed * 3600) if speed > 0 else 0.0,
             speed, 0, 0, game_id, None, datetime.now().isoformat(),
-            1,  # time_excluded: visible in Media tab only
+            excl,
         ))
         inserted += 1
     return inserted
@@ -201,10 +204,14 @@ def log_manual_session(activity_type, time_seconds, session_date):
 
 
 def import_ttsu_entries(entries):
-    """Insert a list of ッツ Reader stat dicts into the DB. Returns {imported, skipped, titles}."""
+    """Insert a list of ッツ Reader stat dicts into the DB. Returns {imported, skipped, titles}.
+    Past-dated rows: time_excluded follows ttsu_history_include_time setting (default 1).
+    Today: always time_excluded=0."""
     imported    = 0
     skipped     = 0
     titles_seen = set()
+    today_str   = str(date.today())
+    include_past_time = get_setting("ttsu_history_include_time", "0") == "1"
 
     for entry in entries:
         if isinstance(entry, str):
@@ -233,6 +240,8 @@ def import_ttsu_entries(entries):
         speed = float(entry.get('lastReadingSpeed', 0) or 0) or \
                 float(entry.get('maxReadingSpeed',  0) or 0)
 
+        excl = 0 if (date_key == today_str or include_past_time) else 1
+
         con      = sqlite3.connect(DB_PATH)
         existing = con.execute(
             "SELECT rowid, chars_read FROM sessions WHERE source='ttsureader' AND title=? AND session_date=?",
@@ -246,9 +255,9 @@ def import_ttsu_entries(entries):
                 continue
             con.execute("""
                 UPDATE sessions
-                   SET chars_read=?, time_seconds=?, reading_speed=?, ingested_at=?
+                   SET chars_read=?, time_seconds=?, reading_speed=?, ingested_at=?, time_excluded=?
                  WHERE rowid=?
-            """, (chars, time_secs, speed, datetime.now().isoformat(), existing_rowid))
+            """, (chars, time_secs, speed, datetime.now().isoformat(), excl, existing_rowid))
             con.commit()
             con.close()
             imported += 1
@@ -259,9 +268,9 @@ def import_ttsu_entries(entries):
             INSERT INTO sessions
               (source, title, activity_type, session_date,
                chars_read, time_seconds, reading_speed, ingested_at, time_excluded)
-            VALUES (?,?,?,?,?,?,?,?,0)
+            VALUES (?,?,?,?,?,?,?,?,?)
         """, ('ttsureader', title, 'Reading', date_key,
-              chars, time_secs, speed, datetime.now().isoformat()))
+              chars, time_secs, speed, datetime.now().isoformat(), excl))
         con.commit()
         con.close()
         imported += 1

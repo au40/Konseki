@@ -85,6 +85,17 @@ function mediaIcon(source, atype) {
 
 // ── Navigation ─────────────────────────────────────────────────────────────
 function navigate(page) {
+  if (currentPage === 'log' && page !== 'log') {
+    const fb = document.getElementById('log-feedback');
+    if (fb) { fb.className = ''; fb.textContent = ''; }
+  }
+  if (currentPage === 'settings' && page !== 'settings') {
+    const setup = document.getElementById('settings-setup-view');
+    const main  = document.getElementById('settings-main-view');
+    if (setup) setup.style.display = 'none';
+    if (main)  main.style.display  = '';
+    clearSetupFeedback();
+  }
   document.querySelectorAll('.nav-item').forEach(el =>
     el.classList.toggle('active', el.dataset.page === page));
   document.querySelectorAll('.page').forEach(el =>
@@ -481,11 +492,13 @@ async function doLogSession() {
 
 async function doImportCSV() {
   const path = await window.pywebview.api.open_csv_dialog();
-  const fb   = document.getElementById('csv-feedback');
-  if (!path) { fb.className=''; fb.textContent=''; return; }
+  const fbs  = ['csv-feedback', 'setup-csv-feedback']
+                  .map(id => document.getElementById(id)).filter(Boolean);
+  if (!path) { fbs.forEach(fb => { fb.className=''; fb.textContent=''; }); return; }
   const r = await window.pywebview.api.do_import_csv(path);
-  fb.className = r.imported ? 'feedback ok' : 'feedback';
-  fb.textContent = `✓ Imported ${r.imported} row(s)` + (r.skipped ? `  (${r.skipped} skipped)` : '');
+  const cls  = r.imported ? 'feedback ok' : 'feedback';
+  const text = `✓ Imported ${r.imported} row(s)` + (r.skipped ? `  (${r.skipped} skipped)` : '');
+  fbs.forEach(fb => { fb.className = cls; fb.textContent = text; });
   if (r.imported) { statsCache = {}; setStatus(`Imported ${r.imported} sessions`); }
 }
 
@@ -2156,9 +2169,70 @@ async function loadSettings() {
   document.getElementById('gsm-debounce').value        = s.gsm_debounce_secs || 60;
   document.getElementById('ext-port').value            = s.ext_port  || 18463;
   document.getElementById('ext-token').value           = s.ext_token || '';
+  const gsmTimeBox  = document.getElementById('gsm-history-include-time');
+  const ttsuTimeBox = document.getElementById('ttsu-history-include-time');
+  if (gsmTimeBox)  gsmTimeBox.checked  = !!s.gsm_history_include_time;
+  if (ttsuTimeBox) ttsuTimeBox.checked = !!s.ttsu_history_include_time;
   const theme = s.theme || 'dark';
   document.querySelectorAll('.theme-opt').forEach(el =>
     el.classList.toggle('selected', el.dataset.theme === theme));
+}
+
+// ── First-time setup wizard ────────────────────────────────────────────────
+function openSetupWizard() {
+  navigate('settings');
+  document.getElementById('settings-main-view').style.display  = 'none';
+  document.getElementById('settings-setup-view').style.display = '';
+  loadSettings();
+}
+
+function closeSetupWizard() {
+  document.getElementById('settings-setup-view').style.display = 'none';
+  document.getElementById('settings-main-view').style.display  = '';
+  clearSetupFeedback();
+}
+
+function clearSetupFeedback() {
+  ['setup-csv-feedback', 'setup-gsm-feedback', 'setup-ttsu-feedback'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.className = ''; el.textContent = ''; }
+  });
+}
+
+async function onSetupTogglePastTime(kind) {
+  const id  = kind === 'gsm' ? 'gsm-history-include-time' : 'ttsu-history-include-time';
+  const fb  = document.getElementById(kind === 'gsm' ? 'setup-gsm-feedback' : 'setup-ttsu-feedback');
+  const box = document.getElementById(id);
+  if (box.checked) {
+    const ok = await showConfirm(
+      'Including past session time will add historical hours to your stats. ' +
+      'This affects time totals, streaks, and the heatmap. Are you sure?',
+      'Yes, include past time'
+    );
+    if (!ok) { box.checked = false; return; }
+  }
+  const key = kind === 'gsm' ? 'gsm_history_include_time' : 'ttsu_history_include_time';
+  await window.pywebview.api.save_settings({ [key]: box.checked });
+  appSettings[key] = box.checked;
+  if (fb) {
+    fb.className = 'feedback ok';
+    fb.textContent = box.checked
+      ? '✓ Past session time will be included on next import.'
+      : '✓ Past session time will be excluded on next import.';
+  }
+}
+
+async function dismissFirstRun(goToSetup) {
+  document.getElementById('firstrun-overlay').style.display = 'none';
+  await window.pywebview.api.complete_first_run();
+  appSettings.first_run_complete = true;
+  if (goToSetup) openSetupWizard();
+}
+
+async function maybeShowFirstRunModal() {
+  if (appSettings && appSettings.first_run_complete) return;
+  const overlay = document.getElementById('firstrun-overlay');
+  if (overlay) overlay.style.display = '';
 }
 
 function copyExtField(id) {
@@ -2212,6 +2286,7 @@ function scheduleRolloverRefresh() {
   const ms = (next - now) + 1000;
   rolloverTimer = setTimeout(() => {
     rolloverTimer = null;
+    document.getElementById('log-date')._flatpickr?.setDate(today(), false);
     loadPage(currentPage);
     scheduleRolloverRefresh();
   }, ms);
@@ -2257,6 +2332,7 @@ async function init() {
   setStatus('Ready');
   loadPage('dashboard');
   scheduleRolloverRefresh();
+  maybeShowFirstRunModal();
 }
 
 if (window.pywebview) {

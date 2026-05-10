@@ -12,7 +12,7 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 APP_NAME     = "Immersion Tracker"
-DATA_DIR     = Path.home() / "immersion-tracker"
+DATA_DIR     = Path(os.environ.get("IMMERSION_TRACKER_DATA_DIR") or (Path.home() / "immersion-tracker"))
 SESSIONS_DIR = DATA_DIR / "sessions"
 DB_PATH      = DATA_DIR / "tracker.db"
 
@@ -131,6 +131,14 @@ def init_db():
             title      TEXT PRIMARY KEY,
             image_data TEXT NOT NULL,
             updated_at TEXT NOT NULL
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS custom_categories (
+            name       TEXT PRIMARY KEY,
+            color      TEXT NOT NULL DEFAULT '#6B6B8A',
+            created_at TEXT NOT NULL
         )
     """)
 

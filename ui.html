@@ -419,7 +419,22 @@
 
     <!-- ── Settings ───────────────────────────────────────────────────────── -->
     <div id="page-settings" class="page">
+
+      <!-- Main settings view -->
+      <div id="settings-main-view">
       <div class="page-header"><h1>Settings</h1></div>
+
+      <div class="settings-section" style="margin-top:20px">
+        <div class="card setup-entry-card" onclick="openSetupWizard()">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+            <div>
+              <h3 style="margin:0 0 4px">First-time setup / Import wizard</h3>
+              <p class="muted" style="margin:0">Import data from a previous tracker, GameSentenceMiner, or ッツ Reader.</p>
+            </div>
+            <span style="color:var(--dim);font-size:18px">›</span>
+          </div>
+        </div>
+      </div>
 
       <div class="settings-section" style="margin-top:20px">
         <div class="card">
@@ -514,6 +529,83 @@
         </div>
       </div>
 
+      </div><!-- /#settings-main-view -->
+
+      <!-- Setup wizard sub-view -->
+      <div id="settings-setup-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeSetupWizard()">← Back</button>
+          <span class="muted" style="font-size:12px">Settings  ›  First-time setup</span>
+        </div>
+
+        <div class="page-header"><h1>First-time setup</h1></div>
+        <p class="muted" style="margin:6px 0 20px;line-height:1.6">
+          Bring your existing immersion data into the tracker. Each section is independent — use whichever ones apply to you.
+        </p>
+
+        <!-- Step 1: CSV -->
+        <div class="settings-section">
+          <div class="card">
+            <h3><span class="setup-step-num">1</span>Import CSV from previous tracker</h3>
+            <p class="muted" style="margin-bottom:14px;line-height:1.6">
+              CSV columns: <code>Activity, Language, Activity Type, Time (minutes), Date</code>
+            </p>
+            <div style="display:flex;align-items:center;gap:14px">
+              <button class="btn btn-outline btn-sm" onclick="doImportCSV()">Choose CSV file…</button>
+              <span class="feedback" id="setup-csv-feedback"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2: GSM -->
+        <div class="settings-section">
+          <div class="card">
+            <h3><span class="setup-step-num">2</span>Import history from GameSentenceMiner</h3>
+            <p class="muted" style="margin-bottom:10px;line-height:1.6">
+              GSM only exposes per-day history for the <em>currently open</em> game. To pull the full history of every game you've tracked, you'll need to:
+            </p>
+            <ol class="muted" style="margin:0 0 14px 18px;line-height:1.7">
+              <li>Open each game in GSM, one at a time.</li>
+              <li>Click <strong>↻ Pull GSM</strong> in the sidebar (or wait for the auto-pull to fire).</li>
+              <li>Repeat for every game whose history you want imported.</li>
+            </ol>
+            <label class="toggle-label setup-toggle">
+              <input type="checkbox" id="gsm-history-include-time" onchange="onSetupTogglePastTime('gsm')">
+              <span>Include time from past sessions</span>
+            </label>
+            <p class="muted setup-toggle-hint">
+              Default: <strong>off</strong> — only character counts are added to your stats. Today's sessions always count time fully, regardless of this setting.
+            </p>
+            <div class="feedback" id="setup-gsm-feedback"></div>
+          </div>
+        </div>
+
+        <!-- Step 3: ッツ Reader -->
+        <div class="settings-section">
+          <div class="card">
+            <h3><span class="setup-step-num">3</span>Import history from ッツ Reader</h3>
+            <p class="muted" style="margin-bottom:10px;line-height:1.6">
+              ッツ Reader can export all of your stats as a zip file. To import:
+            </p>
+            <ol class="muted" style="margin:0 0 14px 18px;line-height:1.7">
+              <li>Open ッツ Reader and go to the <strong>Statistics</strong> page.</li>
+              <li>Click the option to download all stats as a zip.</li>
+              <li>Drag the zip onto the <strong>⬆ Drag ttsu log zip here</strong> button in the sidebar.</li>
+            </ol>
+            <label class="toggle-label setup-toggle">
+              <input type="checkbox" id="ttsu-history-include-time" onchange="onSetupTogglePastTime('ttsu')">
+              <span>Include time from past sessions</span>
+            </label>
+            <p class="muted setup-toggle-hint">
+              Default: <strong>off</strong> — only character counts are added to your stats. Today's sessions always count time fully, regardless of this setting.
+            </p>
+            <div class="feedback" id="setup-ttsu-feedback"></div>
+          </div>
+        </div>
+
+        <div style="height:32px"></div>
+      </div>
+
       <!-- ── GSM aggregate import — INACTIVE ────────────────────────────────
            Commented out alongside gsm_aggregate_import() in tracker.py.
            Problem: totalCharsPerGame labels don't match currentGameStats.game_name.
@@ -538,6 +630,20 @@
     </div>
 
   </main>
+</div>
+
+<!-- ── First-run welcome modal ─────────────────────────────────────────── -->
+<div id="firstrun-overlay" style="display:none">
+  <div id="firstrun-dialog" class="card">
+    <h2 style="margin:0 0 10px">Welcome to Immersion Tracker</h2>
+    <p style="font-size:13px;color:var(--text);line-height:1.6;margin:0 0 18px">
+      Are you a first-time user? We can walk you through importing data from a previous tracker, GameSentenceMiner, and ッツ Reader.
+    </p>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-outline btn-sm" onclick="dismissFirstRun(false)">Skip</button>
+      <button class="btn btn-primary btn-sm" onclick="dismissFirstRun(true)">Walk me through setup</button>
+    </div>
+  </div>
 </div>
 
 <!-- ── Confirm dialog ──────────────────────────────────────────────────── -->
