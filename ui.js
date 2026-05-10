@@ -513,7 +513,10 @@ async function uploadCoverFile(file, title) {
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   const r = await window.pywebview.api.set_book_cover(title, btoa(binary));
   if (r.ok) {
-    mediaAllData = await window.pywebview.api.get_media();
+    [mediaAllData, seriesData] = await Promise.all([
+      window.pywebview.api.get_media(),
+      window.pywebview.api.get_series(),
+    ]);
     const media = await window.pywebview.api.get_title_detail(title);
     if (media) renderMediaDetail(media);
   }

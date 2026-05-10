@@ -89,10 +89,26 @@ function getSelectedMode() {
 }
 
 modeBtns.forEach(btn => {
-  btn.addEventListener("click", () => {
+  btn.addEventListener("click", async () => {
     if (btn.disabled || btn.classList.contains("active")) return;
+    const newMode = btn.dataset.mode;
     modeBtns.forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
+
+    // While a session is paused, persist the change so Resume picks up the new mode
+    // and adjust the side-channels (audible listener flag, media-listener injection).
+    const cfg = await browser.storage.local.get(["timerPaused", "timerTabId"]);
+    if (!cfg.timerPaused) return;
+
+    await browser.storage.local.set({ timerMode: newMode });
+    if (newMode === "audio") {
+      await browser.storage.local.set({ timerAudioDetect: true });
+    } else {
+      await browser.storage.local.remove("timerAudioDetect");
+    }
+    if (newMode === "video" && cfg.timerTabId) {
+      try { await browser.scripting.executeScript({ target: { tabId: cfg.timerTabId }, files: ["media-listener.js"] }); } catch {}
+    }
   });
 });
 
@@ -130,8 +146,9 @@ function applyState(cfg) {
   clearInterval(timerInterval);
   timerInterval = null;
 
-  const active = cfg.timerRunning || cfg.timerPaused || cfg.timerWaiting;
-  modeBtns.forEach(b => { b.disabled = !!active; });
+  const active   = cfg.timerRunning || cfg.timerPaused || cfg.timerWaiting;
+  const lockMode = cfg.timerRunning || cfg.timerWaiting;  // mode is editable while paused
+  modeBtns.forEach(b => { b.disabled = !!lockMode; });
   if (active && cfg.timerMode) {
     modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === cfg.timerMode));
   }
@@ -238,6 +255,11 @@ pauseBtn.addEventListener("click", async () => {
   const tabId   = cfg.timerTabId;
   const elapsed = cfg.timerElapsed || 0;
 
+  async function reinjectOverlay() {
+    if (!tabId) return;
+    try { await browser.scripting.executeScript({ target: { tabId }, files: ["timer-overlay.js"] }); } catch {}
+  }
+
   async function resumeRunning() {
     const timerStart = Date.now();
     await browser.storage.local.set({
@@ -248,6 +270,7 @@ pauseBtn.addEventListener("click", async () => {
       timerStart,
     });
     applyState({ timerRunning: true, timerStart, timerElapsed: elapsed });
+    await reinjectOverlay();
   }
 
   async function resumeWaiting() {
@@ -259,6 +282,7 @@ pauseBtn.addEventListener("click", async () => {
       timerStart:      null,
     });
     applyState({ timerWaiting: true, timerElapsed: elapsed });
+    await reinjectOverlay();
   }
 
   if (mode === "manual") {

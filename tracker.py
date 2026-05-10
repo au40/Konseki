@@ -6,6 +6,8 @@ delegating to db.py (data layer) and imports.py (external integrations).
 
 import base64
 import os
+import subprocess
+import sys
 import threading
 import webview
 import sqlite3
@@ -724,7 +726,7 @@ def main():
     # System tray (requires pystray + Pillow)
     tray_icon = None
     if _TRAY_AVAILABLE:
-        _state = {"quitting": False}
+        _state = {"quitting": False, "restarting": False}
 
         def _show(icon, item):
             win.show()
@@ -733,6 +735,12 @@ def main():
             result = pull_gsm_now()
             if result:
                 api._notify()
+
+        def _restart(icon, item):
+            _state["quitting"] = True
+            _state["restarting"] = True
+            icon.stop()
+            win.destroy()
 
         def _quit(icon, item):
             _state["quitting"] = True
@@ -752,6 +760,7 @@ def main():
             menu=pystray.Menu(
                 pystray.MenuItem("Open", _show, default=True),
                 pystray.MenuItem("Pull GSM Now", _pull_gsm),
+                pystray.MenuItem("Restart", _restart),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("Quit", _quit),
             ),
@@ -770,6 +779,9 @@ def main():
         if tray_icon:
             tray_icon.stop()
         ext_server.stop()
+        if _TRAY_AVAILABLE and _state.get("restarting"):
+            args = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, *sys.argv]
+            subprocess.Popen(args, close_fds=True)
 
 
 if __name__ == "__main__":

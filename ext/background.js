@@ -8,11 +8,11 @@ async function updateBadge() {
     browser.action.setBadgeText({ text: "" });
     return;
   }
-  browser.action.setBadgeBackgroundColor({ color: [0, 0, 0, 0] });
+  browser.action.setBadgeBackgroundColor({ color: "#e53935" });
   if (browser.action.setBadgeTextColor) {
-    browser.action.setBadgeTextColor({ color: "#e53935" });
+    browser.action.setBadgeTextColor({ color: "#ffffff" });
   }
-  browser.action.setBadgeText({ text: "●" });
+  browser.action.setBadgeText({ text: "‼" });
 }
 
 updateBadge();
@@ -125,7 +125,8 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
 
 browser.runtime.onMessage.addListener(async (msg) => {
   if (msg.type === "media-pause") {
-    const cfg = await browser.storage.local.get(["timerRunning", "timerStart", "timerElapsed"]);
+    const cfg = await browser.storage.local.get(["timerRunning", "timerStart", "timerElapsed", "timerMode"]);
+    if (cfg.timerMode !== "video") return;
     if (!cfg.timerRunning) return;
     const elapsed = (cfg.timerElapsed || 0) + Math.floor((Date.now() - cfg.timerStart) / 1000);
     await browser.storage.local.set({
@@ -139,7 +140,8 @@ browser.runtime.onMessage.addListener(async (msg) => {
   }
 
   if (msg.type === "media-play") {
-    const cfg = await browser.storage.local.get(["timerWaiting", "timerPaused", "timerAutoPaused"]);
+    const cfg = await browser.storage.local.get(["timerWaiting", "timerPaused", "timerAutoPaused", "timerMode"]);
+    if (cfg.timerMode !== "video") return;
     if (cfg.timerWaiting) {
       // First play after Start — begin ticking for the first time
       await browser.storage.local.set({
