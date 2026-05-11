@@ -453,15 +453,25 @@ startStopBtn.addEventListener("click", async () => {
       // Video exists but paused — wait for play event
       await startWaiting(tabId, "video");
     } else {
-      // No video found — prompt
-      timerStatus.textContent = "No video detected! Activate manual logging?";
+      // No video found — suggest audio mode (catches Web Audio / iframe / DRM cases
+      // that the <video>/<audio> selector misses)
+      timerStatus.textContent = "No video detected! Try audio mode?";
       timerStatus.className   = "prompt";
       timerStatus.onclick = async () => {
         timerStatus.onclick     = null;
         timerStatus.className   = "";
         timerStatus.textContent = "";
-        modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "manual"));
-        await startRunning(tabId, "manual");
+        modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === "audio"));
+        let currentlyAudible = false;
+        if (tabId) {
+          try {
+            const tab = await browser.tabs.get(tabId);
+            currentlyAudible = tab?.audible || false;
+          } catch {}
+        }
+        await browser.storage.local.set({ timerAudioDetect: true });
+        if (currentlyAudible) await startRunning(tabId, "audio");
+        else                  await startWaiting(tabId, "audio");
       };
     }
     return;

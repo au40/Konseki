@@ -100,14 +100,31 @@ browser.storage.onChanged.addListener((changes, area) => {
   else stopHeartbeat();
 });
 
+async function audioAutoPause(cfg, deductSeconds = 0) {
+  if (!cfg.timerRunning) return;
+  const raw = (cfg.timerElapsed || 0) + Math.floor((Date.now() - cfg.timerStart) / 1000) - deductSeconds;
+  const elapsed = Math.max(0, raw);
+  await browser.storage.local.set({
+    timerRunning: false, timerPaused: true, timerAutoPaused: true,
+    timerElapsed: elapsed, timerStart: null,
+  });
+}
+
 browser.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
-  if (changeInfo.audible === undefined) return;
+  if (changeInfo.audible === undefined && changeInfo.url === undefined) return;
 
   const cfg = await browser.storage.local.get([
     "timerAudioDetect", "timerTabId",
     "timerRunning", "timerPaused", "timerAutoPaused", "timerWaiting", "timerStart", "timerElapsed",
   ]);
   if (!cfg.timerAudioDetect || cfg.timerTabId !== tabId) return;
+
+  // Navigation away from the playing page — pause immediately. Catches the case
+  // where the user pauses then navigates before Firefox's audible debounce fires.
+  if (changeInfo.url !== undefined) {
+    await audioAutoPause(cfg);
+    return;
+  }
 
   if (changeInfo.audible) {
     if (cfg.timerWaiting) {
@@ -116,11 +133,17 @@ browser.tabs.onUpdated.addListener(async (tabId, changeInfo) => {
       await browser.storage.local.set({ timerRunning: true, timerPaused: false, timerAutoPaused: false, timerStart: Date.now() });
     }
   } else {
-    if (cfg.timerRunning) {
-      const elapsed = Math.max(0, (cfg.timerElapsed || 0) + Math.floor((Date.now() - cfg.timerStart) / 1000) - 3);
-      await browser.storage.local.set({ timerRunning: false, timerPaused: true, timerAutoPaused: true, timerElapsed: elapsed, timerStart: null });
-    }
+    await audioAutoPause(cfg, 3);
   }
+});
+
+browser.tabs.onRemoved.addListener(async (tabId) => {
+  const cfg = await browser.storage.local.get([
+    "timerAudioDetect", "timerTabId",
+    "timerRunning", "timerStart", "timerElapsed",
+  ]);
+  if (!cfg.timerAudioDetect || cfg.timerTabId !== tabId) return;
+  await audioAutoPause(cfg);
 });
 
 browser.runtime.onMessage.addListener(async (msg) => {
