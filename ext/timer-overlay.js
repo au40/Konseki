@@ -105,6 +105,7 @@ if (!window.__immersionOverlayActive) {
       // Session ended — clean up
       overlay.remove();
       clearInterval(interval);
+      window.__immersionOverlayActive = false;
     }
   }
 

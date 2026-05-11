@@ -271,7 +271,7 @@ select:focus { border-color: var(--accent); }
 .daily-bar-row {
   display: flex; align-items: center; gap: 8px; margin-top: 6px;
 }
-.daily-bar-label { font-size: 10px; color: var(--dim); white-space: nowrap; }
+.daily-bar-label { font-size: 10px; color: var(--dim); white-space: nowrap; flex: 0 0 140px; }
 .daily-bar-track {
   flex: 1; height: 4px; background: var(--inset); border-radius: 2px; overflow: hidden;
 }

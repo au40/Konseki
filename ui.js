@@ -993,7 +993,8 @@ function setGoalPaceView(pace) {
 function updateGoalUnit() {
   const metric = document.getElementById('goal-metric').value;
   const chunk  = document.getElementById('goal-chunk').value;
-  const suffix = chunk === 'daily' ? '/day' : chunk === 'weekly' ? '/week' : chunk === 'monthly' ? '/month' : '';
+  const isEdit = editingGoalId !== null;
+  const suffix = isEdit ? '' : (chunk === 'daily' ? '/day' : chunk === 'weekly' ? '/week' : chunk === 'monthly' ? '/month' : '');
   document.getElementById('goal-target-label').textContent =
     metric === 'time_seconds' ? `Target (hours${suffix})` : `Target (characters${suffix})`;
 }
@@ -1013,6 +1014,10 @@ async function populateGoalActivitySelect() {
 const goalDataCache = {};
 
 async function loadGoals() {
+  setGoalPanelMode('default');
+  document.getElementById('goal-label').value    = '';
+  document.getElementById('goal-target').value   = '';
+  document.getElementById('goal-deadline').value = '';
   await populateGoalActivitySelect();
   const goals = await window.pywebview.api.get_goals();
   goals.forEach(g => { goalDataCache[g.id] = g; });
@@ -1027,16 +1032,25 @@ async function loadGoals() {
   [...inProgress, ...overdue].forEach(g => list.appendChild(makeGoalCard(g)));
 }
 
+let goalPanelMode = 'default';
+
 function setGoalPanelBtn(active) {
   document.getElementById('completed-btn').classList.toggle('active', active === 'completed');
   document.getElementById('new-goal-btn').classList.toggle('active', active === 'new');
 }
 
+function setGoalPanelMode(mode) {
+  goalPanelMode = mode;
+  document.getElementById('goal-active-view').style.display    = mode === 'default' ? 'block' : 'none';
+  document.getElementById('goal-completed-view').style.display = mode === 'completed' ? 'block' : 'none';
+  document.getElementById('goal-form-card').style.display      = mode === 'new' ? 'block' : 'none';
+  setGoalPanelBtn(mode === 'default' ? null : mode);
+  if (mode !== 'new') _resetGoalFormMode();
+}
+
 async function showCompletedGoals() {
-  document.getElementById('goal-active-view').style.display    = 'none';
-  document.getElementById('goal-form-card').style.display      = 'none';
-  document.getElementById('goal-completed-view').style.display = 'block';
-  setGoalPanelBtn('completed');
+  if (goalPanelMode === 'completed') { setGoalPanelMode('default'); return; }
+  setGoalPanelMode('completed');
   const goals = await window.pywebview.api.get_goals();
   goals.forEach(g => { goalDataCache[g.id] = g; });
   const list  = document.getElementById('goal-completed-list');
@@ -1049,9 +1063,7 @@ async function showCompletedGoals() {
 }
 
 function hideCompletedGoals() {
-  document.getElementById('goal-completed-view').style.display = 'none';
-  document.getElementById('goal-active-view').style.display    = 'block';
-  setGoalPanelBtn(null);
+  setGoalPanelMode('default');
 }
 
 function makeGoalCard(g) {
@@ -1089,7 +1101,8 @@ function makeGoalCard(g) {
   let chunkHtml = '';
   if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
     let chunkNeeded, originalChunk, periodDone, periodLabel, periodUnit;
-    const now      = new Date();
+    const [_y, _m, _d] = today().split('-').map(Number);
+    const now      = new Date(_y, _m - 1, _d);
     const shortFmt = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     let periodRange;
     if (goalPaceView === 'daily') {
@@ -1171,12 +1184,10 @@ function makeGoalCard(g) {
 let editingGoalId = null;
 
 function toggleGoalForm() {
-  const card   = document.getElementById('goal-form-card');
-  const isOpen = card.style.display !== 'none';
-  if (!isOpen) editingGoalId = null;
+  if (goalPanelMode === 'new') { setGoalPanelMode('default'); return; }
+  editingGoalId = null;
   _resetGoalFormMode();
-  card.style.display = isOpen ? 'none' : 'block';
-  setGoalPanelBtn(isOpen ? null : 'new');
+  setGoalPanelMode('new');
 }
 
 function _resetGoalFormMode() {
@@ -1191,7 +1202,6 @@ async function openGoalEdit(id) {
   const g = goalDataCache[id];
   if (!g) return;
   editingGoalId = g.id;
-  const card = document.getElementById('goal-form-card');
 
   document.getElementById('goal-label').value    = g.label;
   document.getElementById('goal-metric').value   = g.metric;
@@ -1206,9 +1216,8 @@ async function openGoalEdit(id) {
   document.getElementById('goal-add-btn').textContent  = 'Save changes';
   updateGoalUnit();
 
-  card.style.display = 'block';
-  setGoalPanelBtn('new');
-  card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  setGoalPanelMode('new');
+  document.getElementById('goal-form-card').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 async function doAddGoal() {
@@ -1251,12 +1260,10 @@ async function doAddGoal() {
   }
 
   if (r.ok) {
-    document.getElementById('goal-form-card').style.display = 'none';
     document.getElementById('goal-label').value    = '';
     document.getElementById('goal-target').value   = '';
     document.getElementById('goal-deadline').value = '';
-    _resetGoalFormMode();
-    setGoalPanelBtn(null);
+    setGoalPanelMode('default');
     statsCache = {};
     await loadGoals();
   } else {
