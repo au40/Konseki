@@ -59,9 +59,10 @@ def list_gsm_db_games():
     try:
         rows = gsm.execute("""
             SELECT r.game_id,
-                   COALESCE(NULLIF(g.title_english, ''),
-                            NULLIF(g.title_romaji,  ''),
+                   COALESCE(NULLIF(g.obs_scene_name,''),
                             NULLIF(g.title_original,''),
+                            NULLIF(g.title_english, ''),
+                            NULLIF(g.title_romaji,  ''),
                             r.game_id),
                    SUM(CAST(r.total_characters AS INTEGER)),
                    SUM(CAST(r.total_reading_time_seconds AS REAL)),
@@ -269,6 +270,53 @@ def _tracker_gsm_rows_for(game_id):
     }
 
 
+def _sync_rollover_attribution_to(con, game_id, session_date, chars, time_seconds, cards):
+    """If a gsm_rollover_attribution row exists for this (game_id implied via
+    source_date) session_date, refresh its chars/time/cards to match the new
+    session row. Without this, an import-driven update leaves stale
+    attribution values that produce ghost rows in per-title charts."""
+    con.execute("""
+        UPDATE gsm_rollover_attributions
+           SET chars=?, time_seconds=?, cards=?, updated_at=?
+         WHERE source_date=?
+    """, (int(chars or 0), float(time_seconds or 0), int(cards or 0),
+          datetime.now().isoformat(), session_date))
+
+
+def _sync_game_metadata_from_gsm(con, gsm, game_id):
+    """Copy title/description/image/genres from GSM's games table into the
+    tracker's gsm_games row. Preserves the user's track / count_as_time prefs.
+    Skips silently if the game isn't present in GSM's games table."""
+    row = gsm.execute("""
+        SELECT COALESCE(NULLIF(obs_scene_name,''),
+                        NULLIF(title_original,''),
+                        NULLIF(title_english, ''),
+                        NULLIF(title_romaji,  ''), id),
+               description, image, genres
+        FROM games WHERE id=?
+    """, (game_id,)).fetchone()
+    if not row:
+        return
+    name, desc, image, genres = row
+    fd_row = gsm.execute(
+        "SELECT MIN(date) FROM game_daily_rollup WHERE game_id=?", (game_id,)
+    ).fetchone()
+    first_date = fd_row[0] if fd_row else None
+    con.execute("""
+        INSERT INTO gsm_games
+          (game_id, game_name, description, image_data, genres, first_date, last_updated)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(game_id) DO UPDATE SET
+          game_name    = excluded.game_name,
+          description  = excluded.description,
+          image_data   = excluded.image_data,
+          genres       = excluded.genres,
+          first_date   = excluded.first_date,
+          last_updated = excluded.last_updated
+    """, (game_id, name or game_id, desc or '', image or '', genres or '[]',
+          first_date, datetime.now().isoformat()))
+
+
 def _resolve_game_title(game_id, fallback):
     """Pick a display title: prefer existing tracker GSM rows, then gsm_games
     metadata, then the fallback from GSM's games table."""
@@ -381,9 +429,15 @@ def import_gsm_history_apply():
     now = datetime.now().isoformat()
     summary = []
 
+    gsm = _open_gsm_db()
     con = sqlite3.connect(DB_PATH)
     try:
         for gid, count_t in tracked.items():
+            if gsm is not None:
+                try:
+                    _sync_game_metadata_from_gsm(con, gsm, gid)
+                except Exception as e:
+                    print(f"[gsm] metadata sync failed for {gid}: {e}")
             existing = _tracker_gsm_rows_for(gid)
             rollup   = by_game.get(gid, [])
             title    = _resolve_game_title(gid, games.get(gid, {}).get("game_name", gid))
@@ -424,6 +478,10 @@ def import_gsm_history_apply():
                          WHERE rowid=?
                     """, (r["chars"], r["time_seconds"], speed, r["cards"],
                           now, e["rowid"]))
+                    _sync_rollover_attribution_to(
+                        con, gid, r["date"],
+                        r["chars"], r["time_seconds"], r["cards"]
+                    )
                     updated += 1
 
             summary.append({
@@ -435,6 +493,8 @@ def import_gsm_history_apply():
         con.commit()
     finally:
         con.close()
+        if gsm is not None:
+            gsm.close()
     return summary
 
 
