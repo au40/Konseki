@@ -2191,6 +2191,7 @@ function openSetupWizard() {
   document.getElementById('settings-main-view').style.display  = 'none';
   document.getElementById('settings-setup-view').style.display = '';
   loadSettings();
+  loadGSMGamesList();
 }
 
 function closeSetupWizard() {
@@ -2280,6 +2281,158 @@ async function doTestGSM() {
   const r = await window.pywebview.api.test_gsm(url);
   fb.className = r.ok ? 'feedback ok' : 'feedback err';
   fb.textContent = r.ok ? '✓ Connected' : `✗ ${r.error || 'Could not connect — is GSM running?'}`;
+}
+
+// ── GSM history import ────────────────────────────────────────────────────────
+function fmtHours(secs) {
+  const h = secs / 3600;
+  if (h >= 10) return h.toFixed(1) + 'h';
+  if (h >= 1)  return h.toFixed(2) + 'h';
+  return Math.round(secs / 60) + 'min';
+}
+
+async function loadGSMAnomalies() {
+  const banner = document.getElementById('gsm-anomalies-banner');
+  if (!banner) return;
+  const r = await window.pywebview.api.gsm_list_anomalies();
+  if (!r.ok || !r.anomalies || r.anomalies.length === 0) {
+    banner.innerHTML = '';
+    return;
+  }
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const rows = r.anomalies.map(a => `
+    <li style="padding:8px;background:var(--surface-2);border-radius:4px;margin-bottom:6px">
+      <div style="font-size:12px;margin-bottom:4px">
+        <strong>${esc(a.game_name || a.game_id)}</strong> on <strong>${esc(a.session_date)}</strong>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px">
+        GSM rollup is empty (0 chars, 0s) but your tracker has ${fmtChars(a.existing_chars)} chars / ${fmtHours(a.existing_time)}. Update was blocked.
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn btn-outline btn-sm" onclick="doResolveAnomaly(${a.id}, true)">Apply (zero it out)</button>
+        <button class="btn btn-outline btn-sm" onclick="doResolveAnomaly(${a.id}, false)">Keep tracker value</button>
+      </div>
+    </li>`).join('');
+  banner.innerHTML = `
+    <div style="padding:10px 12px;border:1px solid var(--warn,#c08040);border-radius:6px;background:rgba(192,128,64,0.08)">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px">⚠ GSM sync blocked ${r.anomalies.length} update${r.anomalies.length === 1 ? '' : 's'}</div>
+      <ul style="list-style:none;padding:0;margin:0">${rows}</ul>
+    </div>`;
+}
+
+async function doResolveAnomaly(id, applyChange) {
+  await window.pywebview.api.gsm_resolve_anomaly(id, applyChange);
+  await loadGSMAnomalies();
+}
+
+async function loadGSMGamesList() {
+  const list  = document.getElementById('gsm-games-list');
+  const pathEl = document.getElementById('gsm-db-path');
+  if (!list || !pathEl) return;
+  list.innerHTML = '<p class="muted" style="font-size:12px">Loading…</p>';
+  loadGSMAnomalies();
+  const r = await window.pywebview.api.gsm_list_games();
+  pathEl.textContent = r.path || '(unknown)';
+  if (!r.ok || !r.games || r.games.length === 0) {
+    list.innerHTML = '<p class="muted" style="font-size:12px">No games found in GSM\'s database. Make sure GSM has been used at least once.</p>';
+    return;
+  }
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const rows = r.games.map(g => `
+    <tr>
+      <td style="padding:6px 8px;max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(g.game_name)}">${esc(g.game_name)}</td>
+      <td style="padding:6px 8px;text-align:right;font-size:12px;color:var(--text-muted)">${fmtChars(g.total_chars)}</td>
+      <td style="padding:6px 8px;text-align:right;font-size:12px;color:var(--text-muted)">${fmtHours(g.total_time_s)}</td>
+      <td style="padding:6px 8px;text-align:center">
+        <input type="checkbox" ${g.tracked ? 'checked' : ''}
+               onchange="setGSMGamePref('${esc(g.game_id)}', this.checked, document.getElementById('gsm-ct-${esc(g.game_id)}').checked)">
+      </td>
+      <td style="padding:6px 8px;text-align:center">
+        <input type="checkbox" id="gsm-ct-${esc(g.game_id)}" ${g.count_as_time ? 'checked' : ''}
+               onchange="setGSMGamePref('${esc(g.game_id)}', this.parentElement.previousElementSibling.firstElementChild.checked, this.checked)">
+      </td>
+    </tr>`).join('');
+  list.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="border-bottom:1px solid var(--border);color:var(--text-muted);font-size:11px;text-align:left">
+        <th style="padding:4px 8px;font-weight:500">Game</th>
+        <th style="padding:4px 8px;text-align:right;font-weight:500">Chars</th>
+        <th style="padding:4px 8px;text-align:right;font-weight:500">Time</th>
+        <th style="padding:4px 8px;text-align:center;font-weight:500">Track</th>
+        <th style="padding:4px 8px;text-align:center;font-weight:500">Count as time</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+async function setGSMGamePref(gameId, track, countAsTime) {
+  await window.pywebview.api.gsm_set_game_prefs(gameId, !!track, !!countAsTime);
+  document.getElementById('gsm-apply-btn').disabled = true;
+  document.getElementById('gsm-import-preview').innerHTML = '';
+}
+
+async function doRefreshGSMGames() {
+  await loadGSMGamesList();
+  document.getElementById('gsm-apply-btn').disabled = true;
+  document.getElementById('gsm-import-preview').innerHTML = '';
+}
+
+async function doPreviewGSMImport() {
+  const box = document.getElementById('gsm-import-preview');
+  const fb  = document.getElementById('gsm-import-feedback');
+  fb.className = ''; fb.textContent = '';
+  box.innerHTML = '<p class="muted" style="font-size:12px">Computing preview…</p>';
+  const r = await window.pywebview.api.gsm_preview_import();
+  if (!r.ok || !r.games || r.games.length === 0) {
+    box.innerHTML = '<p class="muted" style="font-size:12px">No tracked games to import. Enable Track for at least one game above.</p>';
+    document.getElementById('gsm-apply-btn').disabled = true;
+    return;
+  }
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const sign = n => (n >= 0 ? '+' : '') + n;
+  const rows = r.games.map(g => {
+    const cDelta = g.chars_after - g.chars_before;
+    const tDelta = (g.time_after_s - g.time_before_s) / 3600;
+    return `<tr>
+      <td style="padding:6px 8px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(g.game_name)}">${esc(g.game_name)}</td>
+      <td style="padding:6px 8px;text-align:right;color:var(--accent)">${g.n_insert}</td>
+      <td style="padding:6px 8px;text-align:right">${g.n_update}</td>
+      <td style="padding:6px 8px;text-align:right;color:var(--text-muted)">${g.n_unchanged}</td>
+      <td style="padding:6px 8px;text-align:right">${sign(cDelta)} chars</td>
+      <td style="padding:6px 8px;text-align:right">${(tDelta >= 0 ? '+' : '') + tDelta.toFixed(2)}h</td>
+    </tr>`;
+  }).join('');
+  box.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;font-size:12px;border:1px solid var(--border);border-radius:4px">
+      <thead><tr style="background:var(--surface-2);color:var(--text-muted);font-size:11px;text-align:left">
+        <th style="padding:6px 8px;font-weight:500">Game</th>
+        <th style="padding:6px 8px;text-align:right;font-weight:500">Insert</th>
+        <th style="padding:6px 8px;text-align:right;font-weight:500">Update</th>
+        <th style="padding:6px 8px;text-align:right;font-weight:500">Same</th>
+        <th style="padding:6px 8px;text-align:right;font-weight:500">Chars Δ</th>
+        <th style="padding:6px 8px;text-align:right;font-weight:500">Time Δ</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <p class="muted" style="font-size:11px;margin-top:6px">Updates preserve each row's existing time-excluded state. Inserts use the per-game "Count as time" setting above.</p>`;
+  document.getElementById('gsm-apply-btn').disabled = false;
+}
+
+async function doApplyGSMImport() {
+  const fb = document.getElementById('gsm-import-feedback');
+  if (!confirm('Apply the import? This will update your tracker rows to match GSM\'s authoritative data.')) return;
+  fb.className = ''; fb.textContent = 'Applying…';
+  const r = await window.pywebview.api.gsm_apply_import();
+  if (!r.ok) {
+    fb.className = 'feedback err'; fb.textContent = '✗ ' + (r.error || 'Import failed');
+    return;
+  }
+  const total = r.games.reduce((s, g) => s + g.inserted + g.updated, 0);
+  fb.className = 'feedback ok';
+  fb.textContent = `✓ Imported — ${total} row${total === 1 ? '' : 's'} touched across ${r.games.length} game${r.games.length === 1 ? '' : 's'}.`;
+  document.getElementById('gsm-apply-btn').disabled = true;
+  document.getElementById('gsm-import-preview').innerHTML = '';
+  await loadGSMGamesList();
 }
 
 // ── Rollover refresh ───────────────────────────────────────────────────────

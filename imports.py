@@ -3,11 +3,13 @@ imports.py  —  External data import integrations
 Handles GSM (GameSentenceMiner) pulls and ッツ Reader zip imports.
 """
 
+import os
 import sqlite3
 import json
 import zipfile
 import io
 import requests
+from pathlib import Path
 from datetime import datetime, date, timedelta
 from db import (DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1,
                 ingest_session_file, in_rollover_window, upsert_gsm_attribution,
@@ -17,17 +19,444 @@ from db import (DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1,
 GSM_API = "http://localhost:7275/api/stats"
 
 
+# ── GSM local DB access (read-only) ───────────────────────────────────────────
+# GSM stores authoritative per-day-per-game time in its SQLite at gsm.db. We
+# read it directly because /api/stats does not expose per-day time. Connection
+# is opened read-only via URI so we never block or corrupt GSM's writer.
+
+def _default_gsm_db_path():
+    appdata = os.environ.get("APPDATA") or os.path.expanduser("~/AppData/Roaming")
+    return str(Path(appdata) / "GameSentenceMiner" / "gsm.db")
+
+
+def get_gsm_db_path():
+    override = get_setting("gsm_db_path", "")
+    return override if override else _default_gsm_db_path()
+
+
+def _open_gsm_db():
+    """Open GSM's SQLite read-only. Returns connection or None if unavailable."""
+    p = get_gsm_db_path()
+    if not Path(p).exists():
+        return None
+    try:
+        uri = f"file:{p}?mode=ro"
+        return sqlite3.connect(uri, uri=True, timeout=2.0)
+    except sqlite3.Error:
+        return None
+
+
+def list_gsm_db_games():
+    """Enumerate games found in GSM's DB with their rollup totals and a flag
+    indicating whether the tracker is currently set to track them.
+
+    Returns a list of dicts: {game_id, game_name, total_chars, total_time_s,
+    first_date, last_date, tracked, count_as_time, in_tracker_rows}.
+    """
+    gsm = _open_gsm_db()
+    if gsm is None:
+        return []
+    try:
+        rows = gsm.execute("""
+            SELECT r.game_id,
+                   COALESCE(NULLIF(g.title_english, ''),
+                            NULLIF(g.title_romaji,  ''),
+                            NULLIF(g.title_original,''),
+                            r.game_id),
+                   SUM(CAST(r.total_characters AS INTEGER)),
+                   SUM(CAST(r.total_reading_time_seconds AS REAL)),
+                   MIN(r.date),
+                   MAX(r.date)
+            FROM game_daily_rollup r
+            LEFT JOIN games g ON g.id = r.game_id
+            GROUP BY r.game_id
+        """).fetchall()
+    finally:
+        gsm.close()
+
+    if not rows:
+        return []
+
+    tracker = sqlite3.connect(DB_PATH)
+    try:
+        prefs = {
+            gid: (track, cat) for gid, track, cat in tracker.execute(
+                "SELECT game_id, track, count_as_time FROM gsm_games"
+            ).fetchall()
+        }
+        row_counts = {
+            gid: n for gid, n in tracker.execute(
+                "SELECT game_id, COUNT(*) FROM sessions "
+                "WHERE source='gsm' AND game_id IS NOT NULL AND game_id != '' "
+                "GROUP BY game_id"
+            ).fetchall()
+        }
+    finally:
+        tracker.close()
+
+    out = []
+    for gid, name, chars, secs, fd, ld in rows:
+        track, count_t = prefs.get(gid, (0, 0))
+        out.append({
+            "game_id":         gid,
+            "game_name":       name or gid,
+            "total_chars":     int(chars or 0),
+            "total_time_s":    float(secs or 0),
+            "first_date":      fd,
+            "last_date":       ld,
+            "tracked":         bool(track),
+            "count_as_time":   bool(count_t),
+            "in_tracker_rows": row_counts.get(gid, 0),
+        })
+    out.sort(key=lambda g: g["total_time_s"], reverse=True)
+    return out
+
+
+def read_gsm_rollup(game_ids=None, dates=None):
+    """Read rows from GSM's game_daily_rollup table.
+
+    game_ids: iterable of game_id strings to filter (None = all tracked games).
+    dates:    iterable of date strings to filter (None = all dates).
+
+    Returns list of dicts: {game_id, date, chars, time_seconds, cards}.
+    """
+    gsm = _open_gsm_db()
+    if gsm is None:
+        return []
+    try:
+        sql = ("SELECT game_id, date, "
+               "CAST(total_characters AS INTEGER), "
+               "CAST(total_reading_time_seconds AS REAL), "
+               "CAST(total_cards_mined AS INTEGER) "
+               "FROM game_daily_rollup")
+        clauses, params = [], []
+        if game_ids:
+            ids = list(game_ids)
+            clauses.append(f"game_id IN ({','.join('?'*len(ids))})")
+            params.extend(ids)
+        if dates:
+            ds = list(dates)
+            clauses.append(f"date IN ({','.join('?'*len(ds))})")
+            params.extend(ds)
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        rows = gsm.execute(sql, params).fetchall()
+    finally:
+        gsm.close()
+    return [
+        {"game_id": gid, "date": d, "chars": int(c or 0),
+         "time_seconds": float(t or 0), "cards": int(cd or 0)}
+        for gid, d, c, t, cd in rows
+    ]
+
+
+# ── GSM history reconciliation (uses gsm.db rollup as source of truth) ───────
+
+def _speed_from(chars, time_seconds):
+    """Reading speed (chars/hour) derived from chars and seconds. Matches the
+    relationship GSM uses: total_chars / total_hours."""
+    if time_seconds <= 0:
+        return 0.0
+    return float(chars) / (float(time_seconds) / 3600.0)
+
+
+# Block destructive overwrites: if GSM's rollup says a row is empty but the
+# tracker has real data there, that's almost certainly a wipe/corruption (or
+# the rare legit case where the user manually deleted lines from GSM). We
+# refuse and log the anomaly so the user can review.
+ZERO_OUT_GUARD_CHARS = 1000
+
+
+def _would_zero_out(rollup_chars, rollup_time, existing_chars):
+    return (rollup_chars == 0 and rollup_time <= 0.5
+            and existing_chars > ZERO_OUT_GUARD_CHARS)
+
+
+def _record_sync_anomaly(con, game_id, game_name, session_date,
+                         existing_chars, existing_time,
+                         rollup_chars, rollup_time):
+    con.execute("""
+        INSERT INTO gsm_sync_anomalies
+          (detected_at, game_id, game_name, session_date,
+           existing_chars, existing_time, rollup_chars, rollup_time)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, (datetime.now().isoformat(), game_id, game_name, session_date,
+          int(existing_chars or 0), float(existing_time or 0),
+          int(rollup_chars or 0), float(rollup_time or 0)))
+
+
+def list_gsm_sync_anomalies():
+    """Return open (unacknowledged) anomalies, newest first."""
+    con = sqlite3.connect(DB_PATH)
+    try:
+        rows = con.execute("""
+            SELECT id, detected_at, game_id, game_name, session_date,
+                   existing_chars, existing_time, rollup_chars, rollup_time
+            FROM gsm_sync_anomalies WHERE acknowledged=0
+            ORDER BY detected_at DESC
+        """).fetchall()
+    finally:
+        con.close()
+    return [
+        {"id": r[0], "detected_at": r[1], "game_id": r[2], "game_name": r[3],
+         "session_date": r[4], "existing_chars": r[5], "existing_time": r[6],
+         "rollup_chars": r[7], "rollup_time": r[8]}
+        for r in rows
+    ]
+
+
+def acknowledge_gsm_sync_anomaly(anomaly_id, apply_change):
+    """Mark an anomaly resolved. If apply_change=True, perform the deferred
+    update that was originally blocked (zeroing the tracker row). Otherwise
+    just dismiss it and leave the tracker row as-is."""
+    con = sqlite3.connect(DB_PATH)
+    try:
+        row = con.execute(
+            "SELECT game_id, session_date, rollup_chars, rollup_time "
+            "FROM gsm_sync_anomalies WHERE id=? AND acknowledged=0",
+            (anomaly_id,)
+        ).fetchone()
+        if not row:
+            return {"ok": False, "error": "not found or already acknowledged"}
+        if apply_change:
+            gid, d, rc, rt = row
+            speed = _speed_from(rc, rt)
+            con.execute("""
+                UPDATE sessions
+                   SET chars_read=?, time_seconds=?, reading_speed=?, ingested_at=?
+                 WHERE source='gsm' AND game_id=? AND session_date=?
+            """, (int(rc or 0), float(rt or 0), speed,
+                  datetime.now().isoformat(), gid, d))
+        con.execute(
+            "UPDATE gsm_sync_anomalies SET acknowledged=1 WHERE id=?",
+            (anomaly_id,)
+        )
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True}
+
+
+def _tracked_games_with_prefs():
+    """Return {game_id: count_as_time_bool} for games marked tracked=1."""
+    con = sqlite3.connect(DB_PATH)
+    try:
+        rows = con.execute(
+            "SELECT game_id, count_as_time FROM gsm_games WHERE track=1"
+        ).fetchall()
+    finally:
+        con.close()
+    return {gid: bool(ct) for gid, ct in rows}
+
+
+def _tracker_gsm_rows_for(game_id):
+    """Existing tracker rows for this game's GSM data, keyed by date."""
+    con = sqlite3.connect(DB_PATH)
+    try:
+        rows = con.execute(
+            "SELECT rowid, session_date, chars_read, time_seconds, cards_mined, "
+            "       reading_speed, time_excluded, title "
+            "FROM sessions WHERE source='gsm' AND game_id=?",
+            (game_id,)
+        ).fetchall()
+    finally:
+        con.close()
+    return {
+        d: {"rowid": r, "chars": c or 0, "time_seconds": t or 0,
+            "cards": cm or 0, "speed": sp or 0,
+            "time_excluded": te or 0, "title": ti}
+        for (r, d, c, t, cm, sp, te, ti) in rows
+    }
+
+
+def _resolve_game_title(game_id, fallback):
+    """Pick a display title: prefer existing tracker GSM rows, then gsm_games
+    metadata, then the fallback from GSM's games table."""
+    con = sqlite3.connect(DB_PATH)
+    try:
+        r = con.execute(
+            "SELECT title FROM sessions WHERE source='gsm' AND game_id=? "
+            "AND title IS NOT NULL AND title != '' LIMIT 1", (game_id,)
+        ).fetchone()
+        if r and r[0]:
+            return r[0]
+        r = con.execute(
+            "SELECT game_name FROM gsm_games WHERE game_id=?", (game_id,)
+        ).fetchone()
+        if r and r[0]:
+            return r[0]
+    finally:
+        con.close()
+    return fallback
+
+
+def import_gsm_history_preview():
+    """Show what a full GSM history import would change. Read-only — no writes.
+
+    For each tracked game: compare every game_daily_rollup row in GSM's DB to
+    the matching tracker row (by game_id + date). Categorize as insert/update/
+    unchanged and report aggregate chars and time deltas.
+
+    Returns: list of per-game dicts, each with:
+      {game_id, game_name, count_as_time, n_insert, n_update, n_unchanged,
+       chars_before, chars_after, time_before_s, time_after_s}
+    """
+    games = list_gsm_db_games()
+    if not games:
+        return []
+
+    tracked = _tracked_games_with_prefs()
+    rows = read_gsm_rollup(game_ids=list(tracked.keys()))
+
+    by_game = {}
+    for r in rows:
+        by_game.setdefault(r["game_id"], []).append(r)
+
+    out = []
+    for g in games:
+        gid = g["game_id"]
+        if gid not in tracked:
+            continue
+        existing = _tracker_gsm_rows_for(gid)
+        rollup = by_game.get(gid, [])
+
+        n_ins = n_upd = n_un = 0
+        chars_before = sum(e["chars"] for e in existing.values())
+        time_before  = sum(e["time_seconds"] for e in existing.values())
+        chars_after = time_after = 0
+        seen_dates = set()
+        for r in rollup:
+            seen_dates.add(r["date"])
+            chars_after += r["chars"]
+            time_after  += r["time_seconds"]
+            e = existing.get(r["date"])
+            if e is None:
+                n_ins += 1
+            elif (e["chars"] != r["chars"]
+                  or abs(e["time_seconds"] - r["time_seconds"]) > 0.5
+                  or e["cards"] != r["cards"]):
+                n_upd += 1
+            else:
+                n_un += 1
+        # Existing tracker rows for dates not in rollup are left alone —
+        # they're still part of the "after" totals.
+        for d, e in existing.items():
+            if d not in seen_dates:
+                chars_after += e["chars"]
+                time_after  += e["time_seconds"]
+
+        out.append({
+            "game_id":       gid,
+            "game_name":     g["game_name"],
+            "count_as_time": tracked[gid],
+            "n_insert":      n_ins,
+            "n_update":      n_upd,
+            "n_unchanged":   n_un,
+            "chars_before":  chars_before,
+            "chars_after":   chars_after,
+            "time_before_s": time_before,
+            "time_after_s":  time_after,
+        })
+    out.sort(key=lambda x: x["time_after_s"], reverse=True)
+    return out
+
+
+def import_gsm_history_apply():
+    """Reconcile tracker.sessions with GSM's game_daily_rollup for every game
+    marked track=1 in gsm_games. UPDATEs preserve time_excluded; INSERTs set it
+    from the per-game count_as_time preference.
+
+    Returns: list of per-game dicts {game_id, game_name, inserted, updated}.
+    """
+    tracked = _tracked_games_with_prefs()
+    if not tracked:
+        return []
+
+    rows = read_gsm_rollup(game_ids=list(tracked.keys()))
+    by_game = {}
+    for r in rows:
+        by_game.setdefault(r["game_id"], []).append(r)
+
+    games = {g["game_id"]: g for g in list_gsm_db_games()}
+    now = datetime.now().isoformat()
+    summary = []
+
+    con = sqlite3.connect(DB_PATH)
+    try:
+        for gid, count_t in tracked.items():
+            existing = _tracker_gsm_rows_for(gid)
+            rollup   = by_game.get(gid, [])
+            title    = _resolve_game_title(gid, games.get(gid, {}).get("game_name", gid))
+            inserted = updated = 0
+
+            for r in rollup:
+                e = existing.get(r["date"])
+                speed = _speed_from(r["chars"], r["time_seconds"])
+                if e is None:
+                    excl = 0 if count_t else 1
+                    con.execute("""
+                        INSERT INTO sessions
+                          (source, title, activity_type, session_date,
+                           chars_read, lines_read, time_seconds, reading_speed,
+                           sentences_read, cards_mined, game_id, raw_file,
+                           ingested_at, time_excluded)
+                        VALUES ('gsm', ?, 'Reading', ?, ?, 0, ?, ?, 0, ?, ?,
+                                NULL, ?, ?)
+                    """, (title, r["date"], r["chars"], r["time_seconds"],
+                          speed, r["cards"], gid, now, excl))
+                    inserted += 1
+                else:
+                    if (e["chars"] == r["chars"]
+                            and abs(e["time_seconds"] - r["time_seconds"]) <= 0.5
+                            and e["cards"] == r["cards"]):
+                        continue
+                    if _would_zero_out(r["chars"], r["time_seconds"], e["chars"]):
+                        _record_sync_anomaly(
+                            con, gid, title, r["date"],
+                            e["chars"], e["time_seconds"],
+                            r["chars"], r["time_seconds"]
+                        )
+                        continue
+                    con.execute("""
+                        UPDATE sessions
+                           SET chars_read=?, time_seconds=?, reading_speed=?,
+                               cards_mined=?, ingested_at=?
+                         WHERE rowid=?
+                    """, (r["chars"], r["time_seconds"], speed, r["cards"],
+                          now, e["rowid"]))
+                    updated += 1
+
+            summary.append({
+                "game_id":   gid,
+                "game_name": title,
+                "inserted":  inserted,
+                "updated":   updated,
+            })
+        con.commit()
+    finally:
+        con.close()
+    return summary
+
+
 # ── GSM ───────────────────────────────────────────────────────────────────────
 def _upsert_gsm_game(cur_stats):
-    """Store or refresh game metadata from currentGameStats."""
+    """Store or refresh game metadata from currentGameStats. Preserves
+    user-set track and count_as_time prefs across refreshes."""
     game_id = cur_stats.get("game_id", "")
     if not game_id:
         return
     con = sqlite3.connect(DB_PATH)
     con.execute("""
-        INSERT OR REPLACE INTO gsm_games
+        INSERT INTO gsm_games
           (game_id, game_name, description, image_data, genres, first_date, last_updated)
         VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(game_id) DO UPDATE SET
+          game_name    = excluded.game_name,
+          description  = excluded.description,
+          image_data   = excluded.image_data,
+          genres       = excluded.genres,
+          first_date   = excluded.first_date,
+          last_updated = excluded.last_updated
     """, (
         game_id,
         cur_stats.get("game_name", "Unknown"),
@@ -83,7 +512,10 @@ def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_hea
     return inserted
 
 
-def pull_gsm_now(url=None):
+def pull_gsm_api_only(url=None):
+    """Original /api/stats-based pull. Computes today's time via chars/speed.
+    Kept as a fallback for when GSM's local SQLite isn't available, and as a
+    safety net we can route back to via the gsm_time_source setting."""
     target = url or GSM_API
     try:
         r = requests.get(target, timeout=5)
@@ -181,6 +613,14 @@ def pull_gsm_now(url=None):
     except Exception as e:
         print(f"[gsm] {e}")
         return None
+
+
+# Day-to-day pulls stay on the original API-based logic: chars/speed-derived
+# time is functionally identical to GSM's rollup measurement to within
+# floating-point noise, and the API's "skip today" backfill gap self-heals
+# the next time a game is opened. The DB-read path is reserved for the
+# explicit history import (one-shot, user-triggered) below.
+pull_gsm_now = pull_gsm_api_only
 
 
 # ── ッツ Reader ────────────────────────────────────────────────────────────────

@@ -550,20 +550,19 @@
           <div class="card">
             <h3><span class="setup-step-num">2</span>Import history from GameSentenceMiner</h3>
             <p class="muted" style="margin-bottom:10px;line-height:1.6">
-              GSM only exposes per-day history for the <em>currently open</em> game. To pull the full history of every game you've tracked, you'll need to:
+              Reads GSM's local database directly to pull authoritative per-day chars and reading time for every game you've played. Per game:
+              <strong>Track</strong> includes the game in the import; <strong>Count as time</strong> sets whether new rows count toward your time stats. Existing rows in your tracker keep whatever state they already have — the import never silently changes that.
             </p>
-            <ol class="muted" style="margin:0 0 14px 18px;line-height:1.7">
-              <li>Open each game in GSM, one at a time.</li>
-              <li>Click <strong>↻ Pull GSM</strong> in the sidebar (or wait for the auto-pull to fire).</li>
-              <li>Repeat for every game whose history you want imported.</li>
-            </ol>
-            <label class="toggle-label setup-toggle">
-              <input type="checkbox" id="gsm-history-include-time" onchange="onSetupTogglePastTime('gsm')">
-              <span>Include time from past sessions</span>
-            </label>
-            <p class="muted setup-toggle-hint">
-              Default: <strong>off</strong> — only character counts are added to your stats. Today's sessions always count time fully, regardless of this setting.
-            </p>
+            <p class="muted" style="font-size:11px;margin-bottom:12px">Reading from: <span id="gsm-db-path" style="font-family:monospace">…</span></p>
+            <div id="gsm-anomalies-banner" style="margin-bottom:12px"></div>
+            <div id="gsm-games-list" style="margin-bottom:12px"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-outline btn-sm" onclick="doRefreshGSMGames()">↻ Refresh games</button>
+              <button class="btn btn-outline btn-sm" onclick="doPreviewGSMImport()">Preview import</button>
+              <button class="btn btn-primary btn-sm" id="gsm-apply-btn" onclick="doApplyGSMImport()" disabled>Apply import</button>
+            </div>
+            <div id="gsm-import-preview" style="margin-top:12px"></div>
+            <div class="feedback" id="gsm-import-feedback" style="margin-top:8px"></div>
             <div class="feedback" id="setup-gsm-feedback"></div>
           </div>
         </div>

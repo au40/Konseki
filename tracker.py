@@ -41,7 +41,10 @@ from db import (
     _get_aliases, _q, _q1,
     insert_manual_session, import_csv_file,
 )
-from imports import pull_gsm_now, import_ttsu_zip_data
+from imports import (pull_gsm_now, import_ttsu_zip_data,
+                     list_gsm_db_games, import_gsm_history_preview,
+                     import_gsm_history_apply, get_gsm_db_path,
+                     list_gsm_sync_anomalies, acknowledge_gsm_sync_anomaly)
 from ext_server import ExtServer
 
 
@@ -504,6 +507,49 @@ class Api:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ── GSM history import (reads GSM's local SQLite) ─────────────────────────
+    def gsm_list_games(self):
+        """Enumerate games found in GSM's local DB along with current tracker
+        prefs. Used by the GSM history import UI."""
+        return {"ok": True, "path": get_gsm_db_path(), "games": list_gsm_db_games()}
+
+    def gsm_set_game_prefs(self, game_id, track, count_as_time):
+        """Update per-game track / count_as_time. Creates a metadata row if
+        the game hasn't been seen by the API yet."""
+        if not game_id:
+            return {"ok": False, "error": "game_id required"}
+        con = sqlite3.connect(DB_PATH)
+        try:
+            con.execute("""
+                INSERT INTO gsm_games (game_id, game_name, last_updated, track, count_as_time)
+                VALUES (?, '', ?, ?, ?)
+                ON CONFLICT(game_id) DO UPDATE SET
+                  track         = excluded.track,
+                  count_as_time = excluded.count_as_time
+            """, (game_id, datetime.now().isoformat(),
+                  1 if track else 0, 1 if count_as_time else 0))
+            con.commit()
+        finally:
+            con.close()
+        return {"ok": True}
+
+    def gsm_preview_import(self):
+        return {"ok": True, "games": import_gsm_history_preview()}
+
+    def gsm_apply_import(self):
+        result = import_gsm_history_apply()
+        self._notify()
+        return {"ok": True, "games": result}
+
+    def gsm_list_anomalies(self):
+        return {"ok": True, "anomalies": list_gsm_sync_anomalies()}
+
+    def gsm_resolve_anomaly(self, anomaly_id, apply_change):
+        r = acknowledge_gsm_sync_anomaly(int(anomaly_id), bool(apply_change))
+        if r.get("ok"):
+            self._notify()
+        return r
 
     # ── Book covers ───────────────────────────────────────────────────────────
     def set_book_cover(self, title, b64_str):

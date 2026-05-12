@@ -103,6 +103,24 @@ def init_db():
         )
     """)
 
+    gsm_game_cols = [r[1] for r in con.execute("PRAGMA table_info(gsm_games)").fetchall()]
+    for col_name, col_def in [
+        ("track",         "INTEGER NOT NULL DEFAULT 0"),
+        ("count_as_time", "INTEGER NOT NULL DEFAULT 0"),
+    ]:
+        if col_name not in gsm_game_cols:
+            con.execute(f"ALTER TABLE gsm_games ADD COLUMN {col_name} {col_def}")
+
+    # Backfill: any game that already has GSM sessions in the tracker should be
+    # marked as tracked, so the new delta path keeps refreshing it on pulls.
+    con.execute("""
+        UPDATE gsm_games SET track=1
+         WHERE track=0 AND game_id IN (
+            SELECT DISTINCT game_id FROM sessions
+             WHERE source='gsm' AND game_id IS NOT NULL AND game_id != ''
+         )
+    """)
+
     # GSM rollover attributions: when a pull happens during the rollover window,
     # we capture (chars, time, cards) for that GSM real_date so they display under
     # the rollover_date instead of source_date. PK ensures one row per (rollover, source) pair.
@@ -123,6 +141,24 @@ def init_db():
             original_title TEXT PRIMARY KEY,
             display_title  TEXT NOT NULL,
             updated_at     TEXT NOT NULL
+        )
+    """)
+
+    # Audit log for GSM reconciliation that refused to overwrite an existing
+    # session row because the rollup value would have zeroed it out. Surfaced
+    # in the UI so the user can decide whether to apply, ignore, or investigate.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS gsm_sync_anomalies (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            detected_at    TEXT NOT NULL,
+            game_id        TEXT NOT NULL,
+            game_name      TEXT,
+            session_date   TEXT NOT NULL,
+            existing_chars INTEGER NOT NULL DEFAULT 0,
+            existing_time  REAL    NOT NULL DEFAULT 0,
+            rollup_chars   INTEGER NOT NULL DEFAULT 0,
+            rollup_time    REAL    NOT NULL DEFAULT 0,
+            acknowledged   INTEGER NOT NULL DEFAULT 0
         )
     """)
 
