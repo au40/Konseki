@@ -11,13 +11,12 @@
   },
   "host_permissions": [
     "https://reader.ttsu.app/*",
-    "https://app.yatsu.moe/*",
     "http://127.0.0.1/*"
   ],
 
   "content_scripts": [
     {
-      "matches": ["https://reader.ttsu.app/*", "https://app.yatsu.moe/*"],
+      "matches": ["https://reader.ttsu.app/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }

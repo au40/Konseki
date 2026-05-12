@@ -8,7 +8,7 @@ import json
 import zipfile
 import io
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from db import (DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1,
                 ingest_session_file, in_rollover_window, upsert_gsm_attribution,
                 get_setting)
@@ -51,8 +51,9 @@ def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_hea
     if not daily_activity:
         return 0
     today_str = str(date.today())
+    today_d   = get_today_date()
+    live_keys = {today_str, get_today(), (today_d - timedelta(days=1)).isoformat()}
     include_time = get_setting("gsm_history_include_time", "0") == "1"
-    excl = 0 if include_time else 1
     existing  = {
         r[0] for r in con.execute(
             "SELECT DISTINCT session_date FROM sessions WHERE title=? AND source='gsm'",
@@ -63,6 +64,7 @@ def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_hea
     for date_str, chars in daily_activity.items():
         if date_str == today_str or date_str in existing or not chars or chars <= 0:
             continue
+        excl  = 0 if (date_str in live_keys or include_time) else 1
         year  = date_str[:4]
         speed = float((speed_heatmap.get(year) or {}).get(date_str, 0))
         con.execute("""
@@ -210,7 +212,8 @@ def import_ttsu_entries(entries):
     imported    = 0
     skipped     = 0
     titles_seen = set()
-    today_str   = str(date.today())
+    today_d     = get_today_date()
+    live_keys   = {get_today(), str(date.today()), (today_d - timedelta(days=1)).isoformat()}
     include_past_time = get_setting("ttsu_history_include_time", "0") == "1"
 
     for entry in entries:
@@ -240,7 +243,7 @@ def import_ttsu_entries(entries):
         speed = float(entry.get('lastReadingSpeed', 0) or 0) or \
                 float(entry.get('maxReadingSpeed',  0) or 0)
 
-        excl = 0 if (date_key == today_str or include_past_time) else 1
+        excl = 0 if (date_key in live_keys or include_past_time) else 1
 
         con      = sqlite3.connect(DB_PATH)
         existing = con.execute(
