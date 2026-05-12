@@ -356,7 +356,6 @@ async function doPullGSM() {
   btn.disabled = false; btn.textContent = '↻ Pull GSM now';
   if (r.ok) {
     const parts = [`${fmtChars(r.chars)} chars`];
-    if (r.cards > 0)  parts.push(`${r.cards} cards`);
     if (r.speed > 0)  parts.push(`${fmtChars(Math.round(r.speed))}/hr`);
     setStatus(`GSM: ${parts.join(' · ')}`);
     if (currentPage === 'dashboard') await loadDashboard();
@@ -1548,13 +1547,12 @@ function renderSeriesDetail(s, memberDetails = []) {
   });
 
   // Aggregate stats from member details
-  let totalSecs = 0, totalChars = 0, totalCards = 0;
+  let totalSecs = 0, totalChars = 0;
   const allDates = new Set();
   const dailyMap = {};
   memberDetails.forEach(d => {
     totalSecs  += d.total_secs  || 0;
     totalChars += d.total_chars || 0;
-    totalCards += d.total_cards || 0;
     (d.daily || []).forEach(row => {
       allDates.add(row.date);
       if (!dailyMap[row.date]) dailyMap[row.date] = { date: row.date, chars: 0, seconds: 0 };
@@ -1581,8 +1579,7 @@ function renderSeriesDetail(s, memberDetails = []) {
 
   // Stat cards
   const statsEl = document.getElementById('series-detail-stats');
-  const hasMining = totalCards > 0;
-  statsEl.style.gridTemplateColumns = hasMining ? 'repeat(5,1fr)' : 'repeat(4,1fr)';
+  statsEl.style.gridTemplateColumns = 'repeat(4,1fr)';
   statsEl.innerHTML = `
     <div class="stat-card">
       <div class="label">Total time</div>
@@ -1600,11 +1597,6 @@ function renderSeriesDetail(s, memberDetails = []) {
       <div class="label">Speed last 7d</div>
       <div class="value" style="color:var(--purple);font-size:22px">${l7display}</div>
     </div>
-    ${hasMining ? `
-    <div class="stat-card">
-      <div class="label">Cards mined</div>
-      <div class="value" style="color:var(--purple);font-size:22px">${totalCards}</div>
-    </div>` : ''}
   `;
 
   renderSeriesCharts(daily);
@@ -1630,7 +1622,7 @@ function renderSeriesCharts(daily) {
     charts['series-chars'] = new Chart(ctx, {
       type: 'bar',
       data: { labels: shownLabels, datasets: [{
-        label: 'Characters', data: charVals, backgroundColor: '#5B8CFF',
+        label: 'Characters', data: charVals, backgroundColor: '#4ECBA0',
         borderRadius: 3, borderSkipped: false,
       }]},
       options: {
@@ -1650,7 +1642,7 @@ function renderSeriesCharts(daily) {
     charts['series-time'] = new Chart(ctx, {
       type: 'bar',
       data: { labels: shownLabels, datasets: [{
-        label: 'Time', data: timeVals.map(s => s / 60), backgroundColor: '#7C5CBF',
+        label: 'Time', data: timeVals.map(s => s / 60), backgroundColor: '#5B8CFF',
         borderRadius: 3, borderSkipped: false,
       }]},
       options: {
@@ -1853,7 +1845,7 @@ function renderMediaDetail(d) {
     ? `${fmtChars(Math.round(computedSpeed))}/h`
     : '—';
 
-  // Stats grid — always show 4 base cards; add cards mined if present
+  // Stats grid
   const last7 = (d.daily || []).slice(-7);
   const l7chars = last7.reduce((s, r) => s + r.chars, 0);
   const l7secs  = last7.reduce((s, r) => s + r.seconds, 0);
@@ -1861,8 +1853,7 @@ function renderMediaDetail(d) {
   const l7display = l7speed > 0 ? `${fmtChars(l7speed)}/h` : '—';
 
   const statsGrid = document.getElementById('detail-stats-grid');
-  const hasMining = isGSM && d.total_cards > 0;
-  statsGrid.style.gridTemplateColumns = hasMining ? 'repeat(5,1fr)' : 'repeat(4,1fr)';
+  statsGrid.style.gridTemplateColumns = 'repeat(4,1fr)';
 
   statsGrid.innerHTML = `
     <div class="stat-card">
@@ -1881,11 +1872,6 @@ function renderMediaDetail(d) {
       <div class="label">Speed last 7d</div>
       <div class="value" style="color:var(--purple);font-size:22px">${l7display}</div>
     </div>
-    ${hasMining ? `
-    <div class="stat-card">
-      <div class="label">Cards mined</div>
-      <div class="value" style="color:var(--purple);font-size:22px">${d.total_cards}</div>
-    </div>` : ''}
   `;
 
   // Chart
@@ -1944,7 +1930,7 @@ function renderDetailChart(daily, isGSM) {
       datasets: [{
         label: 'Characters',
         data: charVals,
-        backgroundColor: '#5B8CFF',
+        backgroundColor: '#4ECBA0',
         borderRadius: 3,
         borderSkipped: false,
       }]
@@ -2039,7 +2025,7 @@ function renderDetailChart(daily, isGSM) {
         datasets: [{
           label: 'Time',
           data: timeVals.map(s => s / 60),
-          backgroundColor: '#7C5CBF',
+          backgroundColor: '#5B8CFF',
           borderRadius: 3,
           borderSkipped: false,
         }]
@@ -2078,16 +2064,12 @@ function renderDetailSessions(daily, isGSM) {
     const speedHTML = s.speed > 0
       ? `<span class="dsr-speed">${fmtChars(Math.round(s.speed))}/h</span>`
       : '';
-    const cardsHTML = (isGSM && s.cards > 0)
-      ? `<span class="dsr-cards">${s.cards} cards</span>`
-      : (isGSM ? `<span class="dsr-cards" style="color:var(--muted)">0 cards</span>` : '');
 
     row.innerHTML = `
       <span class="dsr-date">${s.date}</span>
       <span class="dsr-time">${fmtTime(s.seconds)}</span>
       <span class="dsr-chars">${s.chars > 0 ? fmtChars(s.chars) + ' chars' : ''}</span>
       ${speedHTML}
-      ${cardsHTML}
     `;
     el.appendChild(row);
   });

@@ -86,6 +86,8 @@ if (!window.__immersionOverlayActive) {
     return [h, m, sec].map(v => String(v).padStart(2, "0")).join(":");
   }
 
+  let stopped = false;
+
   async function tick() {
     const cfg = await browser.storage.local.get(
       ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed"]
@@ -104,11 +106,20 @@ if (!window.__immersionOverlayActive) {
     } else {
       // Session ended — clean up
       overlay.remove();
-      clearInterval(interval);
+      stopped = true;
       window.__immersionOverlayActive = false;
     }
   }
 
+  function scheduleTick() {
+    const delay = 1000 - (Date.now() % 1000);
+    setTimeout(async () => {
+      if (stopped) return;
+      await tick();
+      if (!stopped) scheduleTick();
+    }, delay);
+  }
+
   tick();
-  const interval = setInterval(tick, 1000);
+  scheduleTick();
 }
