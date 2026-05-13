@@ -204,12 +204,16 @@ select:focus { border-color: var(--accent); }
 .empty-msg     { color: var(--dim); font-size: 13px; padding: 12px 0; }
 
 /* ── Weekly bars ─────────────────────────────────────────────────────────── */
-.weekly-bars { background: var(--card); border-radius: var(--radius); padding: 12px 16px; }
+.weekly-bars { background: var(--card); border-radius: var(--radius); padding: 12px 16px 18px; }
 .mini-bar { display: flex; align-items: center; gap: 10px; margin: 5px 0; }
 .mini-bar-label { width: 38px; font-size: 10px; color: var(--dim); flex-shrink: 0; }
 .mini-bar-track { flex: 1; height: 12px; background: var(--inset); border-radius: 3px; overflow: hidden; }
 .mini-bar-fill  { height: 100%; background: var(--accent); border-radius: 3px; transition: width 0.4s ease; }
 .mini-bar-time  { width: 42px; font-size: 10px; color: var(--dim); text-align: right; flex-shrink: 0; }
+.weekly-total { display: flex; align-items: center; justify-content: space-between;
+                margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--inset); }
+.weekly-total-label { font-size: 11px; font-weight: 600; color: var(--text); }
+.weekly-total-time  { font-size: 11px; font-weight: 600; color: var(--accent); }
 
 /* ── Charts ──────────────────────────────────────────────────────────────── */
 .chart-wrap {

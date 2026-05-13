@@ -252,7 +252,7 @@ pauseBtn.addEventListener("click", async () => {
 
   // → Resume: behavior depends on the mode the session was started in
   const mode    = cfg.timerMode || "manual";
-  const tabId   = cfg.timerTabId;
+  let   tabId   = cfg.timerTabId;
   const elapsed = cfg.timerElapsed || 0;
 
   async function reinjectOverlay() {
@@ -303,7 +303,16 @@ pauseBtn.addEventListener("click", async () => {
     return;
   }
 
-  // mode === "video": re-probe the page for an actively playing media element
+  // mode === "video": re-probe the page for an actively playing media element.
+  // Re-query the active tab — the user may have moved to a different tab while
+  // paused (e.g. opened a new video), and we want to track *that* one now.
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id) tabId = tab.id;
+  } catch {}
+  if (tabId && tabId !== cfg.timerTabId) {
+    await browser.storage.local.set({ timerTabId: tabId });
+  }
   if (tabId) {
     try { await browser.scripting.executeScript({ target: { tabId }, files: ["media-listener.js"] }); } catch {}
   }

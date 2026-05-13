@@ -162,6 +162,12 @@ async function loadDashboard() {
         <span class="mini-bar-time">${fmtTime(r.seconds)}</span>
       </div>`;
   });
+  const totalSec = d.weekly.reduce((acc, r) => acc + r.seconds, 0);
+  bars.innerHTML += `
+    <div class="weekly-total">
+      <span class="weekly-total-label">Total</span>
+      <span class="weekly-total-time">${fmtTime(totalSec)}</span>
+    </div>`;
 
   await refreshDashHeatmap();
 }
