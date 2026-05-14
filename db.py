@@ -244,6 +244,19 @@ def in_rollover_window():
     return get_today() != str(date.today())
 
 
+def window_bounds(n=None):
+    """Canonical logical-day bounds for date-ranged queries over the sessions table.
+
+    Returns (since, today) as 'YYYY-MM-DD' strings; since is None when n is None
+    (all-time). The upper bound is required because GSM imports write
+    session_date at the real calendar date, which can exceed logical today
+    during the rollover window — any aggregation over a fixed window must clamp
+    or it will leak future-dated rows."""
+    today = get_today_date().isoformat()
+    since = None if n is None else (get_today_date() - timedelta(days=n - 1)).isoformat()
+    return since, today
+
+
 def upsert_gsm_attribution(rollover_date, source_date, chars, time_seconds, cards):
     """Record (or refresh) chars/time/cards from GSM source_date that should display under rollover_date.
     Called only when pulling during the rollover window."""
@@ -261,6 +274,36 @@ def upsert_gsm_attribution(rollover_date, source_date, chars, time_seconds, card
           int(cards), datetime.now().isoformat()))
     con.commit()
     con.close()
+
+
+def refresh_gsm_attribution_tail(rollover_date, source_date, chars, time_seconds, cards):
+    """Tail-settle refresh of an EXISTING attribution row, used when a post-rollover
+    settle pull finds GSM has flushed additional tail time for pre-rollover reading.
+
+    Guard: chars must not exceed what's already stored. If they grew, real new
+    reading has happened post-rollover and the snapshot must not absorb it.
+    Returns True if the row was refreshed, False otherwise."""
+    con = sqlite3.connect(DB_PATH)
+    row = con.execute(
+        "SELECT chars, time_seconds, cards FROM gsm_rollover_attributions "
+        "WHERE rollover_date=? AND source_date=?",
+        (rollover_date, source_date),
+    ).fetchone()
+    if row is None:
+        con.close()
+        return False
+    if int(chars) > row[0]:
+        con.close()
+        return False
+    con.execute(
+        "UPDATE gsm_rollover_attributions SET time_seconds=?, cards=?, updated_at=? "
+        "WHERE rollover_date=? AND source_date=?",
+        (float(time_seconds), int(cards), datetime.now().isoformat(),
+         rollover_date, source_date),
+    )
+    con.commit()
+    con.close()
+    return True
 
 
 def get_gsm_day_adjustment(d):
@@ -689,9 +732,10 @@ def get_extra_stats():
     consistency = 0
     total_tracked_days = 0
     if first:
+        _, today = window_bounds()
         total_tracked_days = (get_today_date() - datetime.strptime(first, "%Y-%m-%d").date()).days + 1
         active_days = (_q1(
-            "SELECT COUNT(DISTINCT session_date) FROM sessions WHERE time_seconds>0"
+            "SELECT COUNT(DISTINCT session_date) FROM sessions WHERE time_seconds>0 AND session_date<=?", today
         ) or (0,))[0] or 0
         consistency = round(active_days / total_tracked_days * 100, 1) if total_tracked_days > 0 else 0
 
@@ -736,7 +780,7 @@ def get_extra_stats():
 
 def get_range_extra_stats(n):
     """Range-filtered subset of extra stats used by the Stats page cards."""
-    since = None if n is None else (get_today_date() - timedelta(days=n - 1)).isoformat()
+    since, today = window_bounds(n)
     base  = "(time_excluded IS NULL OR time_excluded=0)"
 
     if since:
@@ -757,7 +801,7 @@ def get_range_extra_stats(n):
         )
         active_days = (_q1(
             "SELECT COUNT(DISTINCT session_date) FROM sessions "
-            "WHERE time_seconds>0 AND session_date>=?", since
+            "WHERE time_seconds>0 AND session_date>=? AND session_date<=?", since, today
         ) or (0,))[0] or 0
         window = n
     else:
@@ -776,7 +820,7 @@ def get_range_extra_stats(n):
         )
         first = (_q1("SELECT MIN(session_date) FROM sessions") or (None,))[0]
         active_days = (_q1(
-            "SELECT COUNT(DISTINCT session_date) FROM sessions WHERE time_seconds>0"
+            "SELECT COUNT(DISTINCT session_date) FROM sessions WHERE time_seconds>0 AND session_date<=?", today
         ) or (0,))[0] or 0
         window = (get_today_date() - datetime.strptime(first, "%Y-%m-%d").date()).days + 1 if first else 1
 

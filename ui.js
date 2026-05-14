@@ -1521,6 +1521,10 @@ function renderSeriesDetail(s, memberDetails = []) {
   document.getElementById('series-detail-badge').innerHTML =
     `<span class="genre-badge">Series · ${members.length} ${label}</span>`;
 
+  // Build a title→detail map for per-member meta lines
+  const detailByTitle = {};
+  memberDetails.forEach(d => { if (d && d.title) detailByTitle[d.title] = d; });
+
   // Inline member list
   const membersEl = document.getElementById('series-detail-members');
   membersEl.innerHTML = '';
@@ -1530,13 +1534,21 @@ function renderSeriesDetail(s, memberDetails = []) {
     const thumb = m.image
       ? `<img src="${m.image}" alt="${escHtml(m.display_title)}">`
       : (m.display_title || '?')[0].toUpperCase();
+
+    const md = detailByTitle[m.title];
+    const meta = md ? fmtMediaMemberMeta(md) : '';
+    const metaHtml = meta ? `<span class="series-member-meta">${escHtml(meta)}</span>` : '';
+
     row.innerHTML = `
       <div class="series-member-mini-thumb">${thumb}</div>
-      <span class="series-member-mini-title">${escHtml(m.display_title || m.title)}</span>
+      <div class="series-member-main">
+        <span class="series-member-mini-title">${escHtml(m.display_title || m.title)}</span>
+        ${metaHtml}
+      </div>
       <button class="btn btn-xs btn-danger series-remove-btn" title="Remove from series">✕</button>`;
     const openDetail = e => { e.stopPropagation(); openMediaDetail(m.title); };
     row.querySelector('.series-member-mini-thumb').addEventListener('click', openDetail);
-    row.querySelector('.series-member-mini-title').addEventListener('click', openDetail);
+    row.querySelector('.series-member-main').addEventListener('click', openDetail);
     row.querySelector('.series-remove-btn').addEventListener('click', async e => {
       e.stopPropagation();
       const r = await window.pywebview.api.remove_from_series(s.id, m.title);
@@ -2500,11 +2512,27 @@ async function init() {
 
 // ── Milestones ─────────────────────────────────────────────────────────────
 function fmtMilestoneTotals(m) {
-  // Compact "1h 30m · 1,200 chars" style summary for the row meta line.
+  // Compact "1h 30m · 1,200 chars · 800/h" summary for the row meta line.
   const parts = [];
   if (m.total_secs > 0) parts.push(fmtTime(m.total_secs));
   if (m.total_chars > 0) parts.push(`${fmtChars(m.total_chars)} chars`);
+  if (m.total_secs > 60 && m.total_chars > 0) {
+    const speed = Math.round(m.total_chars / (m.total_secs / 3600));
+    if (speed > 0) parts.push(`${fmtChars(speed)}/h`);
+  }
   return parts.join(' · ') || '—';
+}
+
+function fmtMediaMemberMeta(d) {
+  // Same time · chars · speed line used for series-member rows.
+  const parts = [];
+  if (d.total_secs > 0) parts.push(fmtTime(d.total_secs));
+  if (d.total_chars > 0) parts.push(`${fmtChars(d.total_chars)} chars`);
+  if (d.total_secs > 60 && d.total_chars > 0) {
+    const speed = Math.round(d.total_chars / (d.total_secs / 3600));
+    if (speed > 0) parts.push(`${fmtChars(speed)}/h`);
+  }
+  return parts.join(' · ');
 }
 
 function renderMilestonesList(el, milestones) {

@@ -13,7 +13,7 @@ import webview
 import sqlite3
 import json
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -97,21 +97,39 @@ class SessionHandler(FileSystemEventHandler):
 
 
 class GsmWalHandler(FileSystemEventHandler):
-    """Watches GSM's WAL file; triggers a GSM pull after writes settle."""
+    """Watches GSM's WAL file; triggers a GSM pull after writes settle.
+
+    After the debounced pull fires, arms a second 'settle' pull at +settle_secs
+    to catch GSM's tail-time/AFK accumulator updates that flush to disk after
+    the last char-arrival WAL write. New WAL activity cancels the settle."""
 
     _WATCHED = {"gsm.db-wal", "gsm.db"}
 
-    def __init__(self, cb, debounce_secs=60):
+    def __init__(self, cb, debounce_secs=60, settle_secs=180):
         self._cb = cb
         self._debounce_secs = debounce_secs
+        self._settle_secs = settle_secs
         self._timer = None
+        self._settle_timer = None
         self._lock = threading.Lock()
+
+    def _fire(self):
+        self._cb()
+        with self._lock:
+            if self._settle_timer:
+                self._settle_timer.cancel()
+            t = threading.Timer(self._settle_secs, self._cb)
+            t.daemon = True
+            t.start()
+            self._settle_timer = t
 
     def _schedule(self):
         with self._lock:
             if self._timer:
                 self._timer.cancel()
-            t = threading.Timer(self._debounce_secs, self._cb)
+            if self._settle_timer:
+                self._settle_timer.cancel()
+            t = threading.Timer(self._debounce_secs, self._fire)
             t.daemon = True
             t.start()
             self._timer = t
@@ -597,6 +615,7 @@ class Api:
             "ext_port":         _get_port(),
             "ext_token":        _get_or_create_token(),
             "gsm_debounce_secs": int(get_setting("gsm_debounce_secs", "60")),
+            "gsm_settle_secs":  int(get_setting("gsm_settle_secs", "180")),
             "first_run_complete":         get_setting("first_run_complete", "0") == "1",
             "gsm_history_include_time":   get_setting("gsm_history_include_time", "0") == "1",
             "ttsu_history_include_time":  get_setting("ttsu_history_include_time", "0") == "1",
@@ -621,6 +640,8 @@ class Api:
             imports.GSM_API = data["gsm_url"]
         if "gsm_debounce_secs" in data and gsm_wal_handler is not None:
             gsm_wal_handler._debounce_secs = int(data["gsm_debounce_secs"])
+        if "gsm_settle_secs" in data and gsm_wal_handler is not None:
+            gsm_wal_handler._settle_secs = int(data["gsm_settle_secs"])
         return {"ok": True}
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -688,11 +709,46 @@ def main():
                       f"| {result.get('title', '')}")
                 api._notify()
         debounce = int(get_setting("gsm_debounce_secs", "60"))
-        gsm_wal_handler = GsmWalHandler(_on_gsm_change, debounce_secs=debounce)
+        settle   = int(get_setting("gsm_settle_secs", "180"))
+        gsm_wal_handler = GsmWalHandler(_on_gsm_change, debounce_secs=debounce,
+                                        settle_secs=settle)
         gsm_observer = Observer()
         gsm_observer.schedule(gsm_wal_handler, gsm_dir, recursive=False)
         gsm_observer.start()
-        print(f"[gsm-watch] Watching {gsm_dir} (debounce={debounce}s)")
+        print(f"[gsm-watch] Watching {gsm_dir} (debounce={debounce}s, settle={settle}s)")
+
+        # Daily forced pull just before rollover_hour. Catches the continuous-
+        # across-rollover case where the WAL debounce never settles inside the
+        # rollover window, so no snapshot would otherwise be written for last
+        # night's tail of reading. Re-arms itself for the next day.
+        _rollover_timer = {"t": None}
+        def _schedule_rollover_pull():
+            rh = int(get_setting("rollover_hour", "0"))
+            if rh <= 0:
+                return  # no rollover window configured
+            now = datetime.now()
+            target = now.replace(hour=rh, minute=0, second=0, microsecond=0) \
+                        - timedelta(minutes=1)
+            if target <= now:
+                target += timedelta(days=1)
+            delay = (target - now).total_seconds()
+            t = threading.Timer(delay, _do_rollover_pull)
+            t.daemon = True
+            t.start()
+            _rollover_timer["t"] = t
+
+        def _do_rollover_pull():
+            try:
+                result = pull_gsm_now()
+                if result:
+                    print(f"[gsm-rollover] Forced pull at rollover boundary: "
+                          f"{result.get('chars_read', 0)} chars")
+                    api._notify()
+            except Exception as e:
+                print(f"[gsm-rollover] {e}")
+            _schedule_rollover_pull()
+
+        _schedule_rollover_pull()
     else:
         print(f"[gsm-watch] {gsm_dir} not found — watcher disabled")
 

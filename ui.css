@@ -428,9 +428,16 @@ select:focus { border-color: var(--accent); }
   flex: 1; font-size: 12px; font-weight: 600; color: var(--text);
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
+.series-member-main {
+  flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;
+}
+.series-member-main .series-member-mini-title { flex: 0 0 auto; }
+.series-member-meta {
+  font-size: 10px; color: var(--dim);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
 .series-member-row .series-remove-btn {
-  position: static; display: flex; opacity: 0; transition: opacity 0.12s;
-  width: 18px; height: 18px; border-radius: 50%; font-size: 9px; flex-shrink: 0;
+  opacity: 0; transition: opacity 0.12s; flex-shrink: 0;
 }
 .series-member-row:hover .series-remove-btn { opacity: 1; }
 
@@ -443,8 +450,8 @@ select:focus { border-color: var(--accent); }
 .milestones-list::-webkit-scrollbar-track { background: transparent; }
 .milestones-list::-webkit-scrollbar-thumb { background: var(--grid); border-radius: 2px; }
 .milestone-row {
-  display: flex; align-items: center; gap: 10px;
-  padding: 6px 10px; border-radius: 6px; cursor: pointer;
+  display: flex; align-items: center; gap: 8px;
+  padding: 4px 6px; border-radius: 6px; cursor: pointer;
   transition: background 0.12s, transform 0.1s, opacity 0.12s;
   border: 1px solid transparent; background: var(--card-bg, transparent);
 }
@@ -453,9 +460,9 @@ select:focus { border-color: var(--accent); }
 .milestone-row.drag-over { border-color: var(--accent); }
 .milestone-index {
   display: inline-flex; align-items: center; justify-content: center;
-  min-width: 22px; height: 22px; border-radius: 50%;
+  min-width: 20px; height: 20px; border-radius: 50%;
   background: var(--accent); color: #fff;
-  font-size: 11px; font-weight: 700; flex-shrink: 0;
+  font-size: 10px; font-weight: 700; flex-shrink: 0;
 }
 .milestone-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .milestone-name {
@@ -510,7 +517,7 @@ select:focus { border-color: var(--accent); }
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   color: var(--text);
 }
-.series-remove-btn {
+.series-member-card .series-remove-btn {
   position: absolute; top: 4px; right: 4px; z-index: 5;
   background: rgba(0,0,0,0.6); color: #fff; border: none;
   border-radius: 50%; width: 20px; height: 20px; font-size: 11px;

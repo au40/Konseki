@@ -13,7 +13,7 @@ from pathlib import Path
 from datetime import datetime, date, timedelta
 from db import (DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1,
                 ingest_session_file, in_rollover_window, upsert_gsm_attribution,
-                get_setting)
+                refresh_gsm_attribution_tail, get_setting)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 GSM_API = "http://localhost:7275/api/stats"
@@ -643,11 +643,21 @@ def pull_gsm_api_only(url=None):
         ingest_session_file(str(out))
 
         # If we're in the rollover window, snapshot today's GSM totals for attribution to
-        # yesterday's bucket. Once the rollover hour passes, future pulls won't touch this
-        # row, so the early-morning chars stay attributed to yesterday permanently.
+        # yesterday's bucket. Once the rollover hour passes, future pulls fall through to
+        # a guarded tail-settle refresh that can only grow time (not chars) on an existing
+        # snapshot — this catches GSM's AFK/tail accumulator updates that flush after the
+        # last char arrived, without ever absorbing genuinely new post-rollover reading.
         if in_rollover_window():
             upsert_gsm_attribution(
                 rollover_date=get_today(),
+                source_date=real_date,
+                chars=int(today_chars),
+                time_seconds=float(time_seconds),
+                cards=int(today_cards),
+            )
+        else:
+            refresh_gsm_attribution_tail(
+                rollover_date=(get_today_date() - timedelta(days=1)).isoformat(),
                 source_date=real_date,
                 chars=int(today_chars),
                 time_seconds=float(time_seconds),
