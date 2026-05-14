@@ -14,6 +14,10 @@ let heatmapYear     = new Date().getFullYear();
 let dashHeatmapYear = new Date().getFullYear();
 let appSettings   = { rollover_hour: 0, gsm_url: 'http://localhost:7275/api/stats', theme: 'dark' };
 let currentDetailTitle = null;
+let currentMilestoneId  = null;        // when a milestone detail view is open
+let currentMilestones   = [];          // milestones for the current media detail
+let _milestoneEditingId = null;        // null = adding, number = editing
+let _milestoneDragId    = null;        // dragged milestone id for reorder
 
 const BUILTIN_TYPES = ['Listening','Reading','Speaking','Vocabulary','Other'];
 const ACOLORS = {
@@ -1776,7 +1780,10 @@ async function openMediaDetail(title) {
 function closeMediaDetail() {
   destroyChart('detail');
   destroyChart('detail-time');
+  destroyChart('detail-speed');
+  destroyChart('detail-speed-rolling');
   currentDetailTitle = null;
+  currentMilestones  = [];
   document.getElementById('media-detail-view').style.display  = 'none';
   // If we came from a series view, go back to it; otherwise go to grid
   if (currentSeriesId !== null) {
@@ -1832,13 +1839,21 @@ function renderMediaDetail(d) {
     genresEl.innerHTML = `<span class="genre-badge" style="color:${color};border-color:${color}44">${d.activity_type}</span>`;
   }
 
-  // Description
-  const descEl = document.getElementById('detail-desc');
-  if (d.description) {
-    descEl.textContent = d.description;
-    descEl.style.display = 'block';
+  // Milestones replace the description when present; otherwise description shows.
+  currentMilestones = d.milestones || [];
+  const descEl     = document.getElementById('detail-desc');
+  const milesEl    = document.getElementById('detail-milestones');
+  if (currentMilestones.length > 0) {
+    descEl.style.display  = 'none';
+    milesEl.style.display = 'flex';
+    renderMilestonesList(milesEl, currentMilestones);
+  } else if (d.description) {
+    descEl.textContent    = d.description;
+    descEl.style.display  = 'block';
+    milesEl.style.display = 'none';
   } else {
-    descEl.style.display = 'none';
+    descEl.style.display  = 'none';
+    milesEl.style.display = 'none';
   }
 
   // Compute derived speed if avg_speed is 0 but we have chars+time
@@ -2481,6 +2496,404 @@ async function init() {
   loadPage('dashboard');
   scheduleRolloverRefresh();
   maybeShowFirstRunModal();
+}
+
+// ── Milestones ─────────────────────────────────────────────────────────────
+function fmtMilestoneTotals(m) {
+  // Compact "1h 30m · 1,200 chars" style summary for the row meta line.
+  const parts = [];
+  if (m.total_secs > 0) parts.push(fmtTime(m.total_secs));
+  if (m.total_chars > 0) parts.push(`${fmtChars(m.total_chars)} chars`);
+  return parts.join(' · ') || '—';
+}
+
+function renderMilestonesList(el, milestones) {
+  el.innerHTML = '';
+  milestones.forEach((m, idx) => {
+    const row = document.createElement('div');
+    row.className = 'milestone-row';
+    row.draggable = true;
+    row.dataset.milestoneId = m.id;
+
+    row.innerHTML = `
+      <span class="milestone-drag-handle" title="Drag to reorder">⋮⋮</span>
+      <span class="milestone-index">${idx + 1}</span>
+      <div class="milestone-main">
+        <span class="milestone-name">${escHtml(m.name)}</span>
+        <span class="milestone-meta">${escHtml(fmtMilestoneTotals(m))}</span>
+      </div>
+      <button class="btn btn-xs btn-danger" title="Delete milestone">✕</button>
+    `;
+
+    row.addEventListener('click', e => {
+      if (e.target.closest('.btn-danger')) return;
+      if (e.target.closest('.milestone-drag-handle')) return;
+      openMilestoneDetail(m.id);
+    });
+    row.querySelector('.btn-danger').addEventListener('click', async e => {
+      e.stopPropagation();
+      const ok = await showConfirm(`Delete milestone "${m.name}"?`);
+      if (!ok) return;
+      const r = await window.pywebview.api.delete_milestone(m.id);
+      if (r.ok) await refreshCurrentMediaDetail();
+    });
+
+    // Drag-reorder
+    row.addEventListener('dragstart', e => {
+      _milestoneDragId = m.id;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    row.addEventListener('dragend', () => {
+      _milestoneDragId = null;
+      row.classList.remove('dragging');
+      document.querySelectorAll('.milestone-row.drag-over')
+              .forEach(r => r.classList.remove('drag-over'));
+    });
+    row.addEventListener('dragover', e => {
+      if (_milestoneDragId == null || _milestoneDragId === m.id) return;
+      e.preventDefault();
+      row.classList.add('drag-over');
+    });
+    row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+    row.addEventListener('drop', async e => {
+      e.preventDefault();
+      row.classList.remove('drag-over');
+      if (_milestoneDragId == null || _milestoneDragId === m.id) return;
+      const ids = currentMilestones.map(x => x.id).filter(id => id !== _milestoneDragId);
+      const idx = ids.indexOf(m.id);
+      ids.splice(idx, 0, _milestoneDragId);
+      const r = await window.pywebview.api.reorder_milestones(currentDetailTitle, ids);
+      if (r.ok) await refreshCurrentMediaDetail();
+      else alert(r.error || 'Reorder failed');
+    });
+
+    el.appendChild(row);
+  });
+}
+
+async function refreshCurrentMediaDetail() {
+  if (!currentDetailTitle) return;
+  const detail = await window.pywebview.api.get_title_detail(currentDetailTitle);
+  if (detail) renderMediaDetail(detail);
+}
+
+// ── Milestone add/edit modal ───────────────────────────────────────────────
+function openAddMilestoneModal() {
+  if (!currentDetailTitle) return;
+  _milestoneEditingId = null;
+  document.getElementById('milestone-modal-title').textContent = 'Add milestone';
+  document.getElementById('milestone-input-name').value  = '';
+  document.getElementById('milestone-input-unit').value  = 'hours';
+  document.getElementById('milestone-input-start').value = '';
+  document.getElementById('milestone-input-end').value   = '';
+  document.getElementById('milestone-error').style.display = 'none';
+  updateMilestoneHintsForUnit();
+  document.getElementById('milestone-overlay').style.display = 'flex';
+  setTimeout(() => document.getElementById('milestone-input-name').focus(), 30);
+}
+
+function openEditMilestoneModal() {
+  if (currentMilestoneId == null) return;
+  const m = currentMilestones.find(x => x.id === currentMilestoneId);
+  if (!m) return;
+  _milestoneEditingId = m.id;
+  document.getElementById('milestone-modal-title').textContent = 'Edit milestone';
+  document.getElementById('milestone-input-name').value  = m.name;
+  document.getElementById('milestone-input-unit').value  = m.unit;
+  document.getElementById('milestone-input-start').value = m.start_val == null ? '' : m.start_val;
+  document.getElementById('milestone-input-end').value   = m.end_val   == null ? '' : m.end_val;
+  document.getElementById('milestone-error').style.display = 'none';
+  updateMilestoneHintsForUnit();
+  document.getElementById('milestone-overlay').style.display = 'flex';
+}
+
+function updateMilestoneHintsForUnit() {
+  const unit = document.getElementById('milestone-input-unit').value;
+  const label = unit === 'hours' ? 'hours (e.g. 22.7)' : 'characters (e.g. 50000)';
+  document.getElementById('milestone-input-start').placeholder = 'empty';
+  document.getElementById('milestone-input-end').placeholder   = 'empty';
+  document.getElementById('milestone-start-hint').textContent  = `(empty = from previous milestone) — ${label}`;
+  document.getElementById('milestone-end-hint').textContent    = `(empty = ongoing) — ${label}`;
+}
+
+function closeMilestoneModal() {
+  document.getElementById('milestone-overlay').style.display = 'none';
+}
+
+async function saveMilestoneModal() {
+  const name      = document.getElementById('milestone-input-name').value.trim();
+  const unit      = document.getElementById('milestone-input-unit').value;
+  const startStr  = document.getElementById('milestone-input-start').value.trim();
+  const endStr    = document.getElementById('milestone-input-end').value.trim();
+  const startVal  = startStr === '' ? null : parseFloat(startStr);
+  const endVal    = endStr   === '' ? null : parseFloat(endStr);
+  const errEl     = document.getElementById('milestone-error');
+  errEl.style.display = 'none';
+
+  if (!name) { errEl.textContent = 'Name required.'; errEl.style.display = 'block'; return; }
+  if (startStr !== '' && !Number.isFinite(startVal)) { errEl.textContent = 'Start must be a number or empty.'; errEl.style.display = 'block'; return; }
+  if (endStr   !== '' && !Number.isFinite(endVal))   { errEl.textContent = 'End must be a number or empty.';   errEl.style.display = 'block'; return; }
+
+  const r = _milestoneEditingId == null
+    ? await window.pywebview.api.add_milestone(currentDetailTitle, name, unit, startVal, endVal)
+    : await window.pywebview.api.update_milestone(_milestoneEditingId, name, unit, startVal, endVal);
+  if (!r.ok) {
+    errEl.textContent = r.error || 'Failed to save milestone.';
+    errEl.style.display = 'block';
+    return;
+  }
+  closeMilestoneModal();
+  await refreshCurrentMediaDetail();
+  // If we were editing from inside a milestone view, refresh that too
+  if (currentMilestoneId != null && _milestoneEditingId === currentMilestoneId) {
+    openMilestoneDetail(currentMilestoneId);
+  }
+}
+
+// Listen for unit changes in the modal (set up once)
+document.addEventListener('DOMContentLoaded', () => {
+  const unitSel = document.getElementById('milestone-input-unit');
+  if (unitSel) unitSel.addEventListener('change', updateMilestoneHintsForUnit);
+});
+
+// ── Milestone detail view ──────────────────────────────────────────────────
+async function openMilestoneDetail(milestoneId) {
+  const detail = await window.pywebview.api.get_milestone_detail(milestoneId);
+  if (!detail) return;
+  currentMilestoneId = milestoneId;
+
+  document.getElementById('media-grid-view').style.display      = 'none';
+  document.getElementById('media-series-view').style.display    = 'none';
+  document.getElementById('media-detail-view').style.display    = 'none';
+  document.getElementById('media-milestone-view').style.display = 'block';
+  renderMilestoneDetail(detail);
+}
+
+function closeMilestoneDetail() {
+  destroyChart('milestone-time');
+  destroyChart('milestone-chars');
+  destroyChart('milestone-speed');
+  destroyChart('milestone-speed-rolling');
+  currentMilestoneId = null;
+  document.getElementById('media-milestone-view').style.display = 'none';
+  // Return to parent media detail
+  if (currentDetailTitle) {
+    document.getElementById('media-detail-view').style.display = 'block';
+  } else {
+    document.getElementById('media-grid-view').style.display = 'block';
+  }
+}
+
+function renderMilestoneDetail(d) {
+  const color = acolor(d.activity_type);
+
+  document.getElementById('milestone-breadcrumb').textContent =
+    `Media  ›  ${d.parent_title}  ›  ${d.name}`;
+
+  // Cover (parent's cover)
+  const coverEl = document.getElementById('milestone-cover');
+  coverEl.innerHTML = '';
+  if (d.parent_image) {
+    const img = document.createElement('img');
+    img.src = d.parent_image;
+    img.alt = d.name;
+    coverEl.appendChild(img);
+    coverEl.style.background = 'transparent';
+    coverEl.style.border = 'none';
+  } else {
+    coverEl.textContent = mediaIcon(d.source, d.activity_type);
+    coverEl.style.background = `${color}22`;
+    coverEl.style.border = `1px solid ${color}33`;
+  }
+
+  document.getElementById('milestone-title').textContent = d.name;
+
+  // Badge shows the milestone's unit (totals are visible in the stat cards)
+  const unitLabel = d.unit === 'hours' ? 'Hours' : 'Characters';
+  document.getElementById('milestone-badge').innerHTML =
+    `<span class="genre-badge" style="color:${color};border-color:${color}44">${unitLabel}</span>`;
+
+  // Show "End milestone" button only for ongoing milestones
+  document.getElementById('milestone-end-btn').style.display =
+    (d.end_val == null) ? 'inline-flex' : 'none';
+
+  // Stats
+  const computedSpeed = d.avg_speed > 0
+    ? d.avg_speed
+    : (d.total_secs > 60 && d.total_chars > 0 ? d.total_chars / (d.total_secs / 3600) : 0);
+  const speedDisplay = computedSpeed > 0 ? `${fmtChars(Math.round(computedSpeed))}/h` : '—';
+
+  const last7 = (d.daily || []).slice(-7);
+  const l7c = last7.reduce((s, r) => s + r.chars, 0);
+  const l7s = last7.reduce((s, r) => s + r.seconds, 0);
+  const l7speed = l7s > 0 && l7c > 0 ? Math.round(l7c / (l7s / 3600)) : 0;
+  const l7display = l7speed > 0 ? `${fmtChars(l7speed)}/h` : '—';
+
+  const grid = document.getElementById('milestone-stats-grid');
+  grid.style.gridTemplateColumns = 'repeat(4,1fr)';
+  grid.innerHTML = `
+    <div class="stat-card">
+      <div class="label">Total time</div>
+      <div class="value" style="color:var(--accent);font-size:22px">${fmtTime(d.total_secs)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Characters</div>
+      <div class="value" style="color:var(--success);font-size:22px">${d.total_chars > 0 ? fmtChars(d.total_chars) : '—'}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Avg read speed</div>
+      <div class="value" style="color:var(--warn);font-size:22px">${speedDisplay}</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Speed last 7d</div>
+      <div class="value" style="color:var(--purple);font-size:22px">${l7display}</div>
+    </div>
+  `;
+
+  renderMilestoneCharts(d.daily || []);
+  document.getElementById('milestone-session-count').textContent = `(${d.session_count})`;
+  renderMilestoneSessions(d.daily || []);
+}
+
+function renderMilestoneCharts(daily) {
+  destroyChart('milestone-time');
+  destroyChart('milestone-chars');
+  destroyChart('milestone-speed');
+  destroyChart('milestone-speed-rolling');
+  if (!daily.length) return;
+
+  const labels    = daily.map(r => r.date.slice(5));
+  const charVals  = daily.map(r => r.chars);
+  const timeVals  = daily.map(r => r.seconds);
+  const speedVals = daily.map(r => r.seconds > 0 && r.chars > 0 ? r.chars / (r.seconds / 3600) : 0);
+  const twSpeedVals = twRolling(charVals, timeVals, 7);
+  const step = Math.max(1, Math.floor(labels.length / 14));
+  const shown = labels.map((l, i) => i % step === 0 ? l : '');
+
+  if (timeVals.some(v => v > 0)) {
+    const ctx = document.getElementById('chart-milestone-time').getContext('2d');
+    charts['milestone-time'] = new Chart(ctx, {
+      type: 'bar',
+      data: { labels: shown, datasets: [{
+        label: 'Time', data: timeVals.map(s => s / 60),
+        backgroundColor: '#5B8CFF', borderRadius: 3, borderSkipped: false,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtTime(c.raw * 60) } } },
+        scales: {
+          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v*60)}, afterFit: s => { s.width = 62; } },
+        }
+      }
+    });
+  }
+
+  if (charVals.some(v => v > 0)) {
+    const ctx = document.getElementById('chart-milestone-chars').getContext('2d');
+    charts['milestone-chars'] = new Chart(ctx, {
+      type: 'bar',
+      data: { labels: shown, datasets: [{
+        label: 'Characters', data: charVals,
+        backgroundColor: '#4ECBA0', borderRadius: 3, borderSkipped: false,
+      }]},
+      options: {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        plugins: { legend: { display: false },
+          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => `${fmtChars(c.raw)} chars` } } },
+        scales: {
+          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
+        }
+      }
+    });
+  }
+
+  const speedSection = document.getElementById('milestone-speed-section');
+  if (speedVals.some(v => v > 0)) {
+    speedSection.style.display = 'block';
+    const opts = {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { display: false },
+        tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : '' } } },
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false, afterFit: s => { s.width = 62; } },
+      },
+    };
+    const cfg = (label, data, spanGaps) => ({
+      type: 'line',
+      data: { labels: shown, datasets: [{
+        label, data, borderColor: '#4ECBA0',
+        backgroundColor: 'rgba(78,203,160,0.08)', borderWidth: 2,
+        pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#4ECBA0',
+        pointBorderColor: '#24243A', pointBorderWidth: 2,
+        fill: true, tension: 0.35, spanGaps,
+      }]},
+      options: opts,
+    });
+    charts['milestone-speed'] = new Chart(
+      document.getElementById('chart-milestone-speed').getContext('2d'),
+      cfg('Read speed', speedVals.map(v => v > 0 ? v : null), false)
+    );
+    charts['milestone-speed-rolling'] = new Chart(
+      document.getElementById('chart-milestone-speed-rolling').getContext('2d'),
+      cfg('Read speed (7d rolling)', twSpeedVals, true)
+    );
+  } else {
+    speedSection.style.display = 'none';
+  }
+}
+
+function renderMilestoneSessions(daily) {
+  const el = document.getElementById('milestone-session-list');
+  el.innerHTML = '';
+  if (!daily.length) {
+    el.innerHTML = '<p class="empty-msg">No session data in this milestone yet.</p>';
+    return;
+  }
+  [...daily].reverse().forEach(s => {
+    const row = document.createElement('div');
+    row.className = 'detail-session-row';
+    const speedHTML = s.speed > 0
+      ? `<span class="dsr-speed">${fmtChars(Math.round(s.speed))}/h</span>`
+      : '';
+    row.innerHTML = `
+      <span class="dsr-date">${s.date}</span>
+      <span class="dsr-time">${fmtTime(s.seconds)}</span>
+      <span class="dsr-chars">${s.chars > 0 ? fmtChars(s.chars) + ' chars' : ''}</span>
+      ${speedHTML}
+    `;
+    el.appendChild(row);
+  });
+}
+
+async function endCurrentMilestone() {
+  if (currentMilestoneId == null) return;
+  const m = currentMilestones.find(x => x.id === currentMilestoneId);
+  const label = m ? m.name : 'this milestone';
+  const ok = await showConfirm(`End milestone "${label}" at the current point?`, 'End', '#5B8CFF');
+  if (!ok) return;
+  const r = await window.pywebview.api.end_milestone(currentMilestoneId);
+  if (!r.ok) { alert(r.error || 'Failed to end milestone'); return; }
+  // Refresh parent list so currentMilestones reflects the new end_val, then re-open detail
+  await refreshCurrentMediaDetail();
+  openMilestoneDetail(currentMilestoneId);
+}
+
+async function deleteCurrentMilestone() {
+  if (currentMilestoneId == null) return;
+  const m = currentMilestones.find(x => x.id === currentMilestoneId);
+  const label = m ? m.name : 'this milestone';
+  const ok = await showConfirm(`Delete milestone "${label}"?`);
+  if (!ok) return;
+  const r = await window.pywebview.api.delete_milestone(currentMilestoneId);
+  if (r.ok) {
+    closeMilestoneDetail();
+    await refreshCurrentMediaDetail();
+  }
 }
 
 if (window.pywebview) {

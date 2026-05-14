@@ -433,6 +433,67 @@ select:focus { border-color: var(--accent); }
   width: 18px; height: 18px; border-radius: 50%; font-size: 9px; flex-shrink: 0;
 }
 .series-member-row:hover .series-remove-btn { opacity: 1; }
+
+/* Milestones list (inside media detail hero) */
+.milestones-list {
+  margin-top: 10px; max-height: 180px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px; padding-right: 4px;
+}
+.milestones-list::-webkit-scrollbar { width: 4px; }
+.milestones-list::-webkit-scrollbar-track { background: transparent; }
+.milestones-list::-webkit-scrollbar-thumb { background: var(--grid); border-radius: 2px; }
+.milestone-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; border-radius: 6px; cursor: pointer;
+  transition: background 0.12s, transform 0.1s, opacity 0.12s;
+  border: 1px solid transparent; background: var(--card-bg, transparent);
+}
+.milestone-row:hover { background: var(--hover); border-color: var(--grid); }
+.milestone-row.dragging { opacity: 0.4; }
+.milestone-row.drag-over { border-color: var(--accent); }
+.milestone-index {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 22px; height: 22px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  font-size: 11px; font-weight: 700; flex-shrink: 0;
+}
+.milestone-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.milestone-name {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+}
+.milestone-meta { font-size: 10px; color: var(--dim); }
+.milestone-row .btn-danger {
+  opacity: 0; transition: opacity 0.12s; flex-shrink: 0;
+}
+.milestone-row:hover .btn-danger { opacity: 1; }
+.milestone-drag-handle {
+  display: flex; align-items: center; justify-content: center;
+  width: 14px; color: var(--dim); cursor: grab; user-select: none;
+  font-size: 14px; flex-shrink: 0; opacity: 0.5;
+}
+.milestone-drag-handle:active { cursor: grabbing; }
+.milestone-row:hover .milestone-drag-handle { opacity: 1; }
+
+/* Milestone add/edit modal */
+#milestone-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+}
+#milestone-dialog {
+  width: 380px; max-width: calc(100vw - 40px);
+  padding: 24px 24px 20px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+#milestone-dialog label { display: flex; flex-direction: column; gap: 4px; }
+#milestone-dialog input, #milestone-dialog select {
+  background: #141422; border: 1px solid var(--grid); border-radius: 6px;
+  padding: 6px 10px; font-size: 13px; color: var(--text); outline: none;
+}
+#milestone-dialog input:focus, #milestone-dialog select:focus {
+  border-color: var(--accent);
+}
 .series-member-card {
   width: 120px; position: relative; cursor: pointer;
   transition: transform 0.15s;

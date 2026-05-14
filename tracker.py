@@ -235,139 +235,7 @@ class Api:
         return get_media_stats()
 
     def get_title_detail(self, title):
-        """Return per-session data and game metadata for a given title."""
-        sessions = _q("""
-            SELECT id, session_date, source, activity_type,
-                   chars_read, lines_read, time_seconds,
-                   reading_speed, cards_mined, sentences_read, game_id
-            FROM sessions WHERE title=? ORDER BY session_date ASC
-        """, title)
-
-        if not sessions:
-            return None
-
-        source = sessions[0][2]
-
-        # Try to load GSM game metadata
-        game_meta = None
-        if source == "gsm":
-            gm = _q1(
-                "SELECT game_id, description, image_data, genres, first_date "
-                "FROM gsm_games WHERE game_name=?", title
-            )
-            if gm:
-                game_meta = {
-                    "game_id":    gm[0],
-                    "desc":       gm[1] or "",
-                    "image":      gm[2] or "",
-                    "genres":     json.loads(gm[3]) if gm[3] else [],
-                    "first_date": gm[4] or "",
-                }
-
-        # Manual cover overrides any auto-fetched image
-        book_cover = _q1("SELECT image_data FROM book_covers WHERE title=?", title)
-        if book_cover and book_cover[0]:
-            if game_meta:
-                game_meta["image"] = book_cover[0]
-            else:
-                game_meta = {"game_id": None, "desc": "", "image": book_cover[0], "genres": [], "first_date": ""}
-
-        # Apply GSM rollover attribution overlay: chars/time/cards from a session_date
-        # may belong (partly or wholly) to a different rollover_date for display purposes.
-        out_by_sd = {}  # source_date -> [chars, secs, cards] subtracted from this date
-        in_by_rd  = {}  # rollover_date -> list of (source_date, chars, secs, cards)
-        gsm_sds = [s[1] for s in sessions if s[2] == 'gsm']
-        if gsm_sds:
-            ph = ",".join("?" * len(gsm_sds))
-            attr_rows = _q(
-                f"SELECT rollover_date, source_date, chars, time_seconds, cards "
-                f"FROM gsm_rollover_attributions "
-                f"WHERE source_date IN ({ph}) AND rollover_date <> source_date",
-                *gsm_sds
-            )
-            for rd, sd, c, t, cards in attr_rows:
-                out_by_sd.setdefault(sd, [0, 0, 0])
-                out_by_sd[sd][0] += c; out_by_sd[sd][1] += t; out_by_sd[sd][2] += cards
-                in_by_rd.setdefault(rd, []).append((sd, c, t, cards))
-
-        # Build daily aggregation by effective date
-        daily_map = {}
-        def _bump(d, chars, secs, cards, sentences, speed):
-            v = daily_map.setdefault(d, {"chars": 0, "secs": 0, "cards": 0, "sentences": 0,
-                                          "spd_w": 0, "spd_t": 0})
-            v["chars"]     += chars
-            v["secs"]      += secs
-            v["cards"]     += cards
-            v["sentences"] += sentences
-            if speed > 0 and secs > 0:
-                v["spd_w"] += speed * secs
-                v["spd_t"] += secs
-
-        for s in sessions:
-            sd = s[1]
-            chars, secs = s[4], s[6]
-            speed = s[7] or 0
-            cards = s[8] or 0
-            sentences = s[9] or 0
-            if s[2] == 'gsm' and sd in out_by_sd:
-                oc, ot, ocards = out_by_sd[sd]
-                chars = max(0, chars - oc)
-                secs  = max(0.0, secs - ot)
-                cards = max(0, cards - ocards)
-            if chars > 0 or secs > 0 or cards > 0:
-                _bump(sd, chars, secs, cards, sentences, speed)
-
-        # Phantom rows for chars attributed in to a rollover_date
-        for rd, attrs in in_by_rd.items():
-            for sd, c, t, cards in attrs:
-                if c <= 0 and t <= 0 and cards <= 0:
-                    continue
-                src = next((s for s in sessions if s[1] == sd and s[2] == 'gsm'), None)
-                spd = src[7] if src and src[7] else 0
-                _bump(rd, int(c), float(t), int(cards), 0, float(spd))
-
-        daily = []
-        for d in sorted(daily_map.keys()):
-            v = daily_map[d]
-            spd = (v["spd_w"] / v["spd_t"]) if v["spd_t"] > 0 else 0
-            daily.append({
-                "date":      d,
-                "chars":     int(v["chars"]),
-                "seconds":   v["secs"],
-                "speed":     spd,
-                "cards":     int(v["cards"]),
-                "sentences": int(v["sentences"]),
-            })
-
-        total_chars = sum(d["chars"]   for d in daily)
-        total_secs  = sum(d["seconds"] for d in daily)
-        total_cards = sum(d["cards"]   for d in daily)
-        spd_total_time = sum(d["seconds"] for d in daily if d["speed"] > 0)
-        avg_speed      = (sum(d["speed"] * d["seconds"] for d in daily if d["speed"] > 0)
-                          / spd_total_time) if spd_total_time > 0 else 0
-        days_count = len(daily)
-        first_date = daily[0]["date"]  if daily else (sessions[0][1]  if sessions else "")
-        last_date  = daily[-1]["date"] if daily else (sessions[-1][1] if sessions else "")
-
-        return {
-            "title":         title,
-            "display_title": _get_aliases().get(title, title),
-            "source":        source,
-            "activity_type": sessions[0][3],
-            "total_chars":   total_chars,
-            "total_secs":    total_secs,
-            "avg_speed":     avg_speed,
-            "total_cards":   total_cards,
-            "session_count": len(sessions),
-            "days_count":    days_count,
-            "first_date":    first_date,
-            "last_date":     last_date,
-            "daily":         daily,
-            "description":   game_meta["desc"]   if game_meta else "",
-            "image":         game_meta["image"]  if game_meta else "",
-            "genres":        game_meta["genres"] if game_meta else [],
-            "game_id":       game_meta["game_id"] if game_meta else None,
-        }
+        return db.db_get_title_detail(title)
 
     # ── Goals ─────────────────────────────────────────────────────────────────
     def get_goals(self):
@@ -650,6 +518,51 @@ class Api:
             con.commit()
             con.close()
             return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Milestones ────────────────────────────────────────────────────────────
+    def list_milestones(self, title):
+        try:
+            return db.db_list_milestones(title)
+        except Exception as e:
+            print(f"[milestones] list: {e}")
+            return []
+
+    def get_milestone_detail(self, milestone_id):
+        try:
+            return db.db_get_milestone_detail(milestone_id)
+        except Exception as e:
+            print(f"[milestones] detail: {e}")
+            return None
+
+    def add_milestone(self, title, name, unit, start_val, end_val):
+        try:
+            return db.db_add_milestone(title, name, unit, start_val, end_val)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def update_milestone(self, milestone_id, name, unit, start_val, end_val):
+        try:
+            return db.db_update_milestone(milestone_id, name, unit, start_val, end_val)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_milestone(self, milestone_id):
+        try:
+            return db.db_delete_milestone(milestone_id)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def end_milestone(self, milestone_id):
+        try:
+            return db.db_end_milestone(milestone_id)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def reorder_milestones(self, title, ordered_ids):
+        try:
+            return db.db_reorder_milestones(title, ordered_ids)
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

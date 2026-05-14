@@ -196,6 +196,23 @@ def init_db():
         )
     """)
 
+    # Milestones: subdivisions of a single media item (e.g. trilogy parts, arcs).
+    # Bounds are stored in native unit ('hours' or 'chars'); empties resolve at
+    # query time. Each milestone slices the parent's session history.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS milestones (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            title      TEXT NOT NULL,
+            name       TEXT NOT NULL,
+            unit       TEXT NOT NULL,
+            start_val  REAL,
+            end_val    REAL,
+            position   INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_milestones_title ON milestones(title)")
+
     con.commit()
     con.close()
 
@@ -958,3 +975,509 @@ def db_delete_custom_category(name):
     con.execute("DELETE FROM custom_categories WHERE name=?", (name,))
     con.commit()
     con.close()
+
+
+# ── Title detail ──────────────────────────────────────────────────────────────
+def _compute_title_core(title):
+    """Inner helper: compute the effective daily history + metadata for a title,
+    WITHOUT milestones. Used by both db_get_title_detail and the milestone
+    slicing helper (to avoid mutual recursion)."""
+    sessions = _q("""
+        SELECT id, session_date, source, activity_type,
+               chars_read, lines_read, time_seconds,
+               reading_speed, cards_mined, sentences_read, game_id
+        FROM sessions WHERE title=? ORDER BY session_date ASC
+    """, title)
+
+    if not sessions:
+        return None
+
+    source = sessions[0][2]
+
+    game_meta = None
+    if source == "gsm":
+        gm = _q1(
+            "SELECT game_id, description, image_data, genres, first_date "
+            "FROM gsm_games WHERE game_name=?", title
+        )
+        if gm:
+            game_meta = {
+                "game_id":    gm[0],
+                "desc":       gm[1] or "",
+                "image":      gm[2] or "",
+                "genres":     json.loads(gm[3]) if gm[3] else [],
+                "first_date": gm[4] or "",
+            }
+
+    book_cover = _q1("SELECT image_data FROM book_covers WHERE title=?", title)
+    if book_cover and book_cover[0]:
+        if game_meta:
+            game_meta["image"] = book_cover[0]
+        else:
+            game_meta = {"game_id": None, "desc": "", "image": book_cover[0], "genres": [], "first_date": ""}
+
+    out_by_sd = {}
+    in_by_rd  = {}
+    gsm_sds = [s[1] for s in sessions if s[2] == 'gsm']
+    if gsm_sds:
+        ph = ",".join("?" * len(gsm_sds))
+        attr_rows = _q(
+            f"SELECT rollover_date, source_date, chars, time_seconds, cards "
+            f"FROM gsm_rollover_attributions "
+            f"WHERE source_date IN ({ph}) AND rollover_date <> source_date",
+            *gsm_sds
+        )
+        for rd, sd, c, t, cards in attr_rows:
+            out_by_sd.setdefault(sd, [0, 0, 0])
+            out_by_sd[sd][0] += c; out_by_sd[sd][1] += t; out_by_sd[sd][2] += cards
+            in_by_rd.setdefault(rd, []).append((sd, c, t, cards))
+
+    daily_map = {}
+    def _bump(d, chars, secs, cards, sentences, speed):
+        v = daily_map.setdefault(d, {"chars": 0, "secs": 0, "cards": 0, "sentences": 0,
+                                      "spd_w": 0, "spd_t": 0})
+        v["chars"]     += chars
+        v["secs"]      += secs
+        v["cards"]     += cards
+        v["sentences"] += sentences
+        if speed > 0 and secs > 0:
+            v["spd_w"] += speed * secs
+            v["spd_t"] += secs
+
+    for s in sessions:
+        sd = s[1]
+        chars, secs = s[4], s[6]
+        speed = s[7] or 0
+        cards = s[8] or 0
+        sentences = s[9] or 0
+        if s[2] == 'gsm' and sd in out_by_sd:
+            oc, ot, ocards = out_by_sd[sd]
+            chars = max(0, chars - oc)
+            secs  = max(0.0, secs - ot)
+            cards = max(0, cards - ocards)
+        if chars > 0 or secs > 0 or cards > 0:
+            _bump(sd, chars, secs, cards, sentences, speed)
+
+    for rd, attrs in in_by_rd.items():
+        for sd, c, t, cards in attrs:
+            if c <= 0 and t <= 0 and cards <= 0:
+                continue
+            src = next((s for s in sessions if s[1] == sd and s[2] == 'gsm'), None)
+            spd = src[7] if src and src[7] else 0
+            _bump(rd, int(c), float(t), int(cards), 0, float(spd))
+
+    daily = []
+    for d in sorted(daily_map.keys()):
+        v = daily_map[d]
+        spd = (v["spd_w"] / v["spd_t"]) if v["spd_t"] > 0 else 0
+        daily.append({
+            "date":      d,
+            "chars":     int(v["chars"]),
+            "seconds":   v["secs"],
+            "speed":     spd,
+            "cards":     int(v["cards"]),
+            "sentences": int(v["sentences"]),
+        })
+
+    total_chars = sum(d["chars"]   for d in daily)
+    total_secs  = sum(d["seconds"] for d in daily)
+    total_cards = sum(d["cards"]   for d in daily)
+    spd_total_time = sum(d["seconds"] for d in daily if d["speed"] > 0)
+    avg_speed      = (sum(d["speed"] * d["seconds"] for d in daily if d["speed"] > 0)
+                      / spd_total_time) if spd_total_time > 0 else 0
+    days_count = len(daily)
+    first_date = daily[0]["date"]  if daily else (sessions[0][1]  if sessions else "")
+    last_date  = daily[-1]["date"] if daily else (sessions[-1][1] if sessions else "")
+
+    return {
+        "title":         title,
+        "display_title": _get_aliases().get(title, title),
+        "source":        source,
+        "activity_type": sessions[0][3],
+        "total_chars":   total_chars,
+        "total_secs":    total_secs,
+        "avg_speed":     avg_speed,
+        "total_cards":   total_cards,
+        "session_count": len(sessions),
+        "days_count":    days_count,
+        "first_date":    first_date,
+        "last_date":     last_date,
+        "daily":         daily,
+        "description":   game_meta["desc"]   if game_meta else "",
+        "image":         game_meta["image"]  if game_meta else "",
+        "genres":        game_meta["genres"] if game_meta else [],
+        "game_id":       game_meta["game_id"] if game_meta else None,
+    }
+
+
+def db_get_title_detail(title):
+    """Public: title detail including milestone summaries."""
+    core = _compute_title_core(title)
+    if core is None:
+        return None
+    core["milestones"] = db_list_milestones(title)
+    return core
+
+
+# ── Milestones ────────────────────────────────────────────────────────────────
+# A milestone subdivides a single media item (e.g. trilogy parts within one
+# game). Bounds are stored in native unit ('hours' or 'chars'); empties resolve
+# at query time. The canonical-minute axis lets us slice and disjoint-check
+# milestones whose bounds use different units.
+
+def _build_session_walk(title):
+    """Return chronological list of effective session entries for title, plus
+    cumulative-before/after for both minutes and chars. Uses the GSM-rollover
+    overlay from _compute_title_core (avoids recursion into milestone code).
+    Returns: (walk, total_min, total_chars). Walk entries:
+      {date, minutes, chars, before_min, after_min, before_chars, after_chars}
+    """
+    detail = _compute_title_core(title)
+    if not detail:
+        return [], 0.0, 0
+    walk = []
+    cum_min, cum_chars = 0.0, 0
+    for d in detail["daily"]:
+        mins  = (d["seconds"] or 0) / 60.0
+        chars = d["chars"] or 0
+        before_min, before_chars = cum_min, cum_chars
+        cum_min   += mins
+        cum_chars += chars
+        walk.append({
+            "date":         d["date"],
+            "minutes":      mins,
+            "chars":        chars,
+            "speed":        d.get("speed", 0),
+            "before_min":   before_min,
+            "after_min":    cum_min,
+            "before_chars": before_chars,
+            "after_chars":  cum_chars,
+        })
+    return walk, cum_min, cum_chars
+
+
+def _chars_bound_to_minutes(X, walk, total_min, total_chars):
+    """Convert a chars-axis boundary X to a minutes-axis position.
+    Convention: the session S that "owns" X satisfies
+        before_chars <= X < after_chars
+    so the boundary lives at the START of the session that pushes cum past X
+    (i.e. 0-char sessions stick to the previous chars-bearing milestone).
+    Within an owning session, the position is interpolated by chars fraction."""
+    if X is None or X <= 0:
+        return 0.0
+    if X >= total_chars:
+        return total_min
+    for s in walk:
+        if s["before_chars"] <= X < s["after_chars"]:
+            if s["chars"] <= 0:
+                return s["before_min"]
+            frac = (X - s["before_chars"]) / s["chars"]
+            return s["before_min"] + frac * s["minutes"]
+    return total_min
+
+
+def _resolve_milestone_bounds(milestones_rows, walk, total_min, total_chars):
+    """Given milestone rows (ordered by position) and the title's session walk,
+    return {milestone_id: (start_min, end_min)} resolved to canonical minutes.
+
+    - empty start_val: previous milestone's resolved end (or 0 if position 0)
+    - empty end_val:   total_min (ongoing — grows as new sessions log)
+    - hours unit:      val * 60, clamped to [0, total_min]
+    - chars unit:      _chars_bound_to_minutes
+    """
+    result = {}
+    prev_end = 0.0
+    for m in milestones_rows:
+        mid, _name, unit, sv, ev, _pos = m
+        if sv is None:
+            start_min = prev_end
+        elif unit == "hours":
+            start_min = max(0.0, min(total_min, float(sv) * 60.0))
+        else:
+            start_min = _chars_bound_to_minutes(float(sv), walk, total_min, total_chars)
+
+        if ev is None:
+            end_min = total_min
+        elif unit == "hours":
+            end_min = max(0.0, min(total_min, float(ev) * 60.0))
+        else:
+            end_min = _chars_bound_to_minutes(float(ev), walk, total_min, total_chars)
+
+        if end_min < start_min:
+            end_min = start_min
+
+        result[mid] = (start_min, end_min)
+        prev_end = end_min
+    return result
+
+
+def _slice_totals(walk, start_min, end_min):
+    """Compute pro-rata (chars, seconds) totals for the minute range
+    [start_min, end_min] over the given session walk."""
+    total_chars = 0.0
+    total_secs  = 0.0
+    for s in walk:
+        overlap = max(0.0, min(end_min, s["after_min"]) - max(start_min, s["before_min"]))
+        if overlap <= 0:
+            continue
+        frac = overlap / s["minutes"] if s["minutes"] > 0 else 0.0
+        total_chars += s["chars"] * frac
+        total_secs  += overlap * 60.0
+    return int(round(total_chars)), total_secs
+
+
+def db_list_milestones(title):
+    """Return list of milestones for a title with bounds resolved to minutes
+    and pro-rata chars/seconds totals."""
+    rows = _q("""
+        SELECT id, name, unit, start_val, end_val, position
+        FROM milestones WHERE title=? ORDER BY position ASC, id ASC
+    """, title)
+    if not rows:
+        return []
+    walk, total_min, total_chars = _build_session_walk(title)
+    bounds = _resolve_milestone_bounds(rows, walk, total_min, total_chars)
+    out = []
+    for r in rows:
+        mid, name, unit, sv, ev, pos = r
+        sm, em = bounds.get(mid, (0.0, 0.0))
+        tc, ts = _slice_totals(walk, sm, em)
+        out.append({
+            "id":          mid,
+            "title":       title,
+            "name":        name,
+            "unit":        unit,
+            "start_val":   sv,
+            "end_val":     ev,
+            "position":    pos,
+            "start_min":   sm,
+            "end_min":     em,
+            "duration_min": max(0.0, em - sm),
+            "ongoing":     ev is None,
+            "total_chars": tc,
+            "total_secs":  ts,
+        })
+    return out
+
+
+def _milestones_overlap(bounds_map, tol=0.01):
+    """Return (id_a, id_b) of first pair of milestones whose minute intervals
+    overlap by more than tol, or None if disjoint."""
+    items = sorted(bounds_map.items(), key=lambda kv: kv[1][0])
+    for i in range(len(items) - 1):
+        _, (_, end_a) = items[i]
+        _, (start_b, _) = items[i + 1]
+        if start_b + tol < end_a:
+            return (items[i][0], items[i+1][0])
+    return None
+
+
+def db_get_milestone(milestone_id):
+    """Return the milestone row + resolved bounds + parent title."""
+    r = _q1("""SELECT id, title, name, unit, start_val, end_val, position
+               FROM milestones WHERE id=?""", int(milestone_id))
+    if not r:
+        return None
+    mid, title, name, unit, sv, ev, pos = r
+    walk, total_min, total_chars = _build_session_walk(title)
+    all_rows = _q("""SELECT id, name, unit, start_val, end_val, position
+                     FROM milestones WHERE title=? ORDER BY position ASC, id ASC""", title)
+    bounds = _resolve_milestone_bounds(all_rows, walk, total_min, total_chars)
+    sm, em = bounds.get(mid, (0.0, 0.0))
+    return {
+        "id": mid, "title": title, "name": name, "unit": unit,
+        "start_val": sv, "end_val": ev, "position": pos,
+        "start_min": sm, "end_min": em,
+    }
+
+
+def db_get_milestone_detail(milestone_id):
+    """Return media-detail-shaped dict for the slice of sessions inside this
+    milestone. Sessions straddling a boundary are pro-rata split: chars are
+    scaled by time-fraction (equivalent to using per-session read speed)."""
+    base = db_get_milestone(milestone_id)
+    if not base:
+        return None
+    title = base["title"]
+    parent = _compute_title_core(title)
+    if not parent:
+        return None
+    start_min, end_min = base["start_min"], base["end_min"]
+
+    sliced_daily = []
+    cum_min = 0.0
+    for d in parent["daily"]:
+        session_min = (d["seconds"] or 0) / 60.0
+        before_min  = cum_min
+        after_min   = cum_min + session_min
+        cum_min     = after_min
+
+        overlap_min = max(0.0, min(end_min, after_min) - max(start_min, before_min))
+        if overlap_min <= 0:
+            continue
+        frac = (overlap_min / session_min) if session_min > 0 else 0.0
+        sliced_daily.append({
+            "date":      d["date"],
+            "chars":     int(round((d["chars"] or 0) * frac)),
+            "seconds":   overlap_min * 60.0,
+            "speed":     d.get("speed", 0),
+            "cards":     int(round((d.get("cards") or 0) * frac)),
+            "sentences": int(round((d.get("sentences") or 0) * frac)),
+        })
+
+    total_chars = sum(d["chars"]   for d in sliced_daily)
+    total_secs  = sum(d["seconds"] for d in sliced_daily)
+    spd_total_time = sum(d["seconds"] for d in sliced_daily if d["speed"] > 0)
+    avg_speed = (sum(d["speed"] * d["seconds"] for d in sliced_daily if d["speed"] > 0)
+                 / spd_total_time) if spd_total_time > 0 else 0
+    first_date = sliced_daily[0]["date"]  if sliced_daily else ""
+    last_date  = sliced_daily[-1]["date"] if sliced_daily else ""
+
+    return {
+        "id":            base["id"],
+        "title":         title,
+        "parent_title":  parent.get("display_title", title),
+        "parent_image":  parent.get("image", ""),
+        "name":          base["name"],
+        "unit":          base["unit"],
+        "start_val":     base["start_val"],
+        "end_val":       base["end_val"],
+        "start_min":     start_min,
+        "end_min":       end_min,
+        "position":      base["position"],
+        "source":        parent.get("source", ""),
+        "activity_type": parent.get("activity_type", "Reading"),
+        "total_chars":   total_chars,
+        "total_secs":    total_secs,
+        "avg_speed":     avg_speed,
+        "session_count": len(sliced_daily),
+        "first_date":    first_date,
+        "last_date":     last_date,
+        "daily":         sliced_daily,
+    }
+
+
+def _validate_milestone_disjoint(title, candidate_id=None, candidate=None):
+    """Validate that all milestones for `title` would be disjoint if `candidate`
+    (a tuple matching the SELECT shape) replaced/added at `candidate_id`.
+    Returns None if ok, else an error string."""
+    rows = list(_q("""SELECT id, name, unit, start_val, end_val, position
+                       FROM milestones WHERE title=? ORDER BY position ASC, id ASC""", title))
+    if candidate is not None:
+        if candidate_id is not None:
+            rows = [candidate if r[0] == candidate_id else r for r in rows]
+        else:
+            rows.append(candidate)
+        rows.sort(key=lambda r: (r[5], r[0]))
+    if not rows:
+        return None
+    walk, total_min, total_chars = _build_session_walk(title)
+    bounds = _resolve_milestone_bounds(rows, walk, total_min, total_chars)
+    bad = _milestones_overlap(bounds)
+    if bad:
+        return f"Milestones would overlap (ids {bad[0]} and {bad[1]})"
+    return None
+
+
+def db_add_milestone(title, name, unit, start_val, end_val):
+    name = (name or "").strip()
+    if not name:
+        return {"ok": False, "error": "Name required"}
+    if unit not in ("hours", "chars"):
+        return {"ok": False, "error": "Unit must be 'hours' or 'chars'"}
+    sv = float(start_val) if start_val not in (None, "", "null") else None
+    ev = float(end_val)   if end_val   not in (None, "", "null") else None
+    if sv is not None and ev is not None and ev < sv:
+        return {"ok": False, "error": "End must be ≥ start"}
+
+    max_pos = (_q1("SELECT COALESCE(MAX(position),-1) FROM milestones WHERE title=?", title) or (-1,))[0]
+    new_pos = (max_pos if max_pos is not None else -1) + 1
+    candidate = (None, name, unit, sv, ev, new_pos)
+    err = _validate_milestone_disjoint(title, candidate_id=None, candidate=candidate)
+    if err:
+        return {"ok": False, "error": err}
+
+    con = sqlite3.connect(DB_PATH)
+    cur = con.execute(
+        "INSERT INTO milestones (title, name, unit, start_val, end_val, position, created_at) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (title, name, unit, sv, ev, new_pos, datetime.now().isoformat())
+    )
+    new_id = cur.lastrowid
+    con.commit()
+    con.close()
+    return {"ok": True, "id": new_id}
+
+
+def db_update_milestone(milestone_id, name, unit, start_val, end_val):
+    mid = int(milestone_id)
+    existing = _q1("SELECT title, position FROM milestones WHERE id=?", mid)
+    if not existing:
+        return {"ok": False, "error": "Milestone not found"}
+    title, pos = existing
+    name = (name or "").strip()
+    if not name:
+        return {"ok": False, "error": "Name required"}
+    if unit not in ("hours", "chars"):
+        return {"ok": False, "error": "Unit must be 'hours' or 'chars'"}
+    sv = float(start_val) if start_val not in (None, "", "null") else None
+    ev = float(end_val)   if end_val   not in (None, "", "null") else None
+    if sv is not None and ev is not None and ev < sv:
+        return {"ok": False, "error": "End must be ≥ start"}
+
+    candidate = (mid, name, unit, sv, ev, pos)
+    err = _validate_milestone_disjoint(title, candidate_id=mid, candidate=candidate)
+    if err:
+        return {"ok": False, "error": err}
+
+    con = sqlite3.connect(DB_PATH)
+    con.execute(
+        "UPDATE milestones SET name=?, unit=?, start_val=?, end_val=? WHERE id=?",
+        (name, unit, sv, ev, mid)
+    )
+    con.commit()
+    con.close()
+    return {"ok": True}
+
+
+def db_delete_milestone(milestone_id):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DELETE FROM milestones WHERE id=?", (int(milestone_id),))
+    con.commit()
+    con.close()
+    return {"ok": True}
+
+
+def db_end_milestone(milestone_id):
+    """Freeze an ongoing milestone at the current media-cumulative point.
+    Sets end_val to the title's current total in the milestone's native unit."""
+    mid = int(milestone_id)
+    row = _q1("SELECT title, unit, end_val FROM milestones WHERE id=?", mid)
+    if not row:
+        return {"ok": False, "error": "Milestone not found"}
+    title, unit, end_val = row
+    if end_val is not None:
+        return {"ok": False, "error": "Milestone is already ended"}
+    _walk, total_min, total_chars = _build_session_walk(title)
+    new_end = (total_min / 60.0) if unit == "hours" else float(total_chars)
+    con = sqlite3.connect(DB_PATH)
+    con.execute("UPDATE milestones SET end_val=? WHERE id=?", (new_end, mid))
+    con.commit()
+    con.close()
+    return {"ok": True, "end_val": new_end}
+
+
+def db_reorder_milestones(title, ordered_ids):
+    """Set position = index for each id in ordered_ids (restricted to title)."""
+    con = sqlite3.connect(DB_PATH)
+    for i, mid in enumerate(ordered_ids):
+        con.execute(
+            "UPDATE milestones SET position=? WHERE id=? AND title=?",
+            (i, int(mid), title)
+        )
+    con.commit()
+    con.close()
+    err = _validate_milestone_disjoint(title)
+    if err:
+        return {"ok": False, "error": err}
+    return {"ok": True}
