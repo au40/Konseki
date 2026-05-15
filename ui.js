@@ -1148,7 +1148,7 @@ function makeGoalCard(g) {
     }
     const behind   = chunkNeeded > originalChunk * 1.05;
     const ahead    = chunkNeeded < originalChunk * 0.95;
-    const icon     = behind ? '⚠' : ahead ? '↓' : '→';
+    const icon     = behind ? '⚠' : ahead ? '↑' : '→';
     const color    = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
     const periodPct = barTarget > 0 ? Math.min(100, periodDone / barTarget * 100) : 0;
     const barColor  = periodPct >= 100 ? '#4ECBA0' : '#5B8CFF';
@@ -1185,8 +1185,16 @@ function makeGoalCard(g) {
         <button class="btn btn-xs btn-danger" onclick="doDeleteGoal(${g.id})">✕</button>
       </div>
     </div>
-    <div class="progress-track">
-      <div class="progress-fill" style="width:${pct}%;background:${fillColor}"></div>
+    <div class="progress-wrap">
+      <div class="progress-track">
+        <div class="progress-fill" style="width:${pct}%;background:${fillColor}"></div>
+      </div>
+      ${(() => {
+        const total = Math.max(1, g.total_days);
+        const elapsed = Math.max(0, Math.min(total, total - g.days_left));
+        const expPct = (elapsed / total) * 100;
+        return `<div class="progress-expected" style="left:${expPct}%" title="Expected: ${Math.round(expPct)}%"></div>`;
+      })()}
     </div>
     <div class="goal-meta">
       <span class="goal-numbers">${fmtMetric(g.completed)} / ${fmtMetric(g.target)}${actLabel}</span>
