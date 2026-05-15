@@ -291,8 +291,19 @@ select:focus { border-color: var(--accent); }
 .daily-bar-label { font-size: 10px; color: var(--dim); white-space: nowrap; flex: 0 0 140px; }
 .daily-bar-track {
   flex: 1; height: 4px; background: var(--inset); border-radius: 2px; overflow: hidden;
+  position: relative;
 }
 .daily-bar-fill { height: 100%; border-radius: 2px; transition: width 0.5s ease; }
+.daily-bar-ticks {
+  position: absolute; inset: 0; pointer-events: none;
+  background-image: repeating-linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(var(--tick-step) - 1px),
+    rgba(0,0,0,0.35) calc(var(--tick-step) - 1px),
+    rgba(0,0,0,0.35) var(--tick-step)
+  );
+}
 
 .goal-chunk {
   font-size: 12px; display: flex; align-items: center; gap: 6px;

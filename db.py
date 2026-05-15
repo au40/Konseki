@@ -459,28 +459,31 @@ def get_today_stats():
         SELECT id,source,title,activity_type,chars_read,lines_read,time_seconds,session_date
         FROM sessions WHERE session_date IN ({placeholders})
           AND (time_excluded IS NULL OR time_excluded=0)
-        ORDER BY ingested_at DESC
+        ORDER BY session_date DESC, ingested_at DESC
     """, *bucket)
 
-    # Outgoing attributions: chars leaving any date in the bucket toward a date outside
-    out_chars, out_secs = 0, 0
-    out_row = _q1(
-        f"SELECT COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
+    # Outgoing attributions per source_date: chars leaving a bucket date toward a date outside.
+    # Aggregate per source_date (not in total) so each is deducted from the first GSM row
+    # on its OWN date — otherwise an empty GSM row on one bucket date can eat the deduction
+    # via max(0, …) and the real row on the other date keeps its full unadjusted time.
+    out_rows = _q(
+        f"SELECT source_date, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
         f"FROM gsm_rollover_attributions WHERE source_date IN ({placeholders}) "
-        f"AND rollover_date NOT IN ({placeholders})",
+        f"AND rollover_date NOT IN ({placeholders}) GROUP BY source_date",
         *bucket, *bucket
     )
-    if out_row:
-        out_chars, out_secs = out_row
+    out_by_date = {r[0]: (r[1], r[2]) for r in out_rows}
+    deducted_for = set()
 
     result = []
-    deducted = False
     for r in rows:
-        rid, src, title, atype, chars, lines, secs, _sd = r
-        if src == 'gsm' and not deducted and (out_chars or out_secs):
-            chars = max(0, chars - int(out_chars))
-            secs  = max(0, secs - float(out_secs))
-            deducted = True
+        rid, src, title, atype, chars, lines, secs, sd = r
+        if src == 'gsm' and sd not in deducted_for and sd in out_by_date:
+            oc, os_ = out_by_date[sd]
+            if oc or os_:
+                chars = max(0, chars - int(oc))
+                secs  = max(0, secs - float(os_))
+                deducted_for.add(sd)
         # Drop sessions whose displayed values are all zero (e.g. fully attributed-away GSM rows)
         if chars == 0 and secs == 0 and (lines or 0) == 0:
             continue
@@ -1005,17 +1008,52 @@ def db_get_goal_progress():
             metric_adj = {"chars_read": adj_c, "time_seconds": adj_t, "cards_mined": adj_cards}.get(g["metric"], 0)
             today_completed = max(0.0, today_completed + metric_adj)
 
-        week_start_str  = (today_d - timedelta(days=today_d.weekday())).strftime("%Y-%m-%d")
+        # Weekly period: clamp start to goal start, end to min(sunday, deadline)
+        week_cal_start = today_d - timedelta(days=today_d.weekday())
+        week_cal_end   = week_cal_start + timedelta(days=6)
+        week_start_d   = max(week_cal_start, start_d)
+        week_end_d     = min(week_cal_end, deadline_d)
+        week_period_days = max(1, (week_end_d - week_start_d).days + 1)
+        week_sum_end_d   = min(week_end_d, today_d)
+        week_start_str   = week_start_d.strftime("%Y-%m-%d")
+        week_sum_end_str = week_sum_end_d.strftime("%Y-%m-%d")
         week_where       = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
-        week_params      = [week_start_str, count_up_to] + ([g["activity_type"]] if g["activity_type"] else [])
+        week_params      = [week_start_str, week_sum_end_str] + ([g["activity_type"]] if g["activity_type"] else [])
         week_sql         = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(week_where)}"
         week_completed   = (_q1(week_sql, *week_params) or (0,))[0] or 0.0
 
-        month_start_str  = today_d.strftime("%Y-%m-01")
-        month_where      = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
-        month_params     = [month_start_str, count_up_to] + ([g["activity_type"]] if g["activity_type"] else [])
-        month_sql        = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(month_where)}"
-        month_completed  = (_q1(month_sql, *month_params) or (0,))[0] or 0.0
+        # Monthly period: clamp start to goal start, end to min(end-of-month, deadline)
+        month_cal_start = today_d.replace(day=1)
+        if today_d.month == 12:
+            month_cal_end = today_d.replace(year=today_d.year + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            month_cal_end = today_d.replace(month=today_d.month + 1, day=1) - timedelta(days=1)
+        month_start_d    = max(month_cal_start, start_d)
+        month_end_d      = min(month_cal_end, deadline_d)
+        month_period_days = max(1, (month_end_d - month_start_d).days + 1)
+        month_sum_end_d   = min(month_end_d, today_d)
+        month_start_str   = month_start_d.strftime("%Y-%m-%d")
+        month_sum_end_str = month_sum_end_d.strftime("%Y-%m-%d")
+        month_where       = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
+        month_params      = [month_start_str, month_sum_end_str] + ([g["activity_type"]] if g["activity_type"] else [])
+        month_sql         = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(month_where)}"
+        month_completed   = (_q1(month_sql, *month_params) or (0,))[0] or 0.0
+
+        # GSM rollover attribution: per-day deltas for Reading goals (and untyped goals)
+        if (not g["activity_type"]) or g["activity_type"] == "Reading":
+            metric_key = g["metric"]
+            def _sum_adj(start_d_, end_d_):
+                total = 0.0
+                cur = start_d_
+                while cur <= end_d_:
+                    ac, at, ak = get_gsm_day_adjustment(cur.strftime("%Y-%m-%d"))
+                    total += {"chars_read": ac, "time_seconds": at, "cards_mined": ak}.get(metric_key, 0)
+                    cur += timedelta(days=1)
+                return total
+            if week_start_d <= week_sum_end_d:
+                week_completed = max(0.0, week_completed + _sum_adj(week_start_d, week_sum_end_d))
+            if month_start_d <= month_sum_end_d:
+                month_completed = max(0.0, month_completed + _sum_adj(month_start_d, month_sum_end_d))
 
         remaining = max(0.0, g["target"] - completed)
         pct       = min(100.0, round(completed / g["target"] * 100, 1)) if g["target"] > 0 else 0.0
@@ -1052,6 +1090,8 @@ def db_get_goal_progress():
             "today_completed":  today_completed,
             "week_completed":   week_completed,
             "month_completed":  month_completed,
+            "week_period_days":  week_period_days,
+            "month_period_days": month_period_days,
             "is_complete":     completed >= g["target"],
             "is_overdue":      days_left == 0 and completed < g["target"],
         })

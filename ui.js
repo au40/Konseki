@@ -1110,6 +1110,7 @@ function makeGoalCard(g) {
   let chunkHtml = '';
   if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
     let chunkNeeded, originalChunk, periodDone, periodLabel, periodUnit;
+    let barTarget, tickCount;
     const [_y, _m, _d] = today().split('-').map(Number);
     const now      = new Date(_y, _m - 1, _d);
     const shortFmt = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -1121,6 +1122,8 @@ function makeGoalCard(g) {
       periodLabel   = 'Today';
       periodUnit    = '/day';
       periodRange   = shortFmt(now);
+      barTarget     = chunkNeeded;
+      tickCount     = 0;
     } else if (goalPaceView === 'weekly') {
       chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 7);
       originalChunk = g.target / Math.max(1, g.total_days / 7);
@@ -1131,6 +1134,8 @@ function makeGoalCard(g) {
       const mon = new Date(now); mon.setDate(now.getDate() - monOffset);
       const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
       periodRange   = `${shortFmt(mon)} – ${shortFmt(sun)}`;
+      tickCount     = g.week_period_days || 7;
+      barTarget     = chunkNeeded * (tickCount / 7);
     } else {
       chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 30.44);
       originalChunk = g.target / Math.max(1, g.total_days / 30.44);
@@ -1138,21 +1143,26 @@ function makeGoalCard(g) {
       periodLabel   = 'This month';
       periodUnit    = '/month';
       periodRange   = now.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+      tickCount     = g.month_period_days || 30;
+      barTarget     = chunkNeeded * (tickCount / 30.44);
     }
     const behind   = chunkNeeded > originalChunk * 1.05;
     const ahead    = chunkNeeded < originalChunk * 0.95;
     const icon     = behind ? '⚠' : ahead ? '↓' : '→';
     const color    = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
-    const periodPct = chunkNeeded > 0 ? Math.min(100, periodDone / chunkNeeded * 100) : 0;
+    const periodPct = barTarget > 0 ? Math.min(100, periodDone / barTarget * 100) : 0;
     const barColor  = periodPct >= 100 ? '#4ECBA0' : '#5B8CFF';
+    const tickStyle = tickCount > 1 ? `--tick-step:${(100/tickCount).toFixed(4)}%` : '';
+    const ticksHtml = tickCount > 1 ? `<div class="daily-bar-ticks" style="${tickStyle}"></div>` : '';
     chunkHtml = `
       <div class="goal-chunk" style="color:${color}">
         <span>${icon} ${fmtMetric(chunkNeeded)}${periodUnit} to finish on time</span>
       </div>
       <div class="daily-bar-row">
-        <span class="daily-bar-label">${periodLabel} ${fmtMetric(periodDone)} / ${fmtMetric(chunkNeeded)}</span>
+        <span class="daily-bar-label">${periodLabel} ${fmtMetric(periodDone)} / ${fmtMetric(barTarget)}</span>
         <div class="daily-bar-track">
           <div class="daily-bar-fill" style="width:${periodPct}%;background:${barColor}"></div>
+          ${ticksHtml}
         </div>
       </div>
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${periodRange}</div>`;

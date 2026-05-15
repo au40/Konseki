@@ -13,7 +13,7 @@ import webview
 import sqlite3
 import json
 import requests
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -716,39 +716,6 @@ def main():
         gsm_observer.schedule(gsm_wal_handler, gsm_dir, recursive=False)
         gsm_observer.start()
         print(f"[gsm-watch] Watching {gsm_dir} (debounce={debounce}s, settle={settle}s)")
-
-        # Daily forced pull just before rollover_hour. Catches the continuous-
-        # across-rollover case where the WAL debounce never settles inside the
-        # rollover window, so no snapshot would otherwise be written for last
-        # night's tail of reading. Re-arms itself for the next day.
-        _rollover_timer = {"t": None}
-        def _schedule_rollover_pull():
-            rh = int(get_setting("rollover_hour", "0"))
-            if rh <= 0:
-                return  # no rollover window configured
-            now = datetime.now()
-            target = now.replace(hour=rh, minute=0, second=0, microsecond=0) \
-                        - timedelta(minutes=1)
-            if target <= now:
-                target += timedelta(days=1)
-            delay = (target - now).total_seconds()
-            t = threading.Timer(delay, _do_rollover_pull)
-            t.daemon = True
-            t.start()
-            _rollover_timer["t"] = t
-
-        def _do_rollover_pull():
-            try:
-                result = pull_gsm_now()
-                if result:
-                    print(f"[gsm-rollover] Forced pull at rollover boundary: "
-                          f"{result.get('chars_read', 0)} chars")
-                    api._notify()
-            except Exception as e:
-                print(f"[gsm-rollover] {e}")
-            _schedule_rollover_pull()
-
-        _schedule_rollover_pull()
     else:
         print(f"[gsm-watch] {gsm_dir} not found — watcher disabled")
 
