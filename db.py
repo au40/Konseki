@@ -535,11 +535,72 @@ def get_range_totals(n):
     return _q1(f"SELECT COALESCE(SUM(chars_read),0),{_t},{_d} FROM sessions WHERE session_date>=?", since)
 
 def get_recent_sessions(limit=30):
-    return _q("""
+    # Mirrors get_today_stats attribution handling, but generalized across every date
+    # in the history window: deduct outgoing attributions from the first GSM row on
+    # each date, drop fully-zeroed rows, and synthesize phantom rows for incoming
+    # attributions. Over-fetch raw to absorb drops before slicing to `limit`.
+    raw = _q("""
         SELECT id,session_date,source,title,activity_type,chars_read,lines_read,time_seconds
         FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0)
         ORDER BY session_date DESC,ingested_at DESC LIMIT ?
-    """, limit)
+    """, limit * 2)
+    if not raw:
+        return []
+
+    by_date = {}
+    for r in raw:
+        by_date.setdefault(r[1], []).append(r)
+    dates = list(by_date.keys())
+    placeholders = ",".join("?" * len(dates))
+
+    out_rows = _q(
+        f"SELECT source_date, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
+        f"FROM gsm_rollover_attributions WHERE source_date IN ({placeholders}) "
+        f"AND rollover_date <> source_date GROUP BY source_date",
+        *dates
+    )
+    out_by_date = {r[0]: (r[1], r[2]) for r in out_rows}
+
+    # Pull incoming attributions that touch our window from either side, so phantom-only
+    # rollover dates (where the source row was fully attributed away) still appear.
+    in_rows = _q(
+        f"SELECT rollover_date, source_date, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
+        f"FROM gsm_rollover_attributions WHERE rollover_date <> source_date "
+        f"AND (source_date IN ({placeholders}) OR rollover_date IN ({placeholders})) "
+        f"GROUP BY rollover_date, source_date",
+        *dates, *dates
+    )
+    in_by_date = {}
+    for rd, sd, ch, sec in in_rows:
+        in_by_date.setdefault(rd, []).append((sd, ch, sec))
+
+    all_dates = sorted(set(by_date.keys()) | set(in_by_date.keys()), reverse=True)
+
+    result = []
+    for d in all_dates:
+        out_chars, out_secs = out_by_date.get(d, (0, 0))
+        deducted = False
+        for r in by_date.get(d, []):
+            rid, sd, src, title, atype, chars, lines, secs = r
+            if src == 'gsm' and not deducted and (out_chars or out_secs):
+                chars = max(0, chars - int(out_chars))
+                secs  = max(0, secs  - float(out_secs))
+                deducted = True
+            if chars == 0 and secs == 0 and (lines or 0) == 0:
+                continue
+            result.append((rid, sd, src, title, atype, chars, lines, secs))
+
+        for sd2, ch, sec in in_by_date.get(d, []):
+            if (ch or 0) <= 0 and (sec or 0) <= 0:
+                continue
+            game_row = _q1(
+                "SELECT title FROM sessions WHERE source='gsm' AND session_date=? "
+                "ORDER BY ingested_at DESC LIMIT 1", sd2
+            )
+            game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
+            result.append((None, d, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0)))
+
+    return result[:limit]
 
 def get_daily_time_series(days):
     if days is None:

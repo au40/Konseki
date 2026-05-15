@@ -190,8 +190,21 @@ select:focus { border-color: var(--accent); }
 .session-list { display: flex; flex-direction: column; gap: 6px; }
 .session-row {
   background: var(--card); border-radius: 8px;
-  display: flex; align-items: stretch; overflow: hidden;
+  display: flex; align-items: stretch;
+  position: relative;
 }
+.session-badge { border-radius: 8px 0 0 8px; }
+.session-row .btn-danger {
+  position: absolute; top: -8px; right: -8px; margin: 0;
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--inset); color: #FF6B6B;
+  border: 1px solid var(--grid); border-radius: 50%;
+  font-size: 11px; line-height: 1;
+  opacity: 0; transition: opacity 0.12s;
+  z-index: 5;
+}
+.session-row:hover .btn-danger { opacity: 1; }
 .session-badge { width: 6px; flex-shrink: 0; }
 .session-body  { flex: 1; padding: 10px 14px; }
 .session-title { font-size: 13px; font-weight: 600; color: var(--text); }
@@ -406,8 +419,9 @@ select:focus { border-color: var(--accent); }
 
 /* Inline member list (replaces description) */
 .series-members-inline {
-  margin-top: 10px; max-height: 145px; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 4px; padding-right: 4px;
+  margin-top: 10px; max-height: 130px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px 4px 4px;
 }
 .series-members-inline::-webkit-scrollbar { width: 4px; }
 .series-members-inline::-webkit-scrollbar-track { background: transparent; }
@@ -416,6 +430,7 @@ select:focus { border-color: var(--accent); }
   display: flex; align-items: center; gap: 8px;
   padding: 4px 6px; border-radius: 6px; cursor: pointer;
   transition: background 0.12s; border: 1px solid transparent;
+  position: relative;
 }
 .series-member-row:hover { background: var(--hover); border-color: var(--grid); }
 .series-member-mini-thumb {
@@ -437,14 +452,22 @@ select:focus { border-color: var(--accent); }
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
 }
 .series-member-row .series-remove-btn {
-  opacity: 0; transition: opacity 0.12s; flex-shrink: 0;
+  position: absolute; top: -8px; right: -8px; margin: 0;
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--inset); color: #FF6B6B;
+  border: 1px solid var(--grid); border-radius: 50%;
+  font-size: 11px; line-height: 1;
+  opacity: 0; transition: opacity 0.12s;
+  z-index: 5;
 }
 .series-member-row:hover .series-remove-btn { opacity: 1; }
 
 /* Milestones list (inside media detail hero) */
 .milestones-list {
-  margin-top: 10px; max-height: 180px; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 4px; padding-right: 4px;
+  margin-top: 10px; max-height: 130px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px 4px 4px;
 }
 .milestones-list::-webkit-scrollbar { width: 4px; }
 .milestones-list::-webkit-scrollbar-track { background: transparent; }
@@ -454,6 +477,7 @@ select:focus { border-color: var(--accent); }
   padding: 4px 6px; border-radius: 6px; cursor: pointer;
   transition: background 0.12s, transform 0.1s, opacity 0.12s;
   border: 1px solid transparent; background: var(--card-bg, transparent);
+  position: relative;
 }
 .milestone-row:hover { background: var(--hover); border-color: var(--grid); }
 .milestone-row.dragging { opacity: 0.4; }
@@ -471,16 +495,16 @@ select:focus { border-color: var(--accent); }
 }
 .milestone-meta { font-size: 10px; color: var(--dim); }
 .milestone-row .btn-danger {
-  opacity: 0; transition: opacity 0.12s; flex-shrink: 0;
+  position: absolute; top: -8px; right: -8px; margin: 0;
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--inset); color: #FF6B6B;
+  border: 1px solid var(--grid); border-radius: 50%;
+  font-size: 11px; line-height: 1;
+  opacity: 0; transition: opacity 0.12s;
+  z-index: 5;
 }
 .milestone-row:hover .btn-danger { opacity: 1; }
-.milestone-drag-handle {
-  display: flex; align-items: center; justify-content: center;
-  width: 14px; color: var(--dim); cursor: grab; user-select: none;
-  font-size: 14px; flex-shrink: 0; opacity: 0.5;
-}
-.milestone-drag-handle:active { cursor: grabbing; }
-.milestone-row:hover .milestone-drag-handle { opacity: 1; }
 
 /* Milestone add/edit modal */
 #milestone-overlay {

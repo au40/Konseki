@@ -2544,7 +2544,6 @@ function renderMilestonesList(el, milestones) {
     row.dataset.milestoneId = m.id;
 
     row.innerHTML = `
-      <span class="milestone-drag-handle" title="Drag to reorder">⋮⋮</span>
       <span class="milestone-index">${idx + 1}</span>
       <div class="milestone-main">
         <span class="milestone-name">${escHtml(m.name)}</span>
@@ -2555,7 +2554,6 @@ function renderMilestonesList(el, milestones) {
 
     row.addEventListener('click', e => {
       if (e.target.closest('.btn-danger')) return;
-      if (e.target.closest('.milestone-drag-handle')) return;
       openMilestoneDetail(m.id);
     });
     row.querySelector('.btn-danger').addEventListener('click', async e => {
