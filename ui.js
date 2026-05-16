@@ -665,6 +665,17 @@ function bucketDaily(daily, gran) {
   };
 }
 
+function bucketByDayOfWeek(daily) {
+  const labels = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+  const secs   = [0,0,0,0,0,0,0];
+  daily.forEach(r => {
+    const [y, m, d] = r.date.split('-').map(Number);
+    const wd = (new Date(y, m - 1, d).getDay() + 6) % 7; // Mon=0 .. Sun=6
+    secs[wd] += r.seconds;
+  });
+  return { labels, secs };
+}
+
 // ── Stats ──────────────────────────────────────────────────────────────────
 async function loadStats(range_val) {
   await refreshStatsHeatmap();
@@ -742,6 +753,7 @@ function renderStats(d) {
   document.getElementById('es-consistency-sub').textContent = d.active_days ? `${d.active_days}/${d.window_days}d active` : '';
   renderDailyChart(d.daily);
   renderDailyCharsChart(d.daily);
+  renderDowChart(d.daily);
   renderDonutChart(d.activity);
 }
 
@@ -961,6 +973,34 @@ function renderDailyCharsChart(daily) {
       scales: {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
         y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
+      }
+    }
+  });
+}
+
+function renderDowChart(daily) {
+  const { labels, secs } = bucketByDayOfWeek(daily);
+  if (!secs.some(s => s > 0)) { destroyChart('dow'); return; }
+  const values = secs.map(s => s / 3600);
+
+  upsertChart('dow', 'chart-dow', {
+    type: 'bar',
+    data: { labels, datasets: [{
+      label: 'Time', data: values, backgroundColor: '#5B8CFF',
+      borderRadius: 3, borderSkipped: false,
+    }]},
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: c => labels[c[0].dataIndex],
+          label: c => fmtTime(secs[c.dataIndex])
+        } }
+      },
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => `${v.toFixed(1)}h`}, afterFit: s => { s.width = 62; } },
       }
     }
   });

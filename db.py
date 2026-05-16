@@ -530,12 +530,16 @@ def get_all_time_totals():
     """)
 
 def get_range_totals(n):
-    _t = "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0)"
-    _d = "COUNT(DISTINCT CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN session_date END)"
-    if n is None:
-        return _q1(f"SELECT COALESCE(SUM(chars_read),0),{_t},{_d} FROM sessions")
-    since = (get_today_date() - timedelta(days=n - 1)).isoformat()
-    return _q1(f"SELECT COALESCE(SUM(chars_read),0),{_t},{_d} FROM sessions WHERE session_date>=?", since)
+    """(chars, secs, active_days) over the range, GSM-attribution-adjusted.
+    Raw per-date sums mis-count at the window's lower edge (time displaced
+    across the `since` boundary) and leak rollover-window future-dated rows;
+    _adjusted_day_totals reconciles both and clamps to logical today."""
+    since = None if n is None else (get_today_date() - timedelta(days=n - 1)).isoformat()
+    tot = _adjusted_day_totals(since)
+    chars = sum(c for c, s in tot.values())
+    secs  = sum(s for c, s in tot.values())
+    active = sum(1 for c, s in tot.values() if s > 0 or c > 0)
+    return (chars, secs, active)
 
 def get_recent_sessions(limit=30):
     # Mirrors get_today_stats attribution handling, but generalized across every date
@@ -642,12 +646,13 @@ def get_activity_breakdown():
     """) if r[1] > 0]
 
 def get_streak():
-    rows = _q("SELECT DISTINCT session_date FROM sessions "
-              "WHERE time_seconds>0 AND (time_excluded IS NULL OR time_excluded=0) "
-              "ORDER BY session_date DESC")
-    if not rows:
+    # Active day = a logical day with non-excluded time after GSM attribution.
+    # Raw DISTINCT session_date misses a day whose only activity is GSM time
+    # that landed on a different calendar date during the rollover window.
+    active = [d for d, s in _adjusted_day_secs().items() if s > 0]
+    if not active:
         return 0, 0
-    sd  = sorted({datetime.strptime(r[0], "%Y-%m-%d").date() for r in rows})
+    sd  = sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in active)
     cur = 0
     chk = get_today_date()
     for d in reversed(sd):
@@ -774,12 +779,75 @@ def get_series_data():
 
 
 # ── Extra stats ───────────────────────────────────────────────────────────────
-def get_extra_stats():
-    best_day = _q1(
-        "SELECT session_date, SUM(time_seconds) as t "
-        "FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0) "
-        "GROUP BY session_date ORDER BY t DESC LIMIT 1"
+def _adjusted_day_totals(since=None):
+    """{date: (adj_chars, adj_secs)} applying GSM rollover attribution.
+
+    Net-adjustment-per-day pattern (see CLAUDE.md): a logical day's GSM
+    chars/time are split across two calendar session_dates during the rollover
+    window, so the raw per-day sum is wrong. Mirrors get_daily_time_series:
+    secs exclude time_excluded rows, chars include all rows (time_excluded
+    suppresses overlap time, not chars). Candidate dates include attribution
+    rollover_dates so a fully-displaced day still appears; clamped to logical
+    today so rollover-window future-dated rows don't leak."""
+    _, today = window_bounds()
+    where, params = "", []
+    if since:
+        where = "WHERE session_date>=?"
+        params.append(since)
+    rows = _q(
+        f"SELECT session_date, "
+        f"COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0), "
+        f"COALESCE(SUM(chars_read),0) "
+        f"FROM sessions {where} GROUP BY session_date", *params
     )
+    raw = {r[0]: (r[2], r[1]) for r in rows}  # date -> (chars, secs)
+    att = _q(
+        "SELECT DISTINCT rollover_date FROM gsm_rollover_attributions "
+        "WHERE rollover_date<>source_date" + (" AND rollover_date>=?" if since else ""),
+        *([since] if since else [])
+    )
+    out = {}
+    for d in set(raw) | {r[0] for r in att}:
+        if d > today:
+            continue
+        rc, rs = raw.get(d, (0, 0))
+        adj_c, adj_t, _ = get_gsm_day_adjustment(d)
+        out[d] = (max(0, rc + adj_c), max(0, rs + adj_t))
+    return out
+
+
+def _adjusted_day_secs(since=None):
+    return {d: s for d, (c, s) in _adjusted_day_totals(since).items()}
+
+
+def _best_day(secs):
+    """(date, secs) of the max day, given a {date: adjusted_secs} map."""
+    best = None
+    for d, s in secs.items():
+        if best is None or s > best[1]:
+            best = (d, s)
+    return best
+
+
+def _best_week(secs):
+    """(week_start_str, secs) of the best Mon-anchored ISO week, given a
+    {date: adjusted_secs} map. Mirrors get_weekly_summary's attribution
+    handling; the raw GROUP BY session_date version under-counts/misattributes
+    during the rollover window exactly like _best_day did."""
+    week_totals = {}
+    for d, s in secs.items():
+        dt = datetime.strptime(d, "%Y-%m-%d").date()
+        wk = dt - timedelta(days=dt.weekday())
+        week_totals[wk] = week_totals.get(wk, 0) + s
+    if not week_totals:
+        return None, 0
+    best_wk = max(week_totals, key=week_totals.get)
+    return str(best_wk), week_totals[best_wk]
+
+
+def get_extra_stats():
+    secs = _adjusted_day_secs()
+    best_day = _best_day(secs)
     reading = _q1(
         "SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
         "WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0"
@@ -796,11 +864,8 @@ def get_extra_stats():
     consistency = 0
     total_tracked_days = 0
     if first:
-        _, today = window_bounds()
         total_tracked_days = (get_today_date() - datetime.strptime(first, "%Y-%m-%d").date()).days + 1
-        active_days = (_q1(
-            "SELECT COUNT(DISTINCT session_date) FROM sessions WHERE time_seconds>0 AND session_date<=?", today
-        ) or (0,))[0] or 0
+        active_days = sum(1 for s in secs.values() if s > 0)
         consistency = round(active_days / total_tracked_days * 100, 1) if total_tracked_days > 0 else 0
 
     longest_session = (_q1(
@@ -810,23 +875,7 @@ def get_extra_stats():
 
     total_chars = (_q1("SELECT COALESCE(SUM(chars_read),0) FROM sessions") or (0,))[0]
 
-    best_week_start = None
-    best_week_secs  = 0
-    if first:
-        rows = _q(
-            "SELECT session_date, SUM(time_seconds) FROM sessions "
-            "WHERE (time_excluded IS NULL OR time_excluded=0) "
-            "GROUP BY session_date ORDER BY session_date"
-        )
-        week_totals = {}
-        for row in rows:
-            d  = datetime.strptime(row[0], "%Y-%m-%d").date()
-            wk = d - timedelta(days=d.weekday())
-            week_totals[wk] = week_totals.get(wk, 0) + row[1]
-        if week_totals:
-            best_wk = max(week_totals, key=week_totals.get)
-            best_week_start = str(best_wk)
-            best_week_secs  = week_totals[best_wk]
+    best_week_start, best_week_secs = _best_week(secs)
 
     return {
         "best_day_date":          best_day[0] if best_day else None,
@@ -845,7 +894,10 @@ def get_extra_stats():
 def get_range_extra_stats(n):
     """Range-filtered subset of extra stats used by the Stats page cards."""
     since, today = window_bounds(n)
-    base  = "(time_excluded IS NULL OR time_excluded=0)"
+    secs = _adjusted_day_secs(since)
+    best_day = _best_day(secs)
+    best_week_start, best_week_secs = _best_week(secs)
+    active_days = sum(1 for s in secs.values() if s > 0)
 
     if since:
         reading = _q1(
@@ -853,56 +905,18 @@ def get_range_extra_stats(n):
             f"WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0 "
             f"AND session_date>=?", since
         )
-        best_day = _q1(
-            f"SELECT session_date, SUM(time_seconds) as t "
-            f"FROM sessions WHERE {base} AND session_date>=? "
-            f"GROUP BY session_date ORDER BY t DESC LIMIT 1", since
-        )
-        rows = _q(
-            f"SELECT session_date, SUM(time_seconds) FROM sessions "
-            f"WHERE {base} AND session_date>=? "
-            f"GROUP BY session_date ORDER BY session_date", since
-        )
-        active_days = (_q1(
-            "SELECT COUNT(DISTINCT session_date) FROM sessions "
-            "WHERE time_seconds>0 AND session_date>=? AND session_date<=?", since, today
-        ) or (0,))[0] or 0
         window = n
     else:
         reading = _q1(
             f"SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
             f"WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0"
         )
-        best_day = _q1(
-            f"SELECT session_date, SUM(time_seconds) as t "
-            f"FROM sessions WHERE {base} "
-            f"GROUP BY session_date ORDER BY t DESC LIMIT 1"
-        )
-        rows = _q(
-            f"SELECT session_date, SUM(time_seconds) FROM sessions "
-            f"WHERE {base} GROUP BY session_date ORDER BY session_date"
-        )
         first = (_q1("SELECT MIN(session_date) FROM sessions") or (None,))[0]
-        active_days = (_q1(
-            "SELECT COUNT(DISTINCT session_date) FROM sessions WHERE time_seconds>0 AND session_date<=?", today
-        ) or (0,))[0] or 0
         window = (get_today_date() - datetime.strptime(first, "%Y-%m-%d").date()).days + 1 if first else 1
 
     chars_per_hour = 0
     if reading and reading[1] and reading[1] > 0:
         chars_per_hour = int((reading[0] or 0) / reading[1] * 3600)
-
-    best_week_start, best_week_secs = None, 0
-    if rows:
-        week_totals = {}
-        for row in rows:
-            d  = datetime.strptime(row[0], "%Y-%m-%d").date()
-            wk = d - timedelta(days=d.weekday())
-            week_totals[wk] = week_totals.get(wk, 0) + row[1]
-        if week_totals:
-            best_wk        = max(week_totals, key=week_totals.get)
-            best_week_start = str(best_wk)
-            best_week_secs  = week_totals[best_wk]
 
     consistency = round(active_days / window * 100, 1) if window > 0 else 0
 
