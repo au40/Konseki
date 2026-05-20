@@ -1,5 +1,5 @@
 """
-tracker.py  —  Immersion Tracker entry point
+tracker.py  —  Konseki entry point
 Serves ui.html via pywebview. The Api class exposes all JS-callable methods,
 delegating to db.py (data layer) and imports.py (external integrations).
 """
@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import webview
 import sqlite3
 import json
@@ -50,10 +51,14 @@ from ext_server import ExtServer
 
 # ── Tray icon ─────────────────────────────────────────────────────────────────
 def _make_tray_image():
+    tray_png = Path(__file__).parent / "assets" / "tray.png"
+    if tray_png.exists():
+        return Image.open(tray_png)
+    # fallback if assets are missing
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.ellipse([4, 4, 60, 60], fill="#9B9BC7")
+    d.ellipse([4, 4, 60, 60], fill="#5B8CFF")
     return img
 
 
@@ -99,19 +104,40 @@ class SessionHandler(FileSystemEventHandler):
 class GsmWalHandler(FileSystemEventHandler):
     """Watches GSM's WAL file; triggers a GSM pull after writes settle.
 
-    After the debounced pull fires, arms a second 'settle' pull at +settle_secs
-    to catch GSM's tail-time/AFK accumulator updates that flush to disk after
-    the last char-arrival WAL write. New WAL activity cancels the settle."""
+    Three pull triggers:
+      1. Debounced pull at +debounce_secs once writes settle (steady state).
+      2. A 'settle' pull at +settle_secs after the debounced pull, to catch
+         GSM's tail-time/AFK accumulator updates that flush to disk after the
+         last char-arrival WAL write. New WAL activity cancels the settle.
+      3. An immediate 'GSM opened' pull when a WAL write arrives after a long
+         idle gap (>open_gap_secs). On reopen GSM tends to flush the previous
+         session's pending tail time before the first new line arrives; pulling
+         in that quiet window lets refresh_gsm_attribution_tail grow the prior
+         day's attribution while its char count is still unchanged. The chars
+         guard in that function keeps this safe — if new reading has already
+         bumped the count, the update no-ops instead of misattributing it.
+         Set open_gap_secs=0 to disable this trigger.
+
+    All pulls run through _pull_lock so concurrent triggers never write
+    tracker.db at the same time."""
 
     _WATCHED = {"gsm.db-wal", "gsm.db"}
 
-    def __init__(self, cb, debounce_secs=60, settle_secs=180):
-        self._cb = cb
+    def __init__(self, cb, debounce_secs=60, settle_secs=180, open_gap_secs=0):
+        self._cb_raw = cb
         self._debounce_secs = debounce_secs
         self._settle_secs = settle_secs
+        self._open_gap_secs = open_gap_secs
         self._timer = None
         self._settle_timer = None
         self._lock = threading.Lock()
+        self._pull_lock = threading.Lock()
+        self._last_event = None
+
+    def _cb(self):
+        # Serialize: debounce / settle / open-gap triggers must not overlap.
+        with self._pull_lock:
+            self._cb_raw()
 
     def _fire(self):
         self._cb()
@@ -124,7 +150,13 @@ class GsmWalHandler(FileSystemEventHandler):
             self._settle_timer = t
 
     def _schedule(self):
+        now = time.monotonic()
         with self._lock:
+            reopened = self._open_gap_secs > 0 and (
+                self._last_event is None
+                or (now - self._last_event) > self._open_gap_secs
+            )
+            self._last_event = now
             if self._timer:
                 self._timer.cancel()
             if self._settle_timer:
@@ -133,6 +165,10 @@ class GsmWalHandler(FileSystemEventHandler):
             t.daemon = True
             t.start()
             self._timer = t
+        if reopened:
+            # GSM likely just (re)opened — pull now, before the first new line
+            # inflates today's char count, to catch the prior session's tail.
+            threading.Thread(target=self._cb, daemon=True).start()
 
     def on_modified(self, e):
         if not e.is_directory and os.path.basename(e.src_path) in self._WATCHED:
@@ -616,6 +652,7 @@ class Api:
             "ext_token":        _get_or_create_token(),
             "gsm_debounce_secs": int(get_setting("gsm_debounce_secs", "60")),
             "gsm_settle_secs":  int(get_setting("gsm_settle_secs", "180")),
+            "gsm_open_gap_secs": int(get_setting("gsm_open_gap_secs", "0")),
             "first_run_complete":         get_setting("first_run_complete", "0") == "1",
             "gsm_history_include_time":   get_setting("gsm_history_include_time", "0") == "1",
             "ttsu_history_include_time":  get_setting("ttsu_history_include_time", "0") == "1",
@@ -642,6 +679,8 @@ class Api:
             gsm_wal_handler._debounce_secs = int(data["gsm_debounce_secs"])
         if "gsm_settle_secs" in data and gsm_wal_handler is not None:
             gsm_wal_handler._settle_secs = int(data["gsm_settle_secs"])
+        if "gsm_open_gap_secs" in data and gsm_wal_handler is not None:
+            gsm_wal_handler._open_gap_secs = int(data["gsm_open_gap_secs"])
         return {"ok": True}
 
     # ── Internal ──────────────────────────────────────────────────────────────
@@ -710,12 +749,14 @@ def main():
                 api._notify()
         debounce = int(get_setting("gsm_debounce_secs", "60"))
         settle   = int(get_setting("gsm_settle_secs", "180"))
+        open_gap = int(get_setting("gsm_open_gap_secs", "0"))
         gsm_wal_handler = GsmWalHandler(_on_gsm_change, debounce_secs=debounce,
-                                        settle_secs=settle)
+                                        settle_secs=settle, open_gap_secs=open_gap)
         gsm_observer = Observer()
         gsm_observer.schedule(gsm_wal_handler, gsm_dir, recursive=False)
         gsm_observer.start()
-        print(f"[gsm-watch] Watching {gsm_dir} (debounce={debounce}s, settle={settle}s)")
+        print(f"[gsm-watch] Watching {gsm_dir} (debounce={debounce}s, "
+              f"settle={settle}s, open_gap={open_gap}s)")
     else:
         print(f"[gsm-watch] {gsm_dir} not found — watcher disabled")
 
@@ -765,7 +806,11 @@ def main():
         win.events.closing += _on_closing
 
     try:
-        webview.start(debug=bool(os.environ.get("IMMERSION_TRACKER_DATA_DIR")))
+        app_icon = Path(__file__).parent / "assets" / "icon.ico"
+        webview.start(
+            debug=bool(os.environ.get("IMMERSION_TRACKER_DATA_DIR")),
+            icon=str(app_icon) if app_icon.exists() else None,
+        )
     finally:
         observer.stop()
         observer.join()

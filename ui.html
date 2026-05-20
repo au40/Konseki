@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Immersion Tracker</title>
+<title>Konseki</title>
 <script src="assets/chart.umd.min.js"></script>
 <link rel="stylesheet" href="assets/dark.min.css">
 <script src="assets/flatpickr.min.js"></script>
@@ -15,8 +15,7 @@
   <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
   <nav class="sidebar">
     <div class="sidebar-logo">
-      <div class="icon">⬡</div>
-      <div class="name">Immersion<br>Tracker</div>
+      <div class="name-jp">痕跡</div>
     </div>
     <div class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
       <span class="nav-icon">◈</span>Dashboard
@@ -529,7 +528,7 @@
       <div class="settings-section">
         <div class="card">
           <h3>Browser extension</h3>
-          <p class="muted" style="margin-bottom:12px">Copy these into the Immersion Tracker Sync extension popup.</p>
+          <p class="muted" style="margin-bottom:12px">Copy these into the Konseki Sync extension popup.</p>
           <div class="settings-row" style="margin-bottom:8px">
             <label style="min-width:48px;color:var(--text-muted);font-size:12px">Port</label>
             <input type="text" id="ext-port" readonly style="max-width:90px;font-family:monospace;font-size:13px">
@@ -562,6 +561,13 @@
           <div class="settings-row">
             <input type="number" id="gsm-debounce" min="5" max="3600" placeholder="60" onchange="saveSettings()" style="max-width:100px">
             <span style="color:var(--text-muted);font-size:13px">seconds</span>
+          </div>
+
+          <label style="display:block;margin:16px 0 6px;font-size:13px">GSM reopen catch-up gap <span style="color:var(--text-muted);font-weight:normal">(experimental)</span></label>
+          <p class="muted" style="margin-bottom:8px">Off by default. If GSM was idle this long before a new write, pull immediately on the next write — catches the previous session's tail reading time that flushed after the app closed. Usually unnecessary: the normal settle pull already handles it. Set a value (e.g. 300) to enable.</p>
+          <div class="settings-row">
+            <input type="number" id="gsm-open-gap" min="0" max="86400" placeholder="0" onchange="saveSettings()" style="max-width:100px">
+            <span style="color:var(--text-muted);font-size:13px">seconds (0 = off)</span>
           </div>
         </div>
       </div>
@@ -671,7 +677,7 @@
 <!-- ── First-run welcome modal ─────────────────────────────────────────── -->
 <div id="firstrun-overlay" style="display:none">
   <div id="firstrun-dialog" class="card">
-    <h2 style="margin:0 0 10px">Welcome to Immersion Tracker</h2>
+    <h2 style="margin:0 0 10px">Welcome to Konseki</h2>
     <p style="font-size:13px;color:var(--text);line-height:1.6;margin:0 0 18px">
       Are you a first-time user? We can walk you through importing data from a previous tracker, GameSentenceMiner, and ッツ Reader.
     </p>

@@ -1150,7 +1150,7 @@ function makeGoalCard(g) {
   let chunkHtml = '';
   if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
     let chunkNeeded, originalChunk, periodDone, periodLabel, periodUnit;
-    let barTarget, tickCount;
+    let barTarget, tickCount, expectedTickIdx;
     const [_y, _m, _d] = today().split('-').map(Number);
     const now      = new Date(_y, _m - 1, _d);
     const shortFmt = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -1164,6 +1164,7 @@ function makeGoalCard(g) {
       periodRange   = shortFmt(now);
       barTarget     = chunkNeeded;
       tickCount     = 0;
+      expectedTickIdx = 0;
     } else if (goalPaceView === 'weekly') {
       chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 7);
       originalChunk = g.target / Math.max(1, g.total_days / 7);
@@ -1175,6 +1176,7 @@ function makeGoalCard(g) {
       const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
       periodRange   = `${shortFmt(mon)} – ${shortFmt(sun)}`;
       tickCount     = g.week_period_days || 7;
+      expectedTickIdx = g.week_day_index || 0;
       barTarget     = chunkNeeded * (tickCount / 7);
     } else {
       chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 30.44);
@@ -1184,6 +1186,7 @@ function makeGoalCard(g) {
       periodUnit    = '/month';
       periodRange   = now.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
       tickCount     = g.month_period_days || 30;
+      expectedTickIdx = g.month_day_index || 0;
       barTarget     = chunkNeeded * (tickCount / 30.44);
     }
     const behind   = chunkNeeded > originalChunk * 1.05;
@@ -1194,6 +1197,9 @@ function makeGoalCard(g) {
     const barColor  = periodPct >= 100 ? '#4ECBA0' : '#5B8CFF';
     const tickStyle = tickCount > 1 ? `--tick-step:${(100/tickCount).toFixed(4)}%` : '';
     const ticksHtml = tickCount > 1 ? `<div class="daily-bar-ticks" style="${tickStyle}"></div>` : '';
+    const expectedTickHtml = (tickCount > 1 && expectedTickIdx > 0 && expectedTickIdx < tickCount)
+      ? `<div class="daily-bar-expected-tick" style="left:${(expectedTickIdx * 100 / tickCount).toFixed(4)}%" title="Expected by end of today"></div>`
+      : '';
     chunkHtml = `
       <div class="goal-chunk" style="color:${color}">
         <span>${icon} ${fmtMetric(chunkNeeded)}${periodUnit} to finish on time</span>
@@ -1203,6 +1209,7 @@ function makeGoalCard(g) {
         <div class="daily-bar-track">
           <div class="daily-bar-fill" style="width:${periodPct}%;background:${barColor}"></div>
           ${ticksHtml}
+          ${expectedTickHtml}
         </div>
       </div>
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${periodRange}</div>`;
@@ -1230,10 +1237,16 @@ function makeGoalCard(g) {
         <div class="progress-fill" style="width:${pct}%;background:${fillColor}"></div>
       </div>
       ${(() => {
-        const total = Math.max(1, g.total_days);
-        const elapsed = Math.max(0, Math.min(total, total - g.days_left));
+        // Inclusive day counting so this lines up with the period bar's red
+        // "expected" tick (db.py week_day_index/month_day_index): today counts
+        // as elapsed and the deadline day counts in the total → the marker
+        // means "by end of today", not "by start of today".
+        const total = Math.max(1, g.total_days) + 1;
+        const elapsed = Math.max(0, Math.min(total, (g.total_days - g.days_left) + 1));
         const expPct = (elapsed / total) * 100;
-        return `<div class="progress-expected" style="left:${expPct}%" title="Expected: ${Math.round(expPct)}%"></div>`;
+        // Match the right-side progress %: 1-decimal precision, trailing zeros dropped.
+        const expDisp = Math.round(expPct * 10) / 10;
+        return `<div class="progress-expected" style="left:${expPct}%" title="Expected by end of today: ${expDisp}%"></div>`;
       })()}
     </div>
     <div class="goal-meta">
@@ -1368,14 +1381,27 @@ async function doFinishGoal(id) {
 }
 
 // ── Media (grid) ────────────────────────────────────────────────────────────
+// The Media page has four mutually-exclusive sub-views. Switching must hide ALL
+// the others — milestone-view was added late and several callers forgot it,
+// leaving its stat/graph page stacked under the next view.
+function showMediaView(name) {
+  const views = {
+    grid:      'media-grid-view',
+    detail:    'media-detail-view',
+    series:    'media-series-view',
+    milestone: 'media-milestone-view',
+  };
+  for (const [key, id] of Object.entries(views)) {
+    document.getElementById(id).style.display = key === name ? 'block' : 'none';
+  }
+}
+
 async function loadMedia() {
   destroyChart('detail');
   destroyChart('detail-time');
   currentDetailTitle = null;
   currentSeriesId    = null;
-  document.getElementById('media-grid-view').style.display   = 'block';
-  document.getElementById('media-detail-view').style.display  = 'none';
-  document.getElementById('media-series-view').style.display  = 'none';
+  showMediaView('grid');
 
   [mediaAllData, seriesData] = await Promise.all([
     window.pywebview.api.get_media(),
@@ -1552,8 +1578,7 @@ async function openSeriesDetail(seriesId) {
   currentSeriesId = seriesId;
   const s = seriesData.find(x => x.id === seriesId);
   if (!s) return;
-  document.getElementById('media-grid-view').style.display  = 'none';
-  document.getElementById('media-series-view').style.display = 'block';
+  showMediaView('series');
   const memberDetails = await Promise.all(
     s.members.map(m => window.pywebview.api.get_title_detail(m.title))
   );
@@ -1816,9 +1841,7 @@ function closeSeriesDetail() {
   destroyChart('detail-time');
   currentSeriesId    = null;
   currentDetailTitle = null;
-  document.getElementById('media-series-view').style.display = 'none';
-  document.getElementById('media-detail-view').style.display = 'none';
-  document.getElementById('media-grid-view').style.display   = 'block';
+  showMediaView('grid');
   renderMediaGrid();
 }
 
@@ -1841,9 +1864,7 @@ async function openMediaDetail(title) {
   if (!detail) return;
   currentDetailTitle = title;
 
-  document.getElementById('media-grid-view').style.display   = 'none';
-  document.getElementById('media-series-view').style.display = 'none';
-  document.getElementById('media-detail-view').style.display = 'block';
+  showMediaView('detail');
   renderMediaDetail(detail);
 }
 
@@ -1854,13 +1875,12 @@ function closeMediaDetail() {
   destroyChart('detail-speed-rolling');
   currentDetailTitle = null;
   currentMilestones  = [];
-  document.getElementById('media-detail-view').style.display  = 'none';
   // If we came from a series view, go back to it; otherwise go to grid
   if (currentSeriesId !== null) {
     const s = seriesData.find(x => x.id === currentSeriesId);
     if (s) { openSeriesDetail(currentSeriesId); return; }
   }
-  document.getElementById('media-grid-view').style.display = 'block';
+  showMediaView('grid');
 }
 
 function renderMediaDetail(d) {
@@ -2003,7 +2023,7 @@ function renderDetailChart(daily, isGSM) {
     labels    = daily.map(r => r.date.slice(5));
     charVals  = daily.map(r => r.chars);
     timeVals  = daily.map(r => r.seconds);
-    speedVals = daily.map(r => r.speed || 0);
+    speedVals = daily.map(r => r.seconds > 0 && r.chars > 0 ? r.chars / (r.seconds / 3600) : 0);
   }
 
   const twSpeedVals = twRolling(charVals, timeVals, 7);
@@ -2247,6 +2267,7 @@ async function loadSettings() {
   document.getElementById('gsm-url').value             = s.gsm_url || 'http://localhost:7275/api/stats';
   document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
   document.getElementById('gsm-debounce').value        = s.gsm_debounce_secs || 60;
+  document.getElementById('gsm-open-gap').value         = s.gsm_open_gap_secs ?? 0;
   document.getElementById('ext-port').value            = s.ext_port  || 18463;
   document.getElementById('ext-token').value           = s.ext_token || '';
   const gsmTimeBox  = document.getElementById('gsm-history-include-time');
@@ -2341,8 +2362,10 @@ async function saveSettings() {
   const rollover         = parseInt(document.getElementById('rollover-hour').value) || 0;
   const gsm_url          = document.getElementById('gsm-url').value.trim();
   const gsm_debounce_secs = parseInt(document.getElementById('gsm-debounce').value) || 60;
-  appSettings = { ...appSettings, rollover_hour: rollover, gsm_url, gsm_debounce_secs };
-  await window.pywebview.api.save_settings({ rollover_hour: rollover, gsm_url, gsm_debounce_secs });
+  const gapRaw = document.getElementById('gsm-open-gap').value;
+  const gsm_open_gap_secs = gapRaw === '' ? 0 : (parseInt(gapRaw) || 0);
+  appSettings = { ...appSettings, rollover_hour: rollover, gsm_url, gsm_debounce_secs, gsm_open_gap_secs };
+  await window.pywebview.api.save_settings({ rollover_hour: rollover, gsm_url, gsm_debounce_secs, gsm_open_gap_secs });
   scheduleRolloverRefresh();
   setStatus('Settings saved');
 }
@@ -2747,10 +2770,7 @@ async function openMilestoneDetail(milestoneId) {
   if (!detail) return;
   currentMilestoneId = milestoneId;
 
-  document.getElementById('media-grid-view').style.display      = 'none';
-  document.getElementById('media-series-view').style.display    = 'none';
-  document.getElementById('media-detail-view').style.display    = 'none';
-  document.getElementById('media-milestone-view').style.display = 'block';
+  showMediaView('milestone');
   renderMilestoneDetail(detail);
 }
 
@@ -2760,13 +2780,8 @@ function closeMilestoneDetail() {
   destroyChart('milestone-speed');
   destroyChart('milestone-speed-rolling');
   currentMilestoneId = null;
-  document.getElementById('media-milestone-view').style.display = 'none';
   // Return to parent media detail
-  if (currentDetailTitle) {
-    document.getElementById('media-detail-view').style.display = 'block';
-  } else {
-    document.getElementById('media-grid-view').style.display = 'block';
-  }
+  showMediaView(currentDetailTitle ? 'detail' : 'grid');
 }
 
 function renderMilestoneDetail(d) {

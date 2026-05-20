@@ -1,5 +1,5 @@
 """
-db.py  —  Database layer for Immersion Tracker
+db.py  —  Database layer for Konseki
 All schema setup, settings helpers, ingestion, and query functions.
 """
 
@@ -11,7 +11,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
-APP_NAME     = "Immersion Tracker"
+APP_NAME     = "Konseki"
 DATA_DIR     = Path(os.environ.get("IMMERSION_TRACKER_DATA_DIR") or (Path.home() / "immersion-tracker"))
 SESSIONS_DIR = DATA_DIR / "sessions"
 DB_PATH      = DATA_DIR / "tracker.db"
@@ -1028,6 +1028,7 @@ def db_get_goal_progress():
         week_start_d   = max(week_cal_start, start_d)
         week_end_d     = min(week_cal_end, deadline_d)
         week_period_days = max(1, (week_end_d - week_start_d).days + 1)
+        week_day_index   = max(1, min(week_period_days, (today_d - week_start_d).days + 1))
         week_sum_end_d   = min(week_end_d, today_d)
         week_start_str   = week_start_d.strftime("%Y-%m-%d")
         week_sum_end_str = week_sum_end_d.strftime("%Y-%m-%d")
@@ -1045,6 +1046,7 @@ def db_get_goal_progress():
         month_start_d    = max(month_cal_start, start_d)
         month_end_d      = min(month_cal_end, deadline_d)
         month_period_days = max(1, (month_end_d - month_start_d).days + 1)
+        month_day_index   = max(1, min(month_period_days, (today_d - month_start_d).days + 1))
         month_sum_end_d   = min(month_end_d, today_d)
         month_start_str   = month_start_d.strftime("%Y-%m-%d")
         month_sum_end_str = month_sum_end_d.strftime("%Y-%m-%d")
@@ -1106,6 +1108,8 @@ def db_get_goal_progress():
             "month_completed":  month_completed,
             "week_period_days":  week_period_days,
             "month_period_days": month_period_days,
+            "week_day_index":    week_day_index,
+            "month_day_index":   month_day_index,
             "is_complete":     completed >= g["target"],
             "is_overdue":      days_left == 0 and completed < g["target"],
         })
@@ -1192,21 +1196,16 @@ def _compute_title_core(title):
             in_by_rd.setdefault(rd, []).append((sd, c, t, cards))
 
     daily_map = {}
-    def _bump(d, chars, secs, cards, sentences, speed):
-        v = daily_map.setdefault(d, {"chars": 0, "secs": 0, "cards": 0, "sentences": 0,
-                                      "spd_w": 0, "spd_t": 0})
+    def _bump(d, chars, secs, cards, sentences):
+        v = daily_map.setdefault(d, {"chars": 0, "secs": 0, "cards": 0, "sentences": 0})
         v["chars"]     += chars
         v["secs"]      += secs
         v["cards"]     += cards
         v["sentences"] += sentences
-        if speed > 0 and secs > 0:
-            v["spd_w"] += speed * secs
-            v["spd_t"] += secs
 
     for s in sessions:
         sd = s[1]
         chars, secs = s[4], s[6]
-        speed = s[7] or 0
         cards = s[8] or 0
         sentences = s[9] or 0
         if s[2] == 'gsm' and sd in out_by_sd:
@@ -1215,20 +1214,36 @@ def _compute_title_core(title):
             secs  = max(0.0, secs - ot)
             cards = max(0, cards - ocards)
         if chars > 0 or secs > 0 or cards > 0:
-            _bump(sd, chars, secs, cards, sentences, speed)
+            _bump(sd, chars, secs, cards, sentences)
 
     for rd, attrs in in_by_rd.items():
         for sd, c, t, cards in attrs:
             if c <= 0 and t <= 0 and cards <= 0:
                 continue
-            src = next((s for s in sessions if s[1] == sd and s[2] == 'gsm'), None)
-            spd = src[7] if src and src[7] else 0
-            _bump(rd, int(c), float(t), int(cards), 0, float(spd))
+            _bump(rd, int(c), float(t), int(cards), 0)
 
+    # Total cards counts EVERY day's cards, even fully-displaced days that get
+    # dropped below — the cards were mined reading this title, so they belong in
+    # the title total regardless of which logical day the chars landed on.
+    total_cards = sum(int(v["cards"]) for v in daily_map.values())
+
+    # Per-day speed derived from post-attribution chars/time (Method A).
+    # Using stored `reading_speed` directly would lie any time the attribution
+    # deduction had different chars/time ratios than the row it modified — the
+    # row's reading_speed describes the pre-deduction blend, not the remainder.
+    #
+    # Drop days fully displaced by rollover attribution (0 chars AND ~0 secs):
+    # all their reading moved to another logical day, so emitting a 0/0 point
+    # would leave an empty gap on the reading graphs. This can happen when the
+    # attribution moved a day's whole chars/time but not its mined cards (cards
+    # stay on the original date), leaving a cards-only husk. Mirrors
+    # get_today_stats' all-zero-row drop.
     daily = []
     for d in sorted(daily_map.keys()):
         v = daily_map[d]
-        spd = (v["spd_w"] / v["spd_t"]) if v["spd_t"] > 0 else 0
+        if v["chars"] == 0 and v["secs"] < 1.0:
+            continue
+        spd = (v["chars"] / (v["secs"] / 3600)) if v["secs"] > 0 and v["chars"] > 0 else 0
         daily.append({
             "date":      d,
             "chars":     int(v["chars"]),
@@ -1240,10 +1255,7 @@ def _compute_title_core(title):
 
     total_chars = sum(d["chars"]   for d in daily)
     total_secs  = sum(d["seconds"] for d in daily)
-    total_cards = sum(d["cards"]   for d in daily)
-    spd_total_time = sum(d["seconds"] for d in daily if d["speed"] > 0)
-    avg_speed      = (sum(d["speed"] * d["seconds"] for d in daily if d["speed"] > 0)
-                      / spd_total_time) if spd_total_time > 0 else 0
+    avg_speed   = (total_chars / (total_secs / 3600)) if total_secs > 0 and total_chars > 0 else 0
     days_count = len(daily)
     first_date = daily[0]["date"]  if daily else (sessions[0][1]  if sessions else "")
     last_date  = daily[-1]["date"] if daily else (sessions[-1][1] if sessions else "")
@@ -1486,9 +1498,9 @@ def db_get_milestone_detail(milestone_id):
 
     total_chars = sum(d["chars"]   for d in sliced_daily)
     total_secs  = sum(d["seconds"] for d in sliced_daily)
-    spd_total_time = sum(d["seconds"] for d in sliced_daily if d["speed"] > 0)
-    avg_speed = (sum(d["speed"] * d["seconds"] for d in sliced_daily if d["speed"] > 0)
-                 / spd_total_time) if spd_total_time > 0 else 0
+    # Method A (chars/time) for consistency with _compute_title_core and the
+    # milestone chart's per-day speed line — see _compute_title_core comment.
+    avg_speed = (total_chars / (total_secs / 3600)) if total_secs > 0 and total_chars > 0 else 0
     first_date = sliced_daily[0]["date"]  if sliced_daily else ""
     last_date  = sliced_daily[-1]["date"] if sliced_daily else ""
 

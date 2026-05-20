@@ -47,9 +47,8 @@ html, body { height: 100%; background: var(--surface); color: var(--text);
   background: var(--card); display: flex; flex-direction: column;
   padding: 0 10px 16px;
 }
-.sidebar-logo { text-align: center; padding: 20px 0 18px; }
-.sidebar-logo .icon { font-size: 26px; color: var(--accent); }
-.sidebar-logo .name { font-size: 12px; font-weight: 600; color: var(--text); line-height: 1.4; }
+.sidebar-logo { text-align: center; padding: 20px 0 20px; }
+.sidebar-logo .name-jp { font-size: 44px; font-weight: 700; color: var(--accent); letter-spacing: 2px; line-height: 1.1; }
 
 .nav-item {
   display: flex; align-items: center; gap: 10px;
@@ -321,6 +320,11 @@ select:focus { border-color: var(--accent); }
     rgba(0,0,0,0.35) calc(var(--tick-step) - 1px),
     rgba(0,0,0,0.35) var(--tick-step)
   );
+}
+.daily-bar-expected-tick {
+  position: absolute; top: 0; bottom: 0; width: 1px;
+  background: #FF6B6B; pointer-events: none;
+  transform: translateX(-0.5px);
 }
 
 .goal-chunk {

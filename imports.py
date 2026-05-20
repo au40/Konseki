@@ -271,16 +271,40 @@ def _tracker_gsm_rows_for(game_id):
 
 
 def _sync_rollover_attribution_to(con, game_id, session_date, chars, time_seconds, cards):
-    """If a gsm_rollover_attribution row exists for this (game_id implied via
-    source_date) session_date, refresh its chars/time/cards to match the new
-    session row. Without this, an import-driven update leaves stale
-    attribution values that produce ghost rows in per-title charts."""
-    con.execute("""
-        UPDATE gsm_rollover_attributions
-           SET chars=?, time_seconds=?, cards=?, updated_at=?
-         WHERE source_date=?
-    """, (int(chars or 0), float(time_seconds or 0), int(cards or 0),
-          datetime.now().isoformat(), session_date))
+    """CLAMP existing rollover attributions for this source_date so the displaced
+    chunk never exceeds the (possibly updated) session-row total — never grow it.
+
+    A rollover attribution records a FIXED historical displacement: the chars/time
+    that rolled over from this source_date into the previous logical day, captured
+    during the rollover window. An import-driven total correction must not enlarge
+    that displacement — a 0-displacement row must stay 0, a partial must stay
+    partial. Overwriting to the full day's totals (the old behavior) would shove an
+    entire day's reading onto the prior day for any non-full displacement.
+
+    The only legitimate adjustment here is to SHRINK a displacement when the new
+    total is now smaller than what was displaced — otherwise per-title charts get
+    ghost rows (the deduction in _compute_title_core would drive the source row
+    negative and the phantom would exceed the real total). Clamp each dimension
+    independently to the new total; leave anything already within bounds untouched."""
+    new_c = int(chars or 0)
+    new_t = float(time_seconds or 0)
+    new_cards = int(cards or 0)
+    rows = con.execute(
+        "SELECT rollover_date, chars, time_seconds, cards "
+        "FROM gsm_rollover_attributions WHERE source_date=?",
+        (session_date,)
+    ).fetchall()
+    for rollover_date, ac, at, acards in rows:
+        ac = int(ac or 0); at = float(at or 0); acards = int(acards or 0)
+        cc, ct, ccards = min(ac, new_c), min(at, new_t), min(acards, new_cards)
+        if cc == ac and abs(ct - at) <= 1e-9 and ccards == acards:
+            continue  # already within bounds — don't churn updated_at
+        con.execute(
+            "UPDATE gsm_rollover_attributions "
+            "SET chars=?, time_seconds=?, cards=?, updated_at=? "
+            "WHERE rollover_date=? AND source_date=?",
+            (cc, ct, ccards, datetime.now().isoformat(), rollover_date, session_date)
+        )
 
 
 def _sync_game_metadata_from_gsm(con, gsm, game_id):
@@ -381,8 +405,8 @@ def import_gsm_history_preview():
             if e is None:
                 n_ins += 1
             elif (e["chars"] != r["chars"]
-                  or abs(e["time_seconds"] - r["time_seconds"]) > 0.5
-                  or e["cards"] != r["cards"]):
+                  or abs(e["time_seconds"] - r["time_seconds"]) > 0.5):
+                # cards excluded — no longer imported, must match apply's check
                 n_upd += 1
             else:
                 n_un += 1
@@ -448,21 +472,24 @@ def import_gsm_history_apply():
                 speed = _speed_from(r["chars"], r["time_seconds"])
                 if e is None:
                     excl = 0 if count_t else 1
+                    # cards_mined intentionally written as 0 — cards are no longer
+                    # tracked; importing them only created churn and graph husks.
                     con.execute("""
                         INSERT INTO sessions
                           (source, title, activity_type, session_date,
                            chars_read, lines_read, time_seconds, reading_speed,
                            sentences_read, cards_mined, game_id, raw_file,
                            ingested_at, time_excluded)
-                        VALUES ('gsm', ?, 'Reading', ?, ?, 0, ?, ?, 0, ?, ?,
+                        VALUES ('gsm', ?, 'Reading', ?, ?, 0, ?, ?, 0, 0, ?,
                                 NULL, ?, ?)
                     """, (title, r["date"], r["chars"], r["time_seconds"],
-                          speed, r["cards"], gid, now, excl))
+                          speed, gid, now, excl))
                     inserted += 1
                 else:
+                    # cards excluded from the change check — we no longer import
+                    # them, so a cards-only difference must not trigger a rewrite.
                     if (e["chars"] == r["chars"]
-                            and abs(e["time_seconds"] - r["time_seconds"]) <= 0.5
-                            and e["cards"] == r["cards"]):
+                            and abs(e["time_seconds"] - r["time_seconds"]) <= 0.5):
                         continue
                     if _would_zero_out(r["chars"], r["time_seconds"], e["chars"]):
                         _record_sync_anomaly(
@@ -474,13 +501,13 @@ def import_gsm_history_apply():
                     con.execute("""
                         UPDATE sessions
                            SET chars_read=?, time_seconds=?, reading_speed=?,
-                               cards_mined=?, ingested_at=?
+                               cards_mined=0, ingested_at=?
                          WHERE rowid=?
-                    """, (r["chars"], r["time_seconds"], speed, r["cards"],
+                    """, (r["chars"], r["time_seconds"], speed,
                           now, e["rowid"]))
                     _sync_rollover_attribution_to(
                         con, gid, r["date"],
-                        r["chars"], r["time_seconds"], r["cards"]
+                        r["chars"], r["time_seconds"], 0
                     )
                     updated += 1
 
@@ -606,11 +633,8 @@ def pull_gsm_api_only(url=None):
             today_speed = (data.get("allGamesStats") or {}).get("reading_speed", 0)
         time_seconds = (today_chars / today_speed * 3600) if today_speed > 0 else 0
 
-        # Today's cards mined
-        cards_data  = data.get("cardsMinedLast30Days") or {}
-        cl          = cards_data.get("labels", [])
-        ct          = cards_data.get("totals", [])
-        today_cards = ct[cl.index(real_date)] if real_date in cl else 0
+        # Cards are no longer tracked — stored as 0 (column kept for schema compat).
+        today_cards = 0
 
         # Session is stored at the real calendar date. Rollover bucketing happens at
         # display time via gsm_rollover_attributions (captured below).
@@ -624,7 +648,7 @@ def pull_gsm_api_only(url=None):
             "lines_read":    0,
             "time_seconds":  float(time_seconds),
             "reading_speed": float(today_speed),
-            "cards_mined":   int(today_cards),
+            "cards_mined":   0,
         }
 
         out = SESSIONS_DIR / f"gsm_{real_date}.json"

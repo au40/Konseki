@@ -1,8 +1,14 @@
 {
   "manifest_version": 3,
-  "name": "Immersion Tracker Sync",
+  "name": "Konseki Sync",
   "version": "1.0",
-  "description": "Passively syncs ッツ Reader session data to your local Immersion Tracker.",
+  "description": "Passively syncs ッツ Reader session data to your local Konseki.",
+
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
 
   "permissions": ["storage", "activeTab", "scripting"],
 
@@ -24,6 +30,11 @@
 
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Immersion Tracker Sync"
+    "default_title": "Konseki Sync",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
   }
 }
