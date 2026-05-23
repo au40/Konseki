@@ -1131,11 +1131,7 @@ function makeGoalCard(g) {
   }
 
   const pct = g.pct;
-  const fillColor = g.is_complete ? '#4ECBA0'
-                  : g.is_overdue  ? '#FF6B6B'
-                  : pct >= 75     ? '#5B8CFF'
-                  : pct >= 40     ? '#FF9F5B'
-                  :                 '#FF6B6B';
+  const fillColor = g.is_complete ? '#4ECBA0' : '#FF6B6B';
 
   let statusBadge;
   if (g.is_complete) {
@@ -1155,8 +1151,16 @@ function makeGoalCard(g) {
     const now      = new Date(_y, _m - 1, _d);
     const shortFmt = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     let periodRange;
+    // The period target is frozen at the start of the period and re-baselines
+    // only at the next period boundary. We reconstruct the period-start state
+    // from current values: remaining_at_start = remaining + done-this-period,
+    // and days_left_at_start = days_left + days-elapsed-this-period. Both are
+    // invariant across the period (reading cancels within a day; the day-to-day
+    // index growth cancels the days_left decrease), so the bar target holds
+    // steady while only the fill moves.
     if (goalPaceView === 'daily') {
-      chunkNeeded   = g.remaining / g.days_left;
+      const remPs   = g.remaining + (g.today_completed || 0);
+      chunkNeeded   = g.days_left > 0 ? remPs / g.days_left : 0;
       originalChunk = g.target / Math.max(1, g.total_days);
       periodDone    = g.today_completed || 0;
       periodLabel   = 'Today';
@@ -1166,7 +1170,10 @@ function makeGoalCard(g) {
       tickCount     = 0;
       expectedTickIdx = 0;
     } else if (goalPaceView === 'weekly') {
-      chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 7);
+      const daysLeftPs = g.days_left + ((g.week_day_index || 1) - 1);
+      const remPs      = g.remaining + (g.week_completed || 0);
+      const flatDaily  = daysLeftPs > 0 ? remPs / daysLeftPs : 0;
+      chunkNeeded   = flatDaily * 7;
       originalChunk = g.target / Math.max(1, g.total_days / 7);
       periodDone    = g.week_completed || 0;
       periodLabel   = 'This week';
@@ -1177,9 +1184,12 @@ function makeGoalCard(g) {
       periodRange   = `${shortFmt(mon)} – ${shortFmt(sun)}`;
       tickCount     = g.week_period_days || 7;
       expectedTickIdx = g.week_day_index || 0;
-      barTarget     = chunkNeeded * (tickCount / 7);
+      barTarget     = flatDaily * tickCount;
     } else {
-      chunkNeeded   = g.remaining / Math.max(0.01, g.days_left / 30.44);
+      const daysLeftPs = g.days_left + ((g.month_day_index || 1) - 1);
+      const remPs      = g.remaining + (g.month_completed || 0);
+      const flatDaily  = daysLeftPs > 0 ? remPs / daysLeftPs : 0;
+      chunkNeeded   = flatDaily * 30.44;
       originalChunk = g.target / Math.max(1, g.total_days / 30.44);
       periodDone    = g.month_completed || 0;
       periodLabel   = 'This month';
@@ -1187,7 +1197,7 @@ function makeGoalCard(g) {
       periodRange   = now.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
       tickCount     = g.month_period_days || 30;
       expectedTickIdx = g.month_day_index || 0;
-      barTarget     = chunkNeeded * (tickCount / 30.44);
+      barTarget     = flatDaily * tickCount;
     }
     const behind   = chunkNeeded > originalChunk * 1.05;
     const ahead    = chunkNeeded < originalChunk * 0.95;
