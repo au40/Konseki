@@ -226,7 +226,7 @@ class Api:
         rc, rs, _   = get_range_totals(n)
         cs, _       = get_streak()
         daily       = get_daily_time_series(n)
-        activity    = get_activity_breakdown()
+        activity    = get_activity_breakdown(n)
         titles      = get_top_titles(8)
         extra       = get_range_extra_stats(n)
 

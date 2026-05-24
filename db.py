@@ -637,13 +637,44 @@ def get_daily_time_series(days):
                     max(0, chars.get(d, 0) + adj_c)))
     return out
 
-def get_activity_breakdown():
-    return [(r[0], r[1]) for r in _q("""
+def get_activity_breakdown(n=None):
+    """Time per activity_type over the range, GSM-attribution-adjusted.
+
+    Windowed and clamped to logical today (see window_bounds). GSM rows are
+    always activity_type='Reading', so the net rollover time displacement that
+    crosses the window edges folds entirely into the Reading slice — keeping
+    the donut consistent with the windowed totals (see CLAUDE.md)."""
+    since, today = window_bounds(n)
+    where  = "WHERE (time_excluded IS NULL OR time_excluded=0) AND session_date<=?"
+    params = [today]
+    if since:
+        where += " AND session_date>=?"
+        params.append(since)
+    rows = _q(f"""
         SELECT COALESCE(activity_type,'Other'), COALESCE(SUM(time_seconds),0)
-        FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0)
+        FROM sessions {where}
         GROUP BY COALESCE(activity_type,'Other')
-        ORDER BY SUM(time_seconds) DESC
-    """) if r[1] > 0]
+    """, *params)
+    totals = {r[0]: r[1] for r in rows}
+
+    # Net GSM rollover time displacement across the window, applied to 'Reading'.
+    # Candidate dates = every rollover_date and source_date inside the window;
+    # internal displacements (both ends in-window) net to zero, edge crossings
+    # add/subtract — mirrors the per-day pattern in _adjusted_day_totals.
+    att = _q(
+        "SELECT rollover_date AS d FROM gsm_rollover_attributions WHERE rollover_date<>source_date "
+        "UNION SELECT source_date FROM gsm_rollover_attributions WHERE rollover_date<>source_date"
+    )
+    gsm_delta = 0.0
+    for (d,) in att:
+        if d > today or (since and d < since):
+            continue
+        gsm_delta += get_gsm_day_adjustment(d)[1]
+    if gsm_delta:
+        totals["Reading"] = max(0, totals.get("Reading", 0) + gsm_delta)
+
+    return sorted(((k, v) for k, v in totals.items() if v > 0),
+                  key=lambda kv: kv[1], reverse=True)
 
 def get_streak():
     # Active day = a logical day with non-excluded time after GSM attribution.

@@ -752,6 +752,7 @@ function renderStats(d) {
   document.getElementById('es-consistency').textContent    = `${d.consistency_pct}%`;
   document.getElementById('es-consistency-sub').textContent = d.active_days ? `${d.active_days}/${d.window_days}d active` : '';
   renderDailyChart(d.daily);
+  renderTimeRollingChart(d.daily);
   renderDailyCharsChart(d.daily);
   renderDowChart(d.daily);
   renderDonutChart(d.activity);
@@ -946,6 +947,66 @@ function renderDailyChart(daily) {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
         y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
         ...(cum ? {y2:{position:'right',grid:{display:false},ticks:{color:'#4ECBA0',callback:v=>fmt(v)}}} : {})
+      }
+    }
+  });
+}
+
+function renderTimeRollingChart(daily) {
+  const section = document.getElementById('time-rolling-section');
+  const show = (currentRange === 'All' || currentRange === '1y') && currentGranularity === 'day';
+  if (!show || !daily.length || !daily.some(r => r.seconds > 0)) {
+    section.style.display = 'none';
+    destroyChart('time-rolling');
+    return;
+  }
+  section.style.display = 'block';
+
+  const win     = 7;
+  const secsArr = daily.map(r => r.seconds);
+  const rollHrs = secsArr.map((_, i) => {
+    const start = Math.max(0, i - win + 1);
+    let s = 0;
+    for (let j = start; j <= i; j++) s += secsArr[j];
+    return s / (i - start + 1) / 3600;
+  });
+
+  const labels      = daily.map(r => r.date.slice(5));
+  const step        = Math.max(1, Math.floor(labels.length / 14));
+  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
+
+  upsertChart('time-rolling', 'chart-time-rolling', {
+    type: 'line',
+    data: {
+      labels: shownLabels,
+      datasets: [{
+        label: 'Time (7d rolling avg)',
+        data: rollHrs,
+        borderColor: '#5B8CFF',
+        backgroundColor: 'rgba(91,140,255,0.08)',
+        borderWidth: 2,
+        pointRadius: 0,
+        pointHoverRadius: 6,
+        pointBackgroundColor: '#5B8CFF',
+        pointBorderColor: '#24243A',
+        pointBorderWidth: 2,
+        fill: true,
+        tension: 0.35,
+        spanGaps: true,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: c => labels[c[0].dataIndex],
+          label: c => `${fmtTime(c.raw * 3600)}/day`
+        } }
+      },
+      scales: {
+        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => `${v.toFixed(1)}h`}, beginAtZero: true, afterFit: s => { s.width = 62; } },
       }
     }
   });
