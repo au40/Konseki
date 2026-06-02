@@ -341,7 +341,7 @@ select:focus { border-color: var(--accent); }
   align-items: start;
 }
 .media-card {
-  border-radius: var(--radius); overflow: hidden;
+  border-radius: var(--radius);
   cursor: pointer; transition: transform 0.18s, box-shadow 0.18s;
   position: relative; aspect-ratio: 2 / 3;
 }
@@ -409,6 +409,50 @@ select:focus { border-color: var(--accent); }
 .media-card-subtitle { font-size: 10px; color: rgba(255,255,255,0.55); margin-bottom: 3px;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .series-stack .media-card-footer { z-index: 4; }
+
+/* ── Reorder arrows (revealed on hover) ──────────────────────────────────── */
+.media-card-reorder {
+  position: absolute;
+  top: 100%; left: 0; right: 0;
+  /* padding (not margin) so the container's hit box touches the card bottom,
+     bridging the visual gap so hover doesn't drop while the cursor crosses it */
+  padding-top: 4px;
+  display: flex; gap: 6px;
+  opacity: 0;
+  transition: opacity 0.12s;
+  z-index: 5;
+}
+.media-card-reorder::before {
+  /* invisible upward extension so hover survives the card's translateY(-4px)
+     on hover, which would otherwise leave an uncovered 4px sliver above us */
+  content: '';
+  position: absolute;
+  left: 0; right: 0;
+  top: -4px; height: 4px;
+}
+.media-card:hover   > .media-card-reorder,
+.series-stack:hover > .media-card-reorder,
+.media-card-reorder:hover {
+  opacity: 1;
+}
+.media-card-reorder-btn {
+  flex: 1 1 0;
+  height: 18px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.72);
+  border: 1px solid rgba(255,255,255,0.18);
+  color: #fff;
+  border-radius: 4px;
+  font-size: 10px; line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.media-card-reorder-btn:hover:not(:disabled) {
+  background: var(--accent); border-color: var(--accent);
+}
+.media-card-reorder-btn:disabled {
+  opacity: 0.3; cursor: default;
+}
 
 /* ── Drag-to-series ──────────────────────────────────────────────────────── */
 .media-card.dragging      { opacity: 0.4; }

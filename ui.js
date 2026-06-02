@@ -8,6 +8,7 @@ let selectedAtype = 'Listening';
 let selectedCatColor = '#5B8CFF';
 let mediaAllData  = [];
 let seriesData    = [];
+let mediaOrderMap = {}; // key -> position; key is "t:<title>" or "s:<id>"
 let currentSeriesId = null;
 let draggedItem   = null; // {type:'title'|'series', id:string|number}
 let heatmapYear     = new Date().getFullYear();
@@ -366,7 +367,7 @@ async function doPullGSM() {
   btn.disabled = false; btn.textContent = '↻ Pull GSM now';
   if (r.ok) {
     const parts = [`${fmtChars(r.chars)} chars`];
-    if (r.speed > 0)  parts.push(`${fmtChars(Math.round(r.speed))}/hr`);
+    if (r.speed > 0 && r.chars > 0)  parts.push(`${fmtChars(Math.round(r.speed))}/hr`);
     setStatus(`GSM: ${parts.join(' · ')}`);
     if (currentPage === 'dashboard') await loadDashboard();
   } else {
@@ -1305,24 +1306,26 @@ function makeGoalCard(g) {
     </div>
     <div class="progress-wrap">
       <div class="progress-track">
-        <div class="progress-fill" style="width:${pct}%;background:${fillColor}"></div>
+        <div class="progress-fill" style="width:${Math.min(100, pct)}%;background:${fillColor}"></div>
       </div>
       ${(() => {
-        // Inclusive day counting so this lines up with the period bar's red
-        // "expected" tick (db.py week_day_index/month_day_index): today counts
-        // as elapsed and the deadline day counts in the total → the marker
-        // means "by end of today", not "by start of today".
-        const total = Math.max(1, g.total_days) + 1;
+        // Pace-aligned with the period bar's red tick and every other pacing
+        // calc in the system (chunk_needed, original_chunk, barTarget), which
+        // all use target/total_days as the daily pace. elapsed includes today
+        // (+1) so the marker means "by end of today", and we clamp to total
+        // so the deadline day sits exactly at 100%.
+        const total = Math.max(1, g.total_days);
         const elapsed = Math.max(0, Math.min(total, (g.total_days - g.days_left) + 1));
         const expPct = (elapsed / total) * 100;
         // Match the right-side progress %: 1-decimal precision, trailing zeros dropped.
         const expDisp = Math.round(expPct * 10) / 10;
-        return `<div class="progress-expected" style="left:${expPct}%" title="Expected by end of today: ${expDisp}%"></div>`;
+        const expVal = fmtMetric((expPct / 100) * g.target);
+        return `<div class="progress-expected" style="left:${expPct}%" title="Expected by end of today: ${expDisp}% (${expVal})"></div>`;
       })()}
     </div>
     <div class="goal-meta">
       <span class="goal-numbers">${fmtMetric(g.completed)} / ${fmtMetric(g.target)}${actLabel}</span>
-      <span class="goal-pct" style="color:${fillColor}">${g.is_complete ? '100%' : pct + '%'}</span>
+      <span class="goal-pct" style="color:${fillColor}">${pct}%</span>
     </div>
     ${chunkHtml}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
@@ -1474,10 +1477,12 @@ async function loadMedia() {
   currentSeriesId    = null;
   showMediaView('grid');
 
-  [mediaAllData, seriesData] = await Promise.all([
+  [mediaAllData, seriesData, mediaOrderMap] = await Promise.all([
     window.pywebview.api.get_media(),
     window.pywebview.api.get_series(),
+    window.pywebview.api.get_media_order(),
   ]);
+  mediaOrderMap = mediaOrderMap || {};
   const nonManualCount = mediaAllData.filter(m => m.source !== 'manual').length;
   document.getElementById('media-count').textContent = `${nonManualCount} titles`;
   renderMediaGrid();
@@ -1488,20 +1493,86 @@ function renderMediaGrid() {
 
   // Titles that belong to a series — hidden as standalone cards
   const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
-
   const filtered = mediaAllData.filter(m => m.source !== 'manual');
+  const ungrouped = filtered.filter(m => !inSeries.has(m.title));
 
   grid.innerHTML = '';
-
-  // Series cards first (always shown regardless of filter)
-  seriesData.forEach(s => grid.appendChild(makeSeriesCard(s)));
-
-  // Then ungrouped individual cards
-  const ungrouped = filtered.filter(m => !inSeries.has(m.title));
   if (!ungrouped.length && !seriesData.length) {
     grid.innerHTML = '<p class="empty-msg">No media found.</p>'; return;
   }
-  ungrouped.forEach(m => grid.appendChild(makeMediaCard(m)));
+
+  // Natural order: series first, then ungrouped titles by total_secs DESC.
+  const natural = [
+    ...seriesData.map(s => ({ key: `s:${s.id}`, kind: 'series', data: s })),
+    ...ungrouped.map(m => ({ key: `t:${m.title}`, kind: 'title',  data: m })),
+  ];
+
+  // Manual order overrides natural for items present in mediaOrderMap.
+  const ordered = [...natural].sort((a, b) => {
+    const pa = mediaOrderMap[a.key];
+    const pb = mediaOrderMap[b.key];
+    if (pa != null && pb != null) return pa - pb;
+    if (pa != null) return -1;
+    if (pb != null) return 1;
+    return 0;
+  });
+
+  ordered.forEach((item, idx) => {
+    const canLeft  = idx > 0;
+    const canRight = idx < ordered.length - 1;
+    const el = item.kind === 'series'
+      ? makeSeriesCard(item.data)
+      : makeMediaCard(item.data);
+    el.appendChild(makeReorderControls(item.key, canLeft, canRight));
+    grid.appendChild(el);
+  });
+}
+
+function makeReorderControls(key, canLeft, canRight) {
+  const wrap = document.createElement('div');
+  wrap.className = 'media-card-reorder';
+  wrap.innerHTML = `
+    <button type="button" class="media-card-reorder-btn" data-dir="left"  draggable="false" ${canLeft  ? '' : 'disabled'} title="Move left">◀</button>
+    <button type="button" class="media-card-reorder-btn" data-dir="right" draggable="false" ${canRight ? '' : 'disabled'} title="Move right">▶</button>`;
+  wrap.addEventListener('click',     e => e.stopPropagation());
+  wrap.addEventListener('mousedown', e => e.stopPropagation());
+  wrap.addEventListener('dragstart', e => e.preventDefault());
+  wrap.querySelectorAll('button').forEach(btn => {
+    btn.addEventListener('click', ev => {
+      ev.stopPropagation();
+      if (btn.disabled) return;
+      shiftMediaCard(key, btn.dataset.dir === 'left' ? -1 : 1);
+    });
+  });
+  return wrap;
+}
+
+async function shiftMediaCard(key, delta) {
+  // Rebuild the current visible order, swap, persist, re-render.
+  const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
+  const ungrouped = mediaAllData.filter(m => m.source !== 'manual' && !inSeries.has(m.title));
+  const natural = [
+    ...seriesData.map(s => `s:${s.id}`),
+    ...ungrouped.map(m => `t:${m.title}`),
+  ];
+  const ordered = [...natural].sort((a, b) => {
+    const pa = mediaOrderMap[a];
+    const pb = mediaOrderMap[b];
+    if (pa != null && pb != null) return pa - pb;
+    if (pa != null) return -1;
+    if (pb != null) return 1;
+    return 0;
+  });
+  const i = ordered.indexOf(key);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= ordered.length) return;
+  [ordered[i], ordered[j]] = [ordered[j], ordered[i]];
+
+  // Refresh in-memory map immediately so re-render reflects the change
+  // before the API round-trip completes.
+  mediaOrderMap = Object.fromEntries(ordered.map((k, idx) => [k, idx]));
+  renderMediaGrid();
+  await window.pywebview.api.set_media_order(ordered);
 }
 
 function makeMediaCard(m) {
@@ -2750,10 +2821,24 @@ function renderMilestonesList(el, milestones) {
   });
 }
 
+let _pendingDetail = null;
+
 async function refreshCurrentMediaDetail() {
   if (!currentDetailTitle) return;
   const detail = await window.pywebview.api.get_title_detail(currentDetailTitle);
-  if (detail) renderMediaDetail(detail);
+  if (!detail) return;
+  const detailVisible =
+    document.getElementById('media-detail-view').style.display !== 'none';
+  if (detailVisible) {
+    _pendingDetail = null;
+    renderMediaDetail(detail);
+  } else {
+    // Rendering Chart.js into a hidden container makes the canvases grow
+    // unbounded (responsive + maintainAspectRatio:false can't measure a
+    // display:none parent). Stash the data and re-render on the way back.
+    currentMilestones = detail.milestones || [];
+    _pendingDetail = detail;
+  }
 }
 
 // ── Milestone add/edit modal ───────────────────────────────────────────────
@@ -2853,6 +2938,11 @@ function closeMilestoneDetail() {
   currentMilestoneId = null;
   // Return to parent media detail
   showMediaView(currentDetailTitle ? 'detail' : 'grid');
+  if (currentDetailTitle && _pendingDetail) {
+    const d = _pendingDetail;
+    _pendingDetail = null;
+    renderMediaDetail(d);
+  }
 }
 
 function renderMilestoneDetail(d) {

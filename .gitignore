@@ -6,3 +6,4 @@ build/
 dist/
 backups/
 dev-data/
+web-ext-artifacts/

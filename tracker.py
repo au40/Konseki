@@ -291,6 +291,16 @@ class Api:
     def get_title_detail(self, title):
         return db.db_get_title_detail(title)
 
+    def get_media_order(self):
+        return db.db_get_media_card_order()
+
+    def set_media_order(self, ordered_keys):
+        try:
+            db.db_set_media_card_order(list(ordered_keys))
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # ── Goals ─────────────────────────────────────────────────────────────────
     def get_goals(self):
         return db_get_goal_progress()
@@ -703,7 +713,7 @@ def main():
     init_db()
     scan_existing_files()
     backup.ensure_backup()
-    backup.schedule_daily()
+    backup.schedule_backups()
 
     # Auto-mark existing users as having completed first-run setup so they don't see the prompt
     if get_setting("first_run_complete", "") == "":

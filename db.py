@@ -213,6 +213,30 @@ def init_db():
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_milestones_title ON milestones(title)")
 
+    # Manual ordering of media-grid cards. key = "t:<title>" for individual
+    # titles, "s:<series_id>" for series stacks. Items not present fall back
+    # to the default sort (series first, then titles by total_secs DESC).
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS media_card_order (
+            key        TEXT PRIMARY KEY,
+            position   INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
+    # Enforce the GSM invariant at the DB level: exactly one GSM session row per
+    # (game_id, session_date). The pull path is delete-then-insert and assumes
+    # this, but pull_gsm_now() has callers outside the WAL handler's _pull_lock
+    # (startup pull, tray "Pull GSM Now", JS Api.pull_gsm), so two pulls can race
+    # — both DELETE today's row, then both INSERT — and leave a duplicate. This
+    # partial unique index makes the second insert collide instead, so a race
+    # silently keeps one row rather than double-counting the day. Partial (WHERE
+    # source='gsm') so manual/ttsu rows with NULL game_id are unaffected.
+    con.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_gsm_one_row_per_day
+            ON sessions(game_id, session_date) WHERE source='gsm'
+    """)
+
     con.commit()
     con.close()
 
@@ -769,6 +793,21 @@ def get_media_stats():
         for r in rows
     ]
 
+def db_get_media_card_order():
+    rows = _q("SELECT key, position FROM media_card_order ORDER BY position ASC")
+    return {r[0]: r[1] for r in rows}
+
+def db_set_media_card_order(ordered_keys):
+    now = datetime.now().isoformat()
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DELETE FROM media_card_order")
+    con.executemany(
+        "INSERT INTO media_card_order (key, position, updated_at) VALUES (?, ?, ?)",
+        [(k, i, now) for i, k in enumerate(ordered_keys)],
+    )
+    con.commit()
+    con.close()
+
 def get_series_data():
     series_rows = _q("SELECT id, name, created_at FROM series ORDER BY created_at DESC")
     if not series_rows:
@@ -1033,6 +1072,22 @@ def db_get_goal_progress():
         # For past-deadline goals, don't count sessions recorded after the deadline
         count_up_to = min(today_str, g["deadline"])
 
+        # GSM rollover attribution applies to Reading goals (and untyped goals,
+        # since GSM is always 'Reading'). Net per-day adjustment summed over a
+        # date range; mirrors the daily/weekly series pattern in CLAUDE.md.
+        apply_attr = (not g["activity_type"]) or g["activity_type"] == "Reading"
+        metric_key = g["metric"]
+        def _sum_adj(start_d_, end_d_):
+            if not apply_attr:
+                return 0.0
+            total = 0.0
+            cur = start_d_
+            while cur <= end_d_:
+                ac, at, ak = get_gsm_day_adjustment(cur.strftime("%Y-%m-%d"))
+                total += {"chars_read": ac, "time_seconds": at, "cards_mined": ak}.get(metric_key, 0)
+                cur += timedelta(days=1)
+            return total
+
         where_parts = ["session_date >= ?", "session_date <= ?"]
         params      = [g["start_date"], count_up_to]
         if g["activity_type"]:
@@ -1041,6 +1096,9 @@ def db_get_goal_progress():
 
         sql       = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(where_parts)}"
         completed = (_q1(sql, *params) or (0,))[0] or 0.0
+        count_up_to_d = min(today_d, deadline_d)
+        if start_d <= count_up_to_d:
+            completed = max(0.0, completed + _sum_adj(start_d, count_up_to_d))
 
         today_where  = ["session_date=?"] + (["activity_type=?"] if g["activity_type"] else [])
         today_params = [today_str] + ([g["activity_type"]] if g["activity_type"] else [])
@@ -1087,23 +1145,15 @@ def db_get_goal_progress():
         month_completed   = (_q1(month_sql, *month_params) or (0,))[0] or 0.0
 
         # GSM rollover attribution: per-day deltas for Reading goals (and untyped goals)
-        if (not g["activity_type"]) or g["activity_type"] == "Reading":
-            metric_key = g["metric"]
-            def _sum_adj(start_d_, end_d_):
-                total = 0.0
-                cur = start_d_
-                while cur <= end_d_:
-                    ac, at, ak = get_gsm_day_adjustment(cur.strftime("%Y-%m-%d"))
-                    total += {"chars_read": ac, "time_seconds": at, "cards_mined": ak}.get(metric_key, 0)
-                    cur += timedelta(days=1)
-                return total
-            if week_start_d <= week_sum_end_d:
-                week_completed = max(0.0, week_completed + _sum_adj(week_start_d, week_sum_end_d))
-            if month_start_d <= month_sum_end_d:
-                month_completed = max(0.0, month_completed + _sum_adj(month_start_d, month_sum_end_d))
+        if week_start_d <= week_sum_end_d:
+            week_completed = max(0.0, week_completed + _sum_adj(week_start_d, week_sum_end_d))
+        if month_start_d <= month_sum_end_d:
+            month_completed = max(0.0, month_completed + _sum_adj(month_start_d, month_sum_end_d))
 
         remaining = max(0.0, g["target"] - completed)
-        pct       = min(100.0, round(completed / g["target"] * 100, 1)) if g["target"] > 0 else 0.0
+        # Unclamped so overshoot (>100%) is visible in the displayed number;
+        # the UI clamps the bar fill width separately to keep it inside the track.
+        pct       = round(completed / g["target"] * 100, 1) if g["target"] > 0 else 0.0
 
         days_left  = max(0, (deadline_d - today_d).days)
         total_days = max(1, (deadline_d - start_d).days)

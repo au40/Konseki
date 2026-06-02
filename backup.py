@@ -3,23 +3,24 @@ backup.py  —  Daily rolling backups of tracker.db
 
 Creates one .zip per calendar day in <data_dir>/backups/, keeping the 7 most
 recent. Uses the SQLite online backup API so it's safe to run while the app
-has the DB open. Run ensure_backup() on startup; schedule_daily() arms a
-timer that fires at ~3am to create the next day's backup if the app stays
-open across midnight.
+has the DB open. Run ensure_backup() on startup; schedule_backups() arms a
+timer that re-checks every POLL_SECONDS whether today's backup exists yet,
+creating it if not, so a backup gets made for every calendar day the app is
+running.
 """
 
 import os
 import sqlite3
 import threading
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from db import DB_PATH, DATA_DIR
 
-BACKUP_DIR  = DATA_DIR / "backups"
-KEEP_COUNT  = 7
-DAILY_HOUR  = 3  # local time when scheduled backup fires
+BACKUP_DIR   = DATA_DIR / "backups"
+KEEP_COUNT   = 7
+POLL_SECONDS = 30 * 60  # how often to re-check that today's backup exists
 
 
 def _backup_path(d: datetime) -> Path:
@@ -82,21 +83,19 @@ def ensure_backup() -> Path | None:
         return None
 
 
-def _seconds_until_next(hour: int) -> float:
-    now    = datetime.now()
-    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-    if target <= now:
-        target += timedelta(days=1)
-    return (target - now).total_seconds()
+def schedule_backups():
+    """Arm a self-rescheduling timer that runs ensure_backup() every POLL_SECONDS.
 
-
-def schedule_daily():
-    """Arm a self-rescheduling timer that runs ensure_backup() at DAILY_HOUR each day."""
+    Polling rather than a one-shot daily timer means a missed wake-up — e.g.
+    the machine sleeping across a scheduled time — only delays the day's backup
+    until the next tick instead of skipping that calendar day entirely.
+    """
     def _fire():
-        ensure_backup()
-        schedule_daily()
+        try:
+            ensure_backup()
+        finally:
+            schedule_backups()
 
-    delay = _seconds_until_next(DAILY_HOUR)
-    t = threading.Timer(delay, _fire)
+    t = threading.Timer(POLL_SECONDS, _fire)
     t.daemon = True
     t.start()
