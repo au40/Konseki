@@ -403,15 +403,65 @@ async function buildLogPage() {
       b.classList.add('active');
       const col = allColors[t] || 'var(--accent)';
       b.style.background = col; b.style.borderColor = col; b.style.color = '#fff';
-      document.getElementById('log-chars-group').style.display = t === 'Reading' ? '' : 'none';
+      toggleReadingFields(t === 'Reading');
     };
     pills.appendChild(b);
   });
 
-  const charsGroup = document.getElementById('log-chars-group');
-  if (charsGroup) charsGroup.style.display = selectedAtype === 'Reading' ? '' : 'none';
+  toggleReadingFields(selectedAtype === 'Reading');
+  await populateMediaTitles();
   renderCustomCatList(customCats);
   buildColorSwatches();
+}
+
+// Reading-only fields (chars, chars/hour, extrapolation hint) toggle together.
+function toggleReadingFields(isReading) {
+  const cg = document.getElementById('log-chars-group');
+  const pg = document.getElementById('log-cph-group');
+  if (cg) cg.style.display = isReading ? '' : 'none';
+  if (pg) pg.style.display = isReading ? '' : 'none';
+  updateCharsHint();
+}
+
+// Live preview of how the chars/time/cph fields resolve. Direct chars always wins;
+// chars/hour is only used to extrapolate when the Characters field is left blank.
+function updateCharsHint() {
+  const hint = document.getElementById('log-chars-hint');
+  if (!hint) return;
+  if (selectedAtype !== 'Reading') { hint.style.display = 'none'; return; }
+  const mins  = Number(document.getElementById('log-minutes').value);
+  const chars = Number(document.getElementById('log-chars').value);
+  const cph   = Number(document.getElementById('log-cph').value);
+  if (chars > 0) {
+    hint.style.display = '';
+    hint.textContent = mins > 0
+      ? `≈ ${fmtChars(Math.round(chars / (mins / 60)))}/hr at this pace`
+      : `${fmtChars(chars)} chars will be logged`;
+  } else if (cph > 0 && mins > 0) {
+    hint.style.display = '';
+    hint.textContent = `≈ ${fmtChars(Math.round(cph * mins / 60))} chars will be logged`;
+  } else {
+    hint.style.display = 'none';
+  }
+}
+
+// Populate the media dropdown. Option value is the original title so a manual entry
+// merges into the existing media card (GSM titles included — purely additive, never
+// touches the GSM rollover-attribution path, which only reconciles source='gsm' rows).
+async function populateMediaTitles() {
+  const dl = document.getElementById('media-titles');
+  if (!dl) return;
+  try {
+    const titles = await window.pywebview.api.get_media_titles();
+    dl.innerHTML = '';
+    titles.forEach(m => {
+      if (!m.title) return;
+      const o = document.createElement('option');
+      o.value = m.title;
+      if (m.display_title && m.display_title !== m.title) o.label = m.display_title;
+      dl.appendChild(o);
+    });
+  } catch (e) { /* dropdown is optional; free-text entry still works */ }
 }
 
 function buildColorSwatches() {
@@ -476,7 +526,7 @@ async function doLogSession() {
   const title     = document.getElementById('log-title').value.trim();
   const dt        = document.getElementById('log-date').value.trim();
   const charsRaw  = document.getElementById('log-chars').value.trim();
-  const chars     = selectedAtype === 'Reading' && charsRaw ? Number(charsRaw) : 0;
+  const cphRaw    = document.getElementById('log-cph').value.trim();
   const fb        = document.getElementById('log-feedback');
 
   if (!minutes || isNaN(minutes) || Number(minutes) <= 0) {
@@ -485,14 +535,25 @@ async function doLogSession() {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) {
     fb.className = 'feedback err'; fb.textContent = 'Date must be YYYY-MM-DD.'; return;
   }
+
+  // Reading only: prefer an explicit char count; otherwise extrapolate from chars/hour × time.
+  let chars = 0;
+  if (selectedAtype === 'Reading') {
+    if (charsRaw)      chars = Number(charsRaw);
+    else if (cphRaw)   chars = Math.round(Number(cphRaw) * Number(minutes) / 60);
+  }
+
   const r = await window.pywebview.api.log_session(selectedAtype, Number(minutes), title, dt, chars);
   if (r.ok) {
     const charsPart = chars > 0 ? ` · ${fmtChars(chars)} chars` : '';
     fb.className = 'feedback ok'; fb.textContent = `✓ Logged ${fmtTime(Number(minutes) * 60)} of ${selectedAtype}${charsPart}`;
     document.getElementById('log-minutes').value = '';
     document.getElementById('log-chars').value   = '';
+    document.getElementById('log-cph').value     = '';
     document.getElementById('log-title').value   = '';
     document.getElementById('log-date')._flatpickr?.setDate(today(), false);
+    updateCharsHint();
+    populateMediaTitles();
     statsCache = {};
     setStatus('Session logged');
   } else {
@@ -1106,8 +1167,9 @@ function updateGoalUnit() {
   const chunk  = document.getElementById('goal-chunk').value;
   const isEdit = editingGoalId !== null;
   const suffix = isEdit ? '' : (chunk === 'daily' ? '/day' : chunk === 'weekly' ? '/week' : chunk === 'monthly' ? '/month' : '');
+  const isTimeMetric = metric === 'time_seconds' || metric === 'time_chars';
   document.getElementById('goal-target-label').textContent =
-    metric === 'time_seconds' ? `Target (hours${suffix})` : `Target (characters${suffix})`;
+    isTimeMetric ? `Target (hours${suffix})` : `Target (characters${suffix})`;
 }
 
 async function populateGoalActivitySelect() {
@@ -1208,7 +1270,7 @@ function makeGoalCard(g) {
   let chunkHtml = '';
   if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
     let chunkNeeded, originalChunk, periodDone, periodLabel, periodUnit;
-    let barTarget, tickCount, expectedTickIdx;
+    let barTarget, tickCount, expectedTickIdx, periodChars = 0;
     const [_y, _m, _d] = today().split('-').map(Number);
     const now      = new Date(_y, _m - 1, _d);
     const shortFmt = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
@@ -1222,9 +1284,13 @@ function makeGoalCard(g) {
     // steady while only the fill moves.
     if (goalPaceView === 'daily') {
       const remPs   = g.remaining + (g.today_completed || 0);
-      chunkNeeded   = g.days_left > 0 ? remPs / g.days_left : 0;
+      // days_left (db.py) is exclusive of today; today is still a reading day,
+      // so the pacing denominator must add it back (days remaining incl. today).
+      const daysLeftPs = g.days_left + 1;
+      chunkNeeded   = daysLeftPs > 0 ? remPs / daysLeftPs : 0;
       originalChunk = g.target / Math.max(1, g.total_days);
       periodDone    = g.today_completed || 0;
+      periodChars   = g.chars_today || 0;
       periodLabel   = 'Today';
       periodUnit    = '/day';
       periodRange   = shortFmt(now);
@@ -1232,12 +1298,15 @@ function makeGoalCard(g) {
       tickCount     = 0;
       expectedTickIdx = 0;
     } else if (goalPaceView === 'weekly') {
-      const daysLeftPs = g.days_left + ((g.week_day_index || 1) - 1);
+      // +1: days_left excludes today; the inclusive period length (week_period_days
+      // / the *7 multiplier) counts it, so the denominator must too (else target > remPs).
+      const daysLeftPs = (g.days_left + 1) + ((g.week_day_index || 1) - 1);
       const remPs      = g.remaining + (g.week_completed || 0);
       const flatDaily  = daysLeftPs > 0 ? remPs / daysLeftPs : 0;
       chunkNeeded   = flatDaily * 7;
       originalChunk = g.target / Math.max(1, g.total_days / 7);
       periodDone    = g.week_completed || 0;
+      periodChars   = g.chars_week || 0;
       periodLabel   = 'This week';
       periodUnit    = '/week';
       const monOffset = (now.getDay() + 6) % 7;
@@ -1248,12 +1317,15 @@ function makeGoalCard(g) {
       expectedTickIdx = g.week_day_index || 0;
       barTarget     = flatDaily * tickCount;
     } else {
-      const daysLeftPs = g.days_left + ((g.month_day_index || 1) - 1);
+      // +1: see weekly branch — days_left excludes today, the inclusive
+      // month_period_days / *30.44 multiplier counts it.
+      const daysLeftPs = (g.days_left + 1) + ((g.month_day_index || 1) - 1);
       const remPs      = g.remaining + (g.month_completed || 0);
       const flatDaily  = daysLeftPs > 0 ? remPs / daysLeftPs : 0;
       chunkNeeded   = flatDaily * 30.44;
       originalChunk = g.target / Math.max(1, g.total_days / 30.44);
       periodDone    = g.month_completed || 0;
+      periodChars   = g.chars_month || 0;
       periodLabel   = 'This month';
       periodUnit    = '/month';
       periodRange   = now.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
@@ -1284,12 +1356,15 @@ function makeGoalCard(g) {
           ${expectedTickHtml}
         </div>
       </div>
-      <div style="font-size:10px;color:var(--muted);margin-top:2px">${periodRange}</div>`;
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${periodRange}${g.track_chars ? ` · <span class="goal-chars-companion">${fmtChars(Math.round(periodChars))} chars ${periodLabel === 'Today' ? 'today' : 'this ' + (periodUnit === '/week' ? 'week' : 'month')}</span>` : ''}</div>`;
   } else if (g.is_overdue) {
     chunkHtml = `<div class="goal-chunk" style="color:#FF6B6B">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
   }
 
   const actLabel = g.activity_type ? ` · ${g.activity_type}` : '';
+  const charsLabel = g.track_chars
+    ? ` · <span class="goal-chars-companion">${fmtChars(Math.round(g.chars_completed || 0))} chars</span>`
+    : '';
 
   const finishBtn = g.is_complete && !g.user_finished
     ? `<button class="btn btn-xs btn-outline" style="border-color:#4ECBA0;color:#4ECBA0" onclick="doFinishGoal(${g.id})">Mark finished</button>`
@@ -1324,7 +1399,7 @@ function makeGoalCard(g) {
       })()}
     </div>
     <div class="goal-meta">
-      <span class="goal-numbers">${fmtMetric(g.completed)} / ${fmtMetric(g.target)}${actLabel}</span>
+      <span class="goal-numbers">${fmtMetric(g.completed)} / ${fmtMetric(g.target)}${actLabel}${charsLabel}</span>
       <span class="goal-pct" style="color:${fillColor}">${pct}%</span>
     </div>
     ${chunkHtml}
@@ -1358,7 +1433,7 @@ async function openGoalEdit(id) {
   editingGoalId = g.id;
 
   document.getElementById('goal-label').value    = g.label;
-  document.getElementById('goal-metric').value   = g.metric;
+  document.getElementById('goal-metric').value   = (g.metric === 'time_seconds' && g.track_chars) ? 'time_chars' : g.metric;
   document.getElementById('goal-metric').disabled = true;
   const rawTarget = g.metric === 'time_seconds' ? +(g.target / 3600).toFixed(2) : g.target;
   document.getElementById('goal-target').value   = rawTarget;
@@ -1376,7 +1451,10 @@ async function openGoalEdit(id) {
 
 async function doAddGoal() {
   const label       = document.getElementById('goal-label').value.trim();
-  const metric      = document.getElementById('goal-metric').value;
+  const metricSel   = document.getElementById('goal-metric').value;
+  // "time_chars" is a UI-only classification: graded on time, chars tracked passively.
+  const metric      = metricSel === 'time_chars' ? 'time_seconds' : metricSel;
+  const trackChars  = metricSel === 'time_chars';
   const rawTarget   = parseFloat(document.getElementById('goal-target').value);
   const deadline    = document.getElementById('goal-deadline').value.trim();
   const chunkPeriod = document.getElementById('goal-chunk').value;
@@ -1400,7 +1478,7 @@ async function doAddGoal() {
 
   let r;
   if (editingGoalId !== null) {
-    r = await window.pywebview.api.update_goal(editingGoalId, label, target, deadline, atype);
+    r = await window.pywebview.api.update_goal(editingGoalId, label, target, deadline, atype, trackChars);
   } else {
     if (chunkPeriod !== 'none') {
       const daysUntil = Math.round((new Date(deadline) - new Date(today())) / 86400000);
@@ -1410,7 +1488,7 @@ async function doAddGoal() {
       }
       target *= periods;
     }
-    r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype);
+    r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype, trackChars);
   }
 
   if (r.ok) {
@@ -2192,7 +2270,7 @@ function renderDetailChart(daily, isGSM) {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
         legend: { display: false },
-        tooltip: { callbacks: { label: c => `${fmtChars(c.raw)} chars` } }
+        tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => `${fmtChars(c.raw)} chars` } }
       },
       scales: {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
@@ -2210,7 +2288,7 @@ function renderDetailChart(daily, isGSM) {
       responsive: true, maintainAspectRatio: false, animation: false,
       plugins: {
         legend: { display: false },
-        tooltip: { callbacks: { label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : '' } }
+        tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : '' } }
       },
       scales: {
         x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
@@ -2287,7 +2365,7 @@ function renderDetailChart(daily, isGSM) {
         responsive: true, maintainAspectRatio: false, animation: false,
         plugins: {
           legend: { display: false },
-          tooltip: { callbacks: { label: c => fmtTime(c.raw * 60) } }
+          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtTime(c.raw * 60) } }
         },
         scales: {
           x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },

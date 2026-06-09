@@ -36,7 +36,7 @@ from db import (
     get_today_stats, get_weekly_summary, get_all_time_totals, get_range_totals,
     get_recent_sessions, get_daily_time_series, get_activity_breakdown,
     get_streak, get_top_titles, get_heatmap_data,
-    get_media_stats, get_series_data, get_extra_stats, get_range_extra_stats,
+    get_media_stats, get_media_titles, get_series_data, get_extra_stats, get_range_extra_stats,
     db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     _get_aliases, _q, _q1,
@@ -288,6 +288,9 @@ class Api:
     def get_media(self):
         return get_media_stats()
 
+    def get_media_titles(self):
+        return get_media_titles()
+
     def get_title_detail(self, title):
         return db.db_get_title_detail(title)
 
@@ -305,16 +308,16 @@ class Api:
     def get_goals(self):
         return db_get_goal_progress()
 
-    def add_goal(self, label, metric, target, deadline, chunk_period="daily", activity_type=None):
+    def add_goal(self, label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False):
         try:
-            db_add_goal(label, metric, float(target), deadline, chunk_period, activity_type)
+            db_add_goal(label, metric, float(target), deadline, chunk_period, activity_type, track_chars)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def update_goal(self, goal_id, label, target, deadline, activity_type=None):
+    def update_goal(self, goal_id, label, target, deadline, activity_type=None, track_chars=False):
         try:
-            db_update_goal(goal_id, label, float(target), deadline, activity_type)
+            db_update_goal(goal_id, label, float(target), deadline, activity_type, track_chars)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}

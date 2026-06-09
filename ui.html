@@ -95,20 +95,26 @@
           <label>Activity type</label>
           <div class="pill-group" id="atype-pills"></div>
         </div>
-        <div style="display:flex;gap:16px;align-items:flex-start">
+        <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
           <div class="form-group" style="width:140px;flex-shrink:0">
             <label>Time (minutes)</label>
-            <input type="number" id="log-minutes" min="1">
+            <input type="number" id="log-minutes" min="1" oninput="updateCharsHint()">
           </div>
           <div class="form-group" id="log-chars-group" style="display:none;width:140px;flex-shrink:0">
             <label>Characters (optional)</label>
-            <input type="number" id="log-chars" min="0">
+            <input type="number" id="log-chars" min="0" oninput="updateCharsHint()">
           </div>
-          <div class="form-group" style="flex:1">
-            <label>Title / notes (optional)</label>
-            <input type="text" id="log-title">
+          <div class="form-group" id="log-cph-group" style="display:none;width:140px;flex-shrink:0">
+            <label>Chars / hour (optional)</label>
+            <input type="number" id="log-cph" min="0" oninput="updateCharsHint()">
+          </div>
+          <div class="form-group" style="flex:1;min-width:200px">
+            <label>Title / media (optional)</label>
+            <input type="text" id="log-title" list="media-titles" placeholder="Type, or pick existing media">
+            <datalist id="media-titles"></datalist>
           </div>
         </div>
+        <div id="log-chars-hint" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
         <div class="form-group" style="max-width:180px">
           <label>Date</label>
           <input type="text" id="log-date">
@@ -267,6 +273,7 @@
             <select id="goal-metric" onchange="updateGoalUnit()">
               <option value="time_seconds">Time</option>
               <option value="chars_read">Characters</option>
+              <option value="time_chars">Time (track chars)</option>
             </select>
           </div>
           <div class="form-group" style="margin-bottom:0">

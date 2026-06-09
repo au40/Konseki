@@ -89,6 +89,10 @@ def init_db():
     goal_cols = [r[1] for r in con.execute("PRAGMA table_info(goals)").fetchall()]
     if "user_finished" not in goal_cols:
         con.execute("ALTER TABLE goals ADD COLUMN user_finished INTEGER NOT NULL DEFAULT 0")
+    # track_chars: for time_seconds goals, also tally chars_read in the same
+    # window as a passive companion stat (graded on time, chars shown only).
+    if "track_chars" not in goal_cols:
+        con.execute("ALTER TABLE goals ADD COLUMN track_chars INTEGER NOT NULL DEFAULT 0")
 
     # GSM game metadata table — stores cover images, descriptions, genres etc.
     con.execute("""
@@ -757,11 +761,30 @@ def get_heatmap_data(days=371):
 
 
 # ── Media stats ───────────────────────────────────────────────────────────────
+def get_media_titles():
+    """Lightweight title list for the manual-log media dropdown (no cover images).
+    Ordered most-used first. Manual entries logged against an existing title merge
+    into that media's card by `title`, so the dropdown stores the original title and
+    only labels with the alias."""
+    rows = _q("""
+        SELECT s.title, COALESCE(SUM(s.time_seconds), 0) AS secs
+        FROM sessions s
+        WHERE s.title IS NOT NULL AND s.title != ''
+        GROUP BY s.title
+        ORDER BY secs DESC
+    """)
+    aliases = _get_aliases()
+    return [{"title": r[0], "display_title": aliases.get(r[0], r[0])} for r in rows]
+
 def get_media_stats():
     rows = _q("""
         SELECT
             s.title                          AS t,
-            MAX(s.source)                    AS source,
+            -- Prefer a real media source over 'manual': a title is only treated as
+            -- manual (and hidden from the media grid) if EVERY row is manual. Without
+            -- this, MAX() picks 'manual' over 'gsm' alphabetically, so logging a manual
+            -- entry against an existing game/book would hide its card.
+            COALESCE(MAX(CASE WHEN s.source <> 'manual' THEN s.source END), 'manual') AS source,
             MAX(s.activity_type)             AS activity_type,
             COALESCE(SUM(s.time_seconds), 0) AS total_secs,
             COALESCE(SUM(s.chars_read),  0)  AS total_chars,
@@ -1011,35 +1034,37 @@ def db_finish_goal(goal_id):
 
 def db_get_goals():
     rows = _q(
-        "SELECT id,label,metric,target_value,deadline,chunk_period,activity_type,start_date,user_finished "
+        "SELECT id,label,metric,target_value,deadline,chunk_period,activity_type,start_date,user_finished,track_chars "
         "FROM goals ORDER BY deadline"
     )
     return [
         {"id": r[0], "label": r[1], "metric": r[2], "target": r[3],
          "deadline": r[4], "chunk_period": r[5], "activity_type": r[6], "start_date": r[7],
-         "user_finished": bool(r[8])}
+         "user_finished": bool(r[8]), "track_chars": bool(r[9])}
         for r in rows
     ]
 
-def db_add_goal(label, metric, target, deadline, chunk_period="daily", activity_type=None):
+def db_add_goal(label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False):
     if metric not in SAFE_METRICS:
         raise ValueError(f"Invalid metric: {metric}")
     con = sqlite3.connect(DB_PATH)
     con.execute(
         "INSERT INTO goals "
-        "(label,metric,target_value,deadline,chunk_period,activity_type,start_date,created_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
+        "(label,metric,target_value,deadline,chunk_period,activity_type,start_date,created_at,track_chars) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
         (label, metric, float(target), deadline, chunk_period,
-         activity_type or None, get_today(), datetime.now().isoformat())
+         activity_type or None, get_today(), datetime.now().isoformat(),
+         1 if track_chars else 0)
     )
     con.commit()
     con.close()
 
-def db_update_goal(goal_id, label, target, deadline, activity_type):
+def db_update_goal(goal_id, label, target, deadline, activity_type, track_chars=False):
     con = sqlite3.connect(DB_PATH)
     con.execute(
-        "UPDATE goals SET label=?, target_value=?, deadline=?, activity_type=? WHERE id=?",
-        (label, float(target), deadline, activity_type or None, int(goal_id))
+        "UPDATE goals SET label=?, target_value=?, deadline=?, activity_type=?, track_chars=? WHERE id=?",
+        (label, float(target), deadline, activity_type or None,
+         1 if track_chars else 0, int(goal_id))
     )
     con.commit()
     con.close()
@@ -1077,16 +1102,21 @@ def db_get_goal_progress():
         # date range; mirrors the daily/weekly series pattern in CLAUDE.md.
         apply_attr = (not g["activity_type"]) or g["activity_type"] == "Reading"
         metric_key = g["metric"]
-        def _sum_adj(start_d_, end_d_):
+        def _sum_adj(start_d_, end_d_, mkey=None):
+            mk = mkey or metric_key
             if not apply_attr:
                 return 0.0
             total = 0.0
             cur = start_d_
             while cur <= end_d_:
                 ac, at, ak = get_gsm_day_adjustment(cur.strftime("%Y-%m-%d"))
-                total += {"chars_read": ac, "time_seconds": at, "cards_mined": ak}.get(metric_key, 0)
+                total += {"chars_read": ac, "time_seconds": at, "cards_mined": ak}.get(mk, 0)
                 cur += timedelta(days=1)
             return total
+
+        # Companion chars: passive char tally for time-graded goals (track_chars).
+        # Same date window/activity filter as the goal; never affects pacing.
+        want_chars = (g["metric"] == "time_seconds" and g.get("track_chars"))
 
         where_parts = ["session_date >= ?", "session_date <= ?"]
         params      = [g["start_date"], count_up_to]
@@ -1150,6 +1180,26 @@ def db_get_goal_progress():
         if month_start_d <= month_sum_end_d:
             month_completed = max(0.0, month_completed + _sum_adj(month_start_d, month_sum_end_d))
 
+        # Companion chars: reuse each period's WHERE clause but SUM(chars_read),
+        # and apply the chars component of the rollover adjustment. Passive only.
+        chars_completed = chars_today = chars_week = chars_month = 0.0
+        if want_chars:
+            def _chars_sum(where, prms):
+                sql = f"SELECT COALESCE(SUM(chars_read),0) FROM sessions WHERE {' AND '.join(where)}"
+                return (_q1(sql, *prms) or (0,))[0] or 0.0
+            chars_completed = _chars_sum(where_parts, params)
+            chars_today     = _chars_sum(today_where, today_params)
+            chars_week      = _chars_sum(week_where, week_params)
+            chars_month     = _chars_sum(month_where, month_params)
+            if start_d <= count_up_to_d:
+                chars_completed = max(0.0, chars_completed + _sum_adj(start_d, count_up_to_d, "chars_read"))
+            adj_c, _, _ = get_gsm_day_adjustment(today_str) if apply_attr else (0, 0, 0)
+            chars_today = max(0.0, chars_today + (adj_c if apply_attr else 0))
+            if week_start_d <= week_sum_end_d:
+                chars_week = max(0.0, chars_week + _sum_adj(week_start_d, week_sum_end_d, "chars_read"))
+            if month_start_d <= month_sum_end_d:
+                chars_month = max(0.0, chars_month + _sum_adj(month_start_d, month_sum_end_d, "chars_read"))
+
         remaining = max(0.0, g["target"] - completed)
         # Unclamped so overshoot (>100%) is visible in the displayed number;
         # the UI clamps the bar fill width separately to keep it inside the track.
@@ -1191,6 +1241,10 @@ def db_get_goal_progress():
             "month_period_days": month_period_days,
             "week_day_index":    week_day_index,
             "month_day_index":   month_day_index,
+            "chars_completed":   chars_completed,
+            "chars_today":       chars_today,
+            "chars_week":        chars_week,
+            "chars_month":       chars_month,
             "is_complete":     completed >= g["target"],
             "is_overdue":      days_left == 0 and completed < g["target"],
         })
