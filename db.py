@@ -361,6 +361,34 @@ def get_gsm_day_adjustment(d):
     return (add[0] - sub[0], add[1] - sub[1], add[2] - sub[2])
 
 
+def get_gsm_day_adjustments():
+    """Batch form of get_gsm_day_adjustment: {date: (chars, time_seconds, cards)}
+    net adjustment for every date a GSM rollover displacement touches.
+
+    One table scan instead of two queries per day. The per-day form opens a
+    fresh SQLite connection on each call, so any loop over a date range (the
+    Stats "All" range loops over every calendar day of history, several times
+    over) churned thousands of connections — the dominant cost there. The math
+    is identical: each displacement row (rollover_date<>source_date) ADDS its
+    chars/time/cards to rollover_date and SUBTRACTS them from source_date,
+    exactly mirroring get_gsm_day_adjustment's add/sub split. Dates absent from
+    the returned dict have a zero adjustment; callers default with
+    `adj.get(d, (0, 0, 0))`."""
+    con  = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT rollover_date, source_date, chars, time_seconds, cards "
+        "FROM gsm_rollover_attributions WHERE rollover_date<>source_date"
+    ).fetchall()
+    con.close()
+    adj = {}
+    for rd, sd, ch, sec, cd in rows:
+        c, s, k = adj.get(rd, (0, 0, 0))
+        adj[rd] = (c + ch, s + sec, k + cd)
+        c, s, k = adj.get(sd, (0, 0, 0))
+        adj[sd] = (c - ch, s - sec, k - cd)
+    return adj
+
+
 # ── Ingestion ─────────────────────────────────────────────────────────────────
 def already_ingested(fp):
     con = sqlite3.connect(DB_PATH)
@@ -546,13 +574,14 @@ def get_today_stats():
 def get_weekly_summary():
     days = [(get_today_date() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
     con  = sqlite3.connect(DB_PATH)
+    adj  = get_gsm_day_adjustments()
     out  = []
     for d in days:
         chars, secs = con.execute(
             "SELECT COALESCE(SUM(chars_read),0), "
             "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0) "
             "FROM sessions WHERE session_date=?", (d,)).fetchone()
-        adj_c, adj_t, _ = get_gsm_day_adjustment(d)
+        adj_c, adj_t, _ = adj.get(d, (0, 0, 0))
         out.append((d, max(0, chars + adj_c), max(0, secs + adj_t)))
     con.close()
     return out
@@ -664,10 +693,11 @@ def get_daily_time_series(days):
     )
     secs  = {r[0]: r[1] for r in rows}
     chars = {r[0]: r[2] for r in rows}
+    adj   = get_gsm_day_adjustments()
     out = []
     for i in range(total_days):
         d = (earliest + timedelta(days=i)).isoformat()
-        adj_c, adj_t, _ = get_gsm_day_adjustment(d)
+        adj_c, adj_t, _ = adj.get(d, (0, 0, 0))
         out.append((d,
                     max(0, secs.get(d, 0) + adj_t),
                     max(0, chars.get(d, 0) + adj_c)))
@@ -701,11 +731,12 @@ def get_activity_breakdown(n=None):
         "SELECT rollover_date AS d FROM gsm_rollover_attributions WHERE rollover_date<>source_date "
         "UNION SELECT source_date FROM gsm_rollover_attributions WHERE rollover_date<>source_date"
     )
+    adj = get_gsm_day_adjustments()
     gsm_delta = 0.0
     for (d,) in att:
         if d > today or (since and d < since):
             continue
-        gsm_delta += get_gsm_day_adjustment(d)[1]
+        gsm_delta += adj.get(d, (0, 0, 0))[1]
     if gsm_delta:
         totals["Reading"] = max(0, totals.get("Reading", 0) + gsm_delta)
 
@@ -907,12 +938,13 @@ def _adjusted_day_totals(since=None):
         "WHERE rollover_date<>source_date" + (" AND rollover_date>=?" if since else ""),
         *([since] if since else [])
     )
+    adj = get_gsm_day_adjustments()
     out = {}
     for d in set(raw) | {r[0] for r in att}:
         if d > today:
             continue
         rc, rs = raw.get(d, (0, 0))
-        adj_c, adj_t, _ = get_gsm_day_adjustment(d)
+        adj_c, adj_t, _ = adj.get(d, (0, 0, 0))
         out[d] = (max(0, rc + adj_c), max(0, rs + adj_t))
     return out
 
@@ -1088,6 +1120,7 @@ def db_get_goal_progress():
     results   = []
     today_str = get_today()
     today_d   = get_today_date()
+    adj       = get_gsm_day_adjustments()
 
     for g in goals:
         if g["metric"] not in SAFE_METRICS:
@@ -1117,7 +1150,7 @@ def db_get_goal_progress():
             total = 0.0
             cur = start_d_
             while cur <= end_d_:
-                ac, at, ak = get_gsm_day_adjustment(cur.strftime("%Y-%m-%d"))
+                ac, at, ak = adj.get(cur.strftime("%Y-%m-%d"), (0, 0, 0))
                 total += {"chars_read": ac, "time_seconds": at, "cards_mined": ak}.get(mk, 0)
                 cur += timedelta(days=1)
             return total
@@ -1145,7 +1178,7 @@ def db_get_goal_progress():
 
         # Apply GSM rollover attribution to today's number (GSM is always 'Reading')
         if (not g["activity_type"]) or g["activity_type"] == "Reading":
-            adj_c, adj_t, adj_cards = get_gsm_day_adjustment(today_str)
+            adj_c, adj_t, adj_cards = adj.get(today_str, (0, 0, 0))
             metric_adj = {"chars_read": adj_c, "time_seconds": adj_t, "cards_mined": adj_cards}.get(g["metric"], 0)
             today_completed = max(0.0, today_completed + metric_adj)
 
@@ -1201,7 +1234,7 @@ def db_get_goal_progress():
             chars_month     = _chars_sum(month_where, month_params)
             if start_d <= count_up_to_d:
                 chars_completed = max(0.0, chars_completed + _sum_adj(start_d, count_up_to_d, "chars_read"))
-            adj_c, _, _ = get_gsm_day_adjustment(today_str) if apply_attr else (0, 0, 0)
+            adj_c, _, _ = adj.get(today_str, (0, 0, 0)) if apply_attr else (0, 0, 0)
             chars_today = max(0.0, chars_today + (adj_c if apply_attr else 0))
             if week_start_d <= week_sum_end_d:
                 chars_week = max(0.0, chars_week + _sum_adj(week_start_d, week_sum_end_d, "chars_read"))
