@@ -603,15 +603,15 @@ class Api:
             print(f"[milestones] detail: {e}")
             return None
 
-    def add_milestone(self, title, name, unit, start_val, end_val):
+    def add_milestone(self, title, name, unit, start_val, end_val, color=None):
         try:
-            return db.db_add_milestone(title, name, unit, start_val, end_val)
+            return db.db_add_milestone(title, name, unit, start_val, end_val, color)
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def update_milestone(self, milestone_id, name, unit, start_val, end_val):
+    def update_milestone(self, milestone_id, name, unit, start_val, end_val, color=None):
         try:
-            return db.db_update_milestone(milestone_id, name, unit, start_val, end_val)
+            return db.db_update_milestone(milestone_id, name, unit, start_val, end_val, color)
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

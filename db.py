@@ -7,6 +7,7 @@ import sqlite3
 import json
 import csv
 import os
+import re
 from datetime import datetime, date, timedelta
 from pathlib import Path
 
@@ -111,6 +112,7 @@ def init_db():
     for col_name, col_def in [
         ("track",         "INTEGER NOT NULL DEFAULT 0"),
         ("count_as_time", "INTEGER NOT NULL DEFAULT 0"),
+        ("char_count",    "INTEGER NOT NULL DEFAULT 0"),
     ]:
         if col_name not in gsm_game_cols:
             con.execute(f"ALTER TABLE gsm_games ADD COLUMN {col_name} {col_def}")
@@ -216,6 +218,12 @@ def init_db():
         )
     """)
     con.execute("CREATE INDEX IF NOT EXISTS idx_milestones_title ON milestones(title)")
+
+    # Per-milestone display color (hex). Added late; backfilled from the palette
+    # by position so existing milestones get distinct defaults on next list.
+    milestone_cols = [r[1] for r in con.execute("PRAGMA table_info(milestones)").fetchall()]
+    if "color" not in milestone_cols:
+        con.execute("ALTER TABLE milestones ADD COLUMN color TEXT")
 
     # Manual ordering of media-grid cards. key = "t:<title>" for individual
     # titles, "s:<series_id>" for series stacks. Items not present fall back
@@ -1295,7 +1303,7 @@ def _compute_title_core(title):
     game_meta = None
     if source == "gsm":
         gm = _q1(
-            "SELECT game_id, description, image_data, genres, first_date "
+            "SELECT game_id, description, image_data, genres, first_date, char_count "
             "FROM gsm_games WHERE game_name=?", title
         )
         if gm:
@@ -1305,6 +1313,7 @@ def _compute_title_core(title):
                 "image":      gm[2] or "",
                 "genres":     json.loads(gm[3]) if gm[3] else [],
                 "first_date": gm[4] or "",
+                "char_count": int(gm[5] or 0),
             }
 
     book_cover = _q1("SELECT image_data FROM book_covers WHERE title=?", title)
@@ -1312,7 +1321,7 @@ def _compute_title_core(title):
         if game_meta:
             game_meta["image"] = book_cover[0]
         else:
-            game_meta = {"game_id": None, "desc": "", "image": book_cover[0], "genres": [], "first_date": ""}
+            game_meta = {"game_id": None, "desc": "", "image": book_cover[0], "genres": [], "first_date": "", "char_count": 0}
 
     out_by_sd = {}
     in_by_rd  = {}
@@ -1413,6 +1422,7 @@ def _compute_title_core(title):
         "image":         game_meta["image"]  if game_meta else "",
         "genres":        game_meta["genres"] if game_meta else [],
         "game_id":       game_meta["game_id"] if game_meta else None,
+        "game_char_count": game_meta.get("char_count", 0) if game_meta else 0,
     }
 
 
@@ -1430,6 +1440,24 @@ def db_get_title_detail(title):
 # game). Bounds are stored in native unit ('hours' or 'chars'); empties resolve
 # at query time. The canonical-minute axis lets us slice and disjoint-check
 # milestones whose bounds use different units.
+
+# Default palette for milestone colors, assigned by position when none is set.
+# Source of truth for the progress-bar ticks/section tints (Steps 3–4); mirror
+# in ui.js (MILESTONE_PALETTE) so the add modal pre-fills the same next color.
+MILESTONE_PALETTE = [
+    "#6E92E0", "#5FB98C", "#E0935A", "#B07FD6",
+    "#DB82A6", "#4FB3B0", "#DAD06A", "#8487D6",
+]
+
+
+def _norm_milestone_color(color, position=0):
+    """Normalize a milestone color to '#RRGGBB'. Falls back to the palette
+    entry for `position` when color is missing or malformed."""
+    if isinstance(color, str):
+        c = color.strip()
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", c):
+            return c.upper()
+    return MILESTONE_PALETTE[position % len(MILESTONE_PALETTE)]
 
 def _build_session_walk(title):
     """Return chronological list of effective session entries for title, plus
@@ -1494,7 +1522,7 @@ def _resolve_milestone_bounds(milestones_rows, walk, total_min, total_chars):
     result = {}
     prev_end = 0.0
     for m in milestones_rows:
-        mid, _name, unit, sv, ev, _pos = m
+        mid, _name, unit, sv, ev, _pos = m[:6]
         if sv is None:
             start_min = prev_end
         elif unit == "hours":
@@ -1517,6 +1545,54 @@ def _resolve_milestone_bounds(milestones_rows, walk, total_min, total_chars):
     return result
 
 
+def _minutes_to_chars(M, walk, total_min, total_chars):
+    """Inverse of _chars_bound_to_minutes: convert a minutes-axis position M to a
+    media-cumulative chars position. Used to place milestone boundaries on the
+    chars-denominated completion bar (hours-unit milestones have no native chars
+    bound, so we read the cumulative char count at that point in the walk)."""
+    if M is None or M <= 0:
+        return 0.0
+    if M >= total_min:
+        return float(total_chars)
+    for s in walk:
+        if s["before_min"] <= M < s["after_min"]:
+            if s["minutes"] <= 0:
+                return float(s["before_chars"])
+            frac = (M - s["before_min"]) / s["minutes"]
+            return s["before_chars"] + frac * s["chars"]
+    return float(total_chars)
+
+
+def _resolve_milestone_bounds_chars(milestones_rows, walk, total_min, total_chars):
+    """Mirror of _resolve_milestone_bounds on the chars axis. Returns
+    {milestone_id: (start_chars, end_chars)} — media-cumulative char positions
+    for placing ticks/section tints on the completion bar. chars-unit bounds are
+    used directly (clamped); hours-unit bounds map through the session walk."""
+    result = {}
+    prev_end = 0.0
+    for m in milestones_rows:
+        mid, _name, unit, sv, ev, _pos = m[:6]
+        if sv is None:
+            start_c = prev_end
+        elif unit == "chars":
+            start_c = max(0.0, min(float(total_chars), float(sv)))
+        else:  # hours
+            start_c = _minutes_to_chars(float(sv) * 60.0, walk, total_min, total_chars)
+
+        if ev is None:
+            end_c = float(total_chars)
+        elif unit == "chars":
+            end_c = max(0.0, min(float(total_chars), float(ev)))
+        else:
+            end_c = _minutes_to_chars(float(ev) * 60.0, walk, total_min, total_chars)
+
+        if end_c < start_c:
+            end_c = start_c
+        result[mid] = (start_c, end_c)
+        prev_end = end_c
+    return result
+
+
 def _slice_totals(walk, start_min, end_min):
     """Compute pro-rata (chars, seconds) totals for the minute range
     [start_min, end_min] over the given session walk."""
@@ -1536,17 +1612,19 @@ def db_list_milestones(title):
     """Return list of milestones for a title with bounds resolved to minutes
     and pro-rata chars/seconds totals."""
     rows = _q("""
-        SELECT id, name, unit, start_val, end_val, position
+        SELECT id, name, unit, start_val, end_val, position, color
         FROM milestones WHERE title=? ORDER BY position ASC, id ASC
     """, title)
     if not rows:
         return []
     walk, total_min, total_chars = _build_session_walk(title)
     bounds = _resolve_milestone_bounds(rows, walk, total_min, total_chars)
+    bounds_chars = _resolve_milestone_bounds_chars(rows, walk, total_min, total_chars)
     out = []
     for r in rows:
-        mid, name, unit, sv, ev, pos = r
+        mid, name, unit, sv, ev, pos, color = r
         sm, em = bounds.get(mid, (0.0, 0.0))
+        sc, ec = bounds_chars.get(mid, (0.0, 0.0))
         tc, ts = _slice_totals(walk, sm, em)
         out.append({
             "id":          mid,
@@ -1556,6 +1634,9 @@ def db_list_milestones(title):
             "start_val":   sv,
             "end_val":     ev,
             "position":    pos,
+            "color":       _norm_milestone_color(color, pos),
+            "start_chars": sc,
+            "end_chars":   ec,
             "start_min":   sm,
             "end_min":     em,
             "duration_min": max(0.0, em - sm),
@@ -1580,11 +1661,11 @@ def _milestones_overlap(bounds_map, tol=0.01):
 
 def db_get_milestone(milestone_id):
     """Return the milestone row + resolved bounds + parent title."""
-    r = _q1("""SELECT id, title, name, unit, start_val, end_val, position
+    r = _q1("""SELECT id, title, name, unit, start_val, end_val, position, color
                FROM milestones WHERE id=?""", int(milestone_id))
     if not r:
         return None
-    mid, title, name, unit, sv, ev, pos = r
+    mid, title, name, unit, sv, ev, pos, color = r
     walk, total_min, total_chars = _build_session_walk(title)
     all_rows = _q("""SELECT id, name, unit, start_val, end_val, position
                      FROM milestones WHERE title=? ORDER BY position ASC, id ASC""", title)
@@ -1594,6 +1675,7 @@ def db_get_milestone(milestone_id):
         "id": mid, "title": title, "name": name, "unit": unit,
         "start_val": sv, "end_val": ev, "position": pos,
         "start_min": sm, "end_min": em,
+        "color": _norm_milestone_color(color, pos),
     }
 
 
@@ -1651,6 +1733,7 @@ def db_get_milestone_detail(milestone_id):
         "start_min":     start_min,
         "end_min":       end_min,
         "position":      base["position"],
+        "color":         base.get("color"),
         "source":        parent.get("source", ""),
         "activity_type": parent.get("activity_type", "Reading"),
         "total_chars":   total_chars,
@@ -1685,7 +1768,7 @@ def _validate_milestone_disjoint(title, candidate_id=None, candidate=None):
     return None
 
 
-def db_add_milestone(title, name, unit, start_val, end_val):
+def db_add_milestone(title, name, unit, start_val, end_val, color=None):
     name = (name or "").strip()
     if not name:
         return {"ok": False, "error": "Name required"}
@@ -1703,11 +1786,12 @@ def db_add_milestone(title, name, unit, start_val, end_val):
     if err:
         return {"ok": False, "error": err}
 
+    col = _norm_milestone_color(color, new_pos)
     con = sqlite3.connect(DB_PATH)
     cur = con.execute(
-        "INSERT INTO milestones (title, name, unit, start_val, end_val, position, created_at) "
-        "VALUES (?,?,?,?,?,?,?)",
-        (title, name, unit, sv, ev, new_pos, datetime.now().isoformat())
+        "INSERT INTO milestones (title, name, unit, start_val, end_val, position, color, created_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (title, name, unit, sv, ev, new_pos, col, datetime.now().isoformat())
     )
     new_id = cur.lastrowid
     con.commit()
@@ -1715,7 +1799,7 @@ def db_add_milestone(title, name, unit, start_val, end_val):
     return {"ok": True, "id": new_id}
 
 
-def db_update_milestone(milestone_id, name, unit, start_val, end_val):
+def db_update_milestone(milestone_id, name, unit, start_val, end_val, color=None):
     mid = int(milestone_id)
     existing = _q1("SELECT title, position FROM milestones WHERE id=?", mid)
     if not existing:
@@ -1736,10 +1820,11 @@ def db_update_milestone(milestone_id, name, unit, start_val, end_val):
     if err:
         return {"ok": False, "error": err}
 
+    col = _norm_milestone_color(color, pos)
     con = sqlite3.connect(DB_PATH)
     con.execute(
-        "UPDATE milestones SET name=?, unit=?, start_val=?, end_val=? WHERE id=?",
-        (name, unit, sv, ev, mid)
+        "UPDATE milestones SET name=?, unit=?, start_val=?, end_val=?, color=? WHERE id=?",
+        (name, unit, sv, ev, col, mid)
     )
     con.commit()
     con.close()

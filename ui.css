@@ -276,11 +276,27 @@ select:focus { border-color: var(--accent); }
 .badge-weekly  { color: var(--purple); }
 .badge-total   { color: var(--warn); }
 .progress-wrap { position: relative; padding-bottom: 9px; }
+.detail-progress { margin-top: 14px; }
+.detail-progress-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 5px;
+}
+.detail-progress-pct { font-size: 13px; font-weight: 700; }
+.detail-progress-counts { font-size: 12px; color: var(--dim); }
 .progress-track {
+  position: relative;
   height: 8px; background: var(--inset); border-radius: 4px; overflow: hidden;
 }
 .progress-fill {
   height: 100%; border-radius: 4px; transition: width 0.5s ease;
+}
+/* Milestone section tint, overlaid on the base fill within the read portion. */
+.progress-seg { position: absolute; top: 0; bottom: 0; }
+/* Boundary divider between milestone sections. */
+.progress-tick {
+  position: absolute; top: 0; bottom: 0; width: 2px;
+  transform: translateX(-1px);
+  background: var(--bg); opacity: 0.9;
 }
 .progress-expected {
   position: absolute; top: 100%;
@@ -565,6 +581,26 @@ select:focus { border-color: var(--accent); }
   min-width: 20px; height: 20px; border-radius: 50%;
   background: var(--accent); color: #fff;
   font-size: 10px; font-weight: 700; flex-shrink: 0;
+}
+.milestone-swatch {
+  width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0;
+  border: 1px solid rgba(255,255,255,0.15);
+}
+/* Single-axis milestone color picker: contiguous muted swatches forming one bar. */
+.color-strip {
+  display: flex; gap: 0; margin-top: 6px;
+  border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--grid);
+}
+.color-swatch {
+  flex: 1; height: 26px; border: none; padding: 0; margin: 0;
+  cursor: pointer; position: relative;
+  transition: filter 0.1s ease;
+}
+.color-swatch:hover { filter: brightness(1.12); }
+.color-swatch.selected {
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px var(--card), inset 0 0 0 4px #fff;
 }
 .milestone-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .milestone-name {

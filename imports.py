@@ -316,29 +316,31 @@ def _sync_game_metadata_from_gsm(con, gsm, game_id):
                         NULLIF(title_original,''),
                         NULLIF(title_english, ''),
                         NULLIF(title_romaji,  ''), id),
-               description, image, genres
+               description, image, genres,
+               CAST(NULLIF(character_count,'') AS INTEGER)
         FROM games WHERE id=?
     """, (game_id,)).fetchone()
     if not row:
         return
-    name, desc, image, genres = row
+    name, desc, image, genres, char_count = row
     fd_row = gsm.execute(
         "SELECT MIN(date) FROM game_daily_rollup WHERE game_id=?", (game_id,)
     ).fetchone()
     first_date = fd_row[0] if fd_row else None
     con.execute("""
         INSERT INTO gsm_games
-          (game_id, game_name, description, image_data, genres, first_date, last_updated)
-        VALUES (?,?,?,?,?,?,?)
+          (game_id, game_name, description, image_data, genres, char_count, first_date, last_updated)
+        VALUES (?,?,?,?,?,?,?,?)
         ON CONFLICT(game_id) DO UPDATE SET
           game_name    = excluded.game_name,
           description  = excluded.description,
           image_data   = excluded.image_data,
           genres       = excluded.genres,
+          char_count   = excluded.char_count,
           first_date   = excluded.first_date,
           last_updated = excluded.last_updated
     """, (game_id, name or game_id, desc or '', image or '', genres or '[]',
-          first_date, datetime.now().isoformat()))
+          int(char_count or 0), first_date, datetime.now().isoformat()))
 
 
 def _resolve_game_title(game_id, fallback):
@@ -535,13 +537,14 @@ def _upsert_gsm_game(cur_stats):
     con = sqlite3.connect(DB_PATH)
     con.execute("""
         INSERT INTO gsm_games
-          (game_id, game_name, description, image_data, genres, first_date, last_updated)
-        VALUES (?,?,?,?,?,?,?)
+          (game_id, game_name, description, image_data, genres, char_count, first_date, last_updated)
+        VALUES (?,?,?,?,?,?,?,?)
         ON CONFLICT(game_id) DO UPDATE SET
           game_name    = excluded.game_name,
           description  = excluded.description,
           image_data   = excluded.image_data,
           genres       = excluded.genres,
+          char_count   = excluded.char_count,
           first_date   = excluded.first_date,
           last_updated = excluded.last_updated
     """, (
@@ -550,6 +553,7 @@ def _upsert_gsm_game(cur_stats):
         cur_stats.get("description", ""),
         cur_stats.get("image", ""),
         json.dumps(cur_stats.get("genres", [])),
+        int(cur_stats.get("game_character_count", 0) or 0),
         cur_stats.get("first_date", ""),
         datetime.now().isoformat(),
     ))

@@ -403,6 +403,17 @@
         <!-- Stat cards -->
         <div class="stat-grid" id="detail-stats-grid"></div>
 
+        <!-- Completion progress bar -->
+        <div id="detail-progress" class="detail-progress" style="display:none">
+          <div class="detail-progress-head">
+            <span id="detail-progress-pct" class="detail-progress-pct"></span>
+            <span id="detail-progress-counts" class="detail-progress-counts"></span>
+          </div>
+          <div class="progress-track" id="detail-progress-track">
+            <div id="detail-progress-fill" class="progress-fill"></div>
+          </div>
+        </div>
+
         <!-- Daily activity chart -->
         <h2 style="margin-top:16px">Daily time</h2>
         <div class="chart-wrap"><canvas id="chart-detail-time" height="180"></canvas></div>
@@ -439,7 +450,6 @@
               <button class="btn btn-outline btn-sm" id="milestone-edit-btn" onclick="openEditMilestoneModal()">✎ Edit</button>
               <button class="btn btn-outline btn-sm btn-danger" id="milestone-delete-btn" onclick="deleteCurrentMilestone()">✕ Delete</button>
             </div>
-            <div id="milestone-badge"></div>
           </div>
         </div>
 
@@ -725,6 +735,9 @@
           <option value="chars">Characters</option>
         </select>
       </label>
+      <div style="font-size:11px;color:var(--dim)">Color
+        <div id="milestone-color-strip" class="color-strip"></div>
+      </div>
       <div style="display:flex;gap:8px">
         <label style="flex:1;font-size:11px;color:var(--dim)">Start <span style="opacity:0.7" id="milestone-start-hint">(empty = from beginning)</span>
           <input id="milestone-input-start" type="number" step="any" min="0" placeholder="empty" />

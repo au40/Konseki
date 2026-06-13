@@ -2149,6 +2149,57 @@ function renderMediaDetail(d) {
     genresEl.innerHTML = `<span class="genre-badge" style="color:${color};border-color:${color}44">${d.activity_type}</span>`;
   }
 
+  // Completion progress bar: chars read / total game length. GSM titles only —
+  // game_char_count is 0 for non-GSM titles and for games GSM hasn't fetched a
+  // length for yet, in which case we hide the bar.
+  const progEl = document.getElementById('detail-progress');
+  const track  = document.getElementById('detail-progress-track');
+  // Clear any segments/ticks injected on a previous render.
+  track.querySelectorAll('.progress-seg, .progress-tick').forEach(n => n.remove());
+  if (d.game_char_count > 0) {
+    const gcc = d.game_char_count;
+    const pct = Math.min(100, d.total_chars / gcc * 100);
+    // 1-decimal, trailing zero dropped (matches goal-card % formatting).
+    const pctDisp = pct.toFixed(1).replace(/\.0$/, '');
+    document.getElementById('detail-progress-pct').textContent = `${pctDisp}%`;
+    document.getElementById('detail-progress-counts').textContent =
+      `${fmtChars(d.total_chars)} / ${fmtChars(d.game_char_count)} chars`;
+    const fill = document.getElementById('detail-progress-fill');
+    fill.style.width = `${pct}%`;
+    fill.style.background = color;
+
+    // Milestone section tints + boundary ticks. Positions are media-cumulative
+    // char bounds (start_chars/end_chars) over the full game length, so they
+    // line up with the chars-denominated fill. Sections overlay the base accent
+    // fill; the read portion not covered by any milestone keeps the accent.
+    const ticks = new Set();
+    (d.milestones || []).forEach(m => {
+      if (m.start_chars == null || m.end_chars == null) return;
+      const l = Math.max(0, Math.min(100, m.start_chars / gcc * 100));
+      const r = Math.max(0, Math.min(100, m.end_chars   / gcc * 100));
+      if (r - l > 0) {
+        const seg = document.createElement('div');
+        seg.className = 'progress-seg';
+        seg.style.left = `${l}%`;
+        seg.style.width = `${r - l}%`;
+        seg.style.background = m.color || color;
+        seg.title = m.name;
+        track.appendChild(seg);
+      }
+      [l, r].forEach(p => { if (p > 0.05 && p < 99.95) ticks.add(p.toFixed(3)); });
+    });
+    ticks.forEach(p => {
+      const tick = document.createElement('div');
+      tick.className = 'progress-tick';
+      tick.style.left = `${p}%`;
+      track.appendChild(tick);
+    });
+
+    progEl.style.display = 'block';
+  } else {
+    progEl.style.display = 'none';
+  }
+
   // Milestones replace the description when present; otherwise description shows.
   currentMilestones = d.milestones || [];
   const descEl     = document.getElementById('detail-desc');
@@ -2846,6 +2897,7 @@ function renderMilestonesList(el, milestones) {
 
     row.innerHTML = `
       <span class="milestone-index">${idx + 1}</span>
+      <span class="milestone-swatch" style="background:${m.color || '#6E92E0'}"></span>
       <div class="milestone-main">
         <span class="milestone-name">${escHtml(m.name)}</span>
         <span class="milestone-meta">${escHtml(fmtMilestoneTotals(m))}</span>
@@ -2920,6 +2972,50 @@ async function refreshCurrentMediaDetail() {
 }
 
 // ── Milestone add/edit modal ───────────────────────────────────────────────
+// Mirror of db.py MILESTONE_PALETTE — used to pre-fill the add modal with the
+// next distinct default color (backend re-derives/validates on save). Every
+// entry is also a member of MILESTONE_SWATCHES so the default highlights a
+// real swatch.
+const MILESTONE_PALETTE = [
+  '#6E92E0', '#5FB98C', '#E0935A', '#B07FD6',
+  '#DB82A6', '#4FB3B0', '#DAD06A', '#8487D6',
+];
+
+// Full set of pickable colors, hue-ordered so the strip reads as one spectrum
+// bar. Clear, recognizable hues at moderate saturation — the only colors a user
+// can choose, so picks stay vivid-but-not-scorching by construction.
+const MILESTONE_SWATCHES = [
+  '#D96B6B', '#E0935A', '#E0B45F', '#DAD06A', '#A9CC6B', '#5FB98C',
+  '#4FB3B0', '#5AA6CF', '#6E92E0', '#8487D6', '#B07FD6', '#DB82A6', '#A9A6B0',
+];
+let _selectedMilestoneColor = MILESTONE_SWATCHES[0];
+
+// Build the swatch strip into the modal, marking `selectedHex` active. If the
+// stored color isn't a standard swatch (legacy/custom), it's prepended so it
+// still shows as selected and isn't silently lost.
+function renderMilestoneColorStrip(selectedHex) {
+  const strip = document.getElementById('milestone-color-strip');
+  if (!strip) return;
+  _selectedMilestoneColor = selectedHex || MILESTONE_SWATCHES[0];
+  const sel = _selectedMilestoneColor.toUpperCase();
+  const colors = MILESTONE_SWATCHES.slice();
+  if (!colors.some(c => c.toUpperCase() === sel)) colors.unshift(_selectedMilestoneColor);
+  strip.innerHTML = '';
+  colors.forEach(c => {
+    const sw = document.createElement('button');
+    sw.type = 'button';
+    sw.className = 'color-swatch' + (c.toUpperCase() === sel ? ' selected' : '');
+    sw.style.background = c;
+    sw.title = c;
+    sw.addEventListener('click', () => {
+      _selectedMilestoneColor = c;
+      strip.querySelectorAll('.color-swatch').forEach(s => s.classList.remove('selected'));
+      sw.classList.add('selected');
+    });
+    strip.appendChild(sw);
+  });
+}
+
 function openAddMilestoneModal() {
   if (!currentDetailTitle) return;
   _milestoneEditingId = null;
@@ -2928,6 +3024,7 @@ function openAddMilestoneModal() {
   document.getElementById('milestone-input-unit').value  = 'hours';
   document.getElementById('milestone-input-start').value = '';
   document.getElementById('milestone-input-end').value   = '';
+  renderMilestoneColorStrip(MILESTONE_PALETTE[currentMilestones.length % MILESTONE_PALETTE.length]);
   document.getElementById('milestone-error').style.display = 'none';
   updateMilestoneHintsForUnit();
   document.getElementById('milestone-overlay').style.display = 'flex';
@@ -2944,6 +3041,7 @@ function openEditMilestoneModal() {
   document.getElementById('milestone-input-unit').value  = m.unit;
   document.getElementById('milestone-input-start').value = m.start_val == null ? '' : m.start_val;
   document.getElementById('milestone-input-end').value   = m.end_val   == null ? '' : m.end_val;
+  renderMilestoneColorStrip(m.color || MILESTONE_PALETTE[0]);
   document.getElementById('milestone-error').style.display = 'none';
   updateMilestoneHintsForUnit();
   document.getElementById('milestone-overlay').style.display = 'flex';
@@ -2969,6 +3067,7 @@ async function saveMilestoneModal() {
   const endStr    = document.getElementById('milestone-input-end').value.trim();
   const startVal  = startStr === '' ? null : parseFloat(startStr);
   const endVal    = endStr   === '' ? null : parseFloat(endStr);
+  const color     = _selectedMilestoneColor;
   const errEl     = document.getElementById('milestone-error');
   errEl.style.display = 'none';
 
@@ -2977,8 +3076,8 @@ async function saveMilestoneModal() {
   if (endStr   !== '' && !Number.isFinite(endVal))   { errEl.textContent = 'End must be a number or empty.';   errEl.style.display = 'block'; return; }
 
   const r = _milestoneEditingId == null
-    ? await window.pywebview.api.add_milestone(currentDetailTitle, name, unit, startVal, endVal)
-    : await window.pywebview.api.update_milestone(_milestoneEditingId, name, unit, startVal, endVal);
+    ? await window.pywebview.api.add_milestone(currentDetailTitle, name, unit, startVal, endVal, color)
+    : await window.pywebview.api.update_milestone(_milestoneEditingId, name, unit, startVal, endVal, color);
   if (!r.ok) {
     errEl.textContent = r.error || 'Failed to save milestone.';
     errEl.style.display = 'block';
@@ -3046,11 +3145,6 @@ function renderMilestoneDetail(d) {
   }
 
   document.getElementById('milestone-title').textContent = d.name;
-
-  // Badge shows the milestone's unit (totals are visible in the stat cards)
-  const unitLabel = d.unit === 'hours' ? 'Hours' : 'Characters';
-  document.getElementById('milestone-badge').innerHTML =
-    `<span class="genre-badge" style="color:${color};border-color:${color}44">${unitLabel}</span>`;
 
   // Show "End milestone" button only for ongoing milestones
   document.getElementById('milestone-end-btn').style.display =
