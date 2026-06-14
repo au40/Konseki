@@ -142,6 +142,29 @@ def init_db():
         )
     """)
 
+    # Manual time correction overlay, keyed by (DISPLAY date, game_id). secs_delta
+    # is signed; negative shaves dead/AFK time GSM stranded on a specific game that
+    # day. Applied at read time alongside GSM rollover attribution (see CLAUDE.md),
+    # so it survives GSM re-ingests that rewrite the underlying session rows. The
+    # first cut of this table was day-level (PRIMARY KEY (date), no game_id); drop
+    # that obsolete shape so the per-game schema below takes effect (the feature is
+    # new — any early test value is simply re-entered via the per-game UI).
+    if con.execute("SELECT name FROM sqlite_master WHERE type='table' "
+                   "AND name='manual_time_adjust'").fetchone():
+        mta_cols = [r[1] for r in con.execute("PRAGMA table_info(manual_time_adjust)")]
+        if "game_id" not in mta_cols:
+            con.execute("DROP TABLE manual_time_adjust")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS manual_time_adjust (
+            date        TEXT NOT NULL,
+            game_id     TEXT NOT NULL,
+            secs_delta  REAL NOT NULL DEFAULT 0,
+            note        TEXT,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (date, game_id)
+        )
+    """)
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS title_aliases (
             original_title TEXT PRIMARY KEY,
@@ -357,8 +380,12 @@ def get_gsm_day_adjustment(d):
         "FROM gsm_rollover_attributions WHERE source_date=? AND rollover_date<>?",
         (d, d)
     ).fetchone()
+    man = con.execute(
+        "SELECT COALESCE(SUM(secs_delta),0) FROM manual_time_adjust WHERE date=?", (d,)
+    ).fetchone()
     con.close()
-    return (add[0] - sub[0], add[1] - sub[1], add[2] - sub[2])
+    man_secs = float(man[0]) if man else 0.0
+    return (add[0] - sub[0], add[1] - sub[1] + man_secs, add[2] - sub[2])
 
 
 def get_gsm_day_adjustments():
@@ -386,7 +413,113 @@ def get_gsm_day_adjustments():
         adj[rd] = (c + ch, s + sec, k + cd)
         c, s, k = adj.get(sd, (0, 0, 0))
         adj[sd] = (c - ch, s - sec, k - cd)
+    # Fold in the manual overlay (summed across games per date) so every
+    # net-per-day consumer picks it up for free (this helper is the chokepoint —
+    # see CLAUDE.md). Manual edits only touch time, never chars/cards.
+    for d, secs in get_manual_time_adjusts_by_day().items():
+        c, s, k = adj.get(d, (0, 0, 0))
+        adj[d] = (c, s + secs, k)
     return adj
+
+
+def get_manual_time_adjusts_by_day():
+    """{date: summed secs_delta} across all games — the day-level rollup used by
+    net-per-day consumers (aggregates don't care which game was shaved)."""
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT date, COALESCE(SUM(secs_delta),0) FROM manual_time_adjust "
+        "WHERE secs_delta <> 0 GROUP BY date"
+    ).fetchall()
+    con.close()
+    return {d: s for d, s in rows}
+
+
+def get_manual_time_adjusts_all():
+    """{(date, game_id): secs_delta} for every live override — used by the per-row
+    paths to shave the specific game's row rather than draining in order."""
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT date, game_id, secs_delta FROM manual_time_adjust WHERE secs_delta <> 0"
+    ).fetchall()
+    con.close()
+    return {(d, g): s for d, g, s in rows}
+
+
+def get_manual_time_adjusts_for_date(d):
+    """{game_id: secs_delta} for one display date (for the dashboard row indicator)."""
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT game_id, secs_delta FROM manual_time_adjust WHERE date=? AND secs_delta<>0",
+        (d,)
+    ).fetchall()
+    con.close()
+    return {g: s for g, s in rows}
+
+
+def get_manual_time_adjust(d, game_id):
+    """Signed secs_delta for one (date, game_id) (0 if none)."""
+    con = sqlite3.connect(DB_PATH)
+    row = con.execute(
+        "SELECT secs_delta FROM manual_time_adjust WHERE date=? AND game_id=?",
+        (d, game_id)
+    ).fetchone()
+    con.close()
+    return float(row[0]) if row else 0.0
+
+
+def set_manual_time_adjust(d, game_id, secs_delta, note=None):
+    """Upsert a manual per-game time adjustment. secs_delta is signed seconds.
+    A zero delta deletes the row so the table only holds live overrides."""
+    con = sqlite3.connect(DB_PATH)
+    if not secs_delta:
+        con.execute("DELETE FROM manual_time_adjust WHERE date=? AND game_id=?",
+                    (d, game_id))
+    else:
+        con.execute("""
+            INSERT INTO manual_time_adjust (date, game_id, secs_delta, note, updated_at)
+            VALUES (?,?,?,?,?)
+            ON CONFLICT(date, game_id) DO UPDATE SET
+              secs_delta=excluded.secs_delta,
+              note=excluded.note,
+              updated_at=excluded.updated_at
+        """, (d, game_id, float(secs_delta), note, datetime.now().isoformat()))
+    con.commit()
+    con.close()
+
+
+def _manual_secs_sum(since=None):
+    """Total signed manual time delta over [since, ∞) (all-time if since is None).
+    Used to keep reading-speed denominators and the all-time total consistent with
+    the per-day overlay applied everywhere else."""
+    con = sqlite3.connect(DB_PATH)
+    if since:
+        row = con.execute(
+            "SELECT COALESCE(SUM(secs_delta),0) FROM manual_time_adjust WHERE date>=?",
+            (since,)).fetchone()
+    else:
+        row = con.execute(
+            "SELECT COALESCE(SUM(secs_delta),0) FROM manual_time_adjust").fetchone()
+    con.close()
+    return float(row[0]) if row else 0.0
+
+
+def get_manual_secs_by_title():
+    """{title: summed secs_delta} for per-title TOTALS (media grid, top titles).
+
+    Only the manual overlay matters for an all-time title total: GSM rollover
+    attribution merely relabels which day a game's time displays on — both ends of
+    a displacement belong to the same title, so it nets to zero across the title's
+    own days. A manual shave is a true reduction, so it must be subtracted. Maps
+    each shave's game_id to its title via the game's sessions (one title per game)."""
+    rows = _q(
+        "SELECT s.title, COALESCE(SUM(m.secs_delta),0) "
+        "FROM manual_time_adjust m "
+        "JOIN (SELECT game_id, MAX(title) AS title FROM sessions "
+        "      WHERE source='gsm' AND game_id IS NOT NULL GROUP BY game_id) s "
+        "  ON s.game_id = m.game_id "
+        "WHERE m.secs_delta <> 0 GROUP BY s.title"
+    )
+    return {t: s for t, s in rows}
 
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
@@ -520,7 +653,7 @@ def get_today_stats():
     bucket = (today,) if today == real else (today, real)
     placeholders = ",".join("?" * len(bucket))
     rows = _q(f"""
-        SELECT id,source,title,activity_type,chars_read,lines_read,time_seconds,session_date
+        SELECT id,source,title,activity_type,chars_read,lines_read,time_seconds,session_date,game_id
         FROM sessions WHERE session_date IN ({placeholders})
           AND (time_excluded IS NULL OR time_excluded=0)
         ORDER BY session_date DESC, ingested_at DESC
@@ -541,7 +674,7 @@ def get_today_stats():
 
     result = []
     for r in rows:
-        rid, src, title, atype, chars, lines, secs, sd = r
+        rid, src, title, atype, chars, lines, secs, sd, gid = r
         if src == 'gsm' and sd not in deducted_for and sd in out_by_date:
             oc, os_ = out_by_date[sd]
             if oc or os_:
@@ -551,7 +684,7 @@ def get_today_stats():
         # Drop sessions whose displayed values are all zero (e.g. fully attributed-away GSM rows)
         if chars == 0 and secs == 0 and (lines or 0) == 0:
             continue
-        result.append((rid, src, title, atype, chars, lines, secs))
+        result.append((rid, src, title, atype, chars, lines, secs, gid))
 
     # Incoming attributions: chars coming from outside the bucket → add phantom rows
     in_rows = _q(
@@ -563,11 +696,30 @@ def get_today_stats():
     for sd, ch, sec in in_rows:
         if (ch or 0) > 0 or (sec or 0) > 0:
             game_row = _q1(
-                "SELECT title FROM sessions WHERE source='gsm' AND session_date=? "
+                "SELECT title, game_id FROM sessions WHERE source='gsm' AND session_date=? "
                 "ORDER BY ingested_at DESC LIMIT 1", sd
             )
             game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
-            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0)))
+            game_id   = (game_row[1] if game_row else None)
+            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), game_id))
+
+    # Manual overlay: shave secs off the SPECIFIC game's row(s) for this display
+    # date, so the right game absorbs the dead time (the user picks which). Tracked
+    # per game so multiple rows of one game across the rollover bucket share its
+    # budget; max(0,…) floors over-subtraction.
+    rem_by_game = {g: -s for g, s in get_manual_time_adjusts_for_date(today).items() if s < 0}
+    if rem_by_game:
+        adjusted = []
+        for rid, src, title, atype, chars, lines, secs, gid in result:
+            rem = rem_by_game.get(gid, 0)
+            if src == 'gsm' and rem > 0 and secs > 0:
+                take = min(secs, rem)
+                secs -= take
+                rem_by_game[gid] = rem - take
+            if chars == 0 and secs == 0 and (lines or 0) == 0:
+                continue
+            adjusted.append((rid, src, title, atype, chars, lines, secs, gid))
+        result = adjusted
 
     return result
 
@@ -587,12 +739,17 @@ def get_weekly_summary():
     return out
 
 def get_all_time_totals():
-    return _q1("""
+    chars, lines, secs, days = _q1("""
         SELECT COALESCE(SUM(chars_read),0), COALESCE(SUM(lines_read),0),
                COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0),
                COUNT(DISTINCT CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN session_date END)
         FROM sessions
     """)
+    # GSM rollover attribution nets to zero over all-time (both endpoints are in
+    # range), so it's ignored here — but the manual overlay is a TRUE reduction
+    # and must be applied or the dashboard all-time total drifts from the daily
+    # views (see CLAUDE.md). chars/days are unaffected (only time is shaved).
+    return (chars, lines, max(0, secs + _manual_secs_sum()), days)
 
 def get_range_totals(n):
     """(chars, secs, active_days) over the range, GSM-attribution-adjusted.
@@ -612,7 +769,7 @@ def get_recent_sessions(limit=30):
     # each date, drop fully-zeroed rows, and synthesize phantom rows for incoming
     # attributions. Over-fetch raw to absorb drops before slicing to `limit`.
     raw = _q("""
-        SELECT id,session_date,source,title,activity_type,chars_read,lines_read,time_seconds
+        SELECT id,session_date,source,title,activity_type,chars_read,lines_read,time_seconds,game_id
         FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0)
         ORDER BY session_date DESC,ingested_at DESC LIMIT ?
     """, limit * 2)
@@ -647,30 +804,51 @@ def get_recent_sessions(limit=30):
         in_by_date.setdefault(rd, []).append((sd, ch, sec))
 
     all_dates = sorted(set(by_date.keys()) | set(in_by_date.keys()), reverse=True)
+    manual = get_manual_time_adjusts_all()   # {(date, game_id): secs_delta}
 
     result = []
     for d in all_dates:
         out_chars, out_secs = out_by_date.get(d, (0, 0))
         deducted = False
+        day_rows = []
         for r in by_date.get(d, []):
-            rid, sd, src, title, atype, chars, lines, secs = r
+            rid, sd, src, title, atype, chars, lines, secs, gid = r
             if src == 'gsm' and not deducted and (out_chars or out_secs):
                 chars = max(0, chars - int(out_chars))
                 secs  = max(0, secs  - float(out_secs))
                 deducted = True
             if chars == 0 and secs == 0 and (lines or 0) == 0:
                 continue
-            result.append((rid, sd, src, title, atype, chars, lines, secs))
+            day_rows.append((rid, sd, src, title, atype, chars, lines, secs, gid))
 
         for sd2, ch, sec in in_by_date.get(d, []):
             if (ch or 0) <= 0 and (sec or 0) <= 0:
                 continue
             game_row = _q1(
-                "SELECT title FROM sessions WHERE source='gsm' AND session_date=? "
+                "SELECT title, game_id FROM sessions WHERE source='gsm' AND session_date=? "
                 "ORDER BY ingested_at DESC LIMIT 1", sd2
             )
             game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
-            result.append((None, d, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0)))
+            game_id   = (game_row[1] if game_row else None)
+            day_rows.append((None, d, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), game_id))
+
+        # Manual overlay for display date d — shave secs off the SPECIFIC game's
+        # row(s), keeping History consistent with the per-game dashboard edit.
+        rem_by_game = {g: -s for (dd, g), s in manual.items() if dd == d and s < 0}
+        if rem_by_game:
+            shaved = []
+            for rid, sd, src, title, atype, chars, lines, secs, gid in day_rows:
+                rem = rem_by_game.get(gid, 0)
+                if src == 'gsm' and rem > 0 and secs > 0:
+                    take = min(secs, rem)
+                    secs -= take
+                    rem_by_game[gid] = rem - take
+                if chars == 0 and secs == 0 and (lines or 0) == 0:
+                    continue
+                shaved.append((rid, sd, src, title, atype, chars, lines, secs, gid))
+            day_rows = shaved
+
+        result.extend(day_rows)
 
     return result[:limit]
 
@@ -727,9 +905,14 @@ def get_activity_breakdown(n=None):
     # Candidate dates = every rollover_date and source_date inside the window;
     # internal displacements (both ends in-window) net to zero, edge crossings
     # add/subtract — mirrors the per-day pattern in _adjusted_day_totals.
+    # Candidate dates = every displacement endpoint AND every manual-overlay date
+    # (a manual shave on a day with no displacement still has to fold into the
+    # Reading slice). adj.get(d)[1] already bundles attribution + manual, so a
+    # deduped candidate set counts each date once with no double-count.
     att = _q(
         "SELECT rollover_date AS d FROM gsm_rollover_attributions WHERE rollover_date<>source_date "
-        "UNION SELECT source_date FROM gsm_rollover_attributions WHERE rollover_date<>source_date"
+        "UNION SELECT source_date FROM gsm_rollover_attributions WHERE rollover_date<>source_date "
+        "UNION SELECT date FROM manual_time_adjust WHERE secs_delta<>0"
     )
     adj = get_gsm_day_adjustments()
     gsm_delta = 0.0
@@ -769,11 +952,20 @@ def get_streak():
 
 def get_top_titles(limit=8):
     aliases = _get_aliases()
-    return [(aliases.get(r[0], r[0]), r[1]) for r in _q("""
-        SELECT COALESCE(NULLIF(title,''),activity_type,'Untitled') t,
-               COALESCE(SUM(time_seconds),0)/3600.0
-        FROM sessions GROUP BY t ORDER BY SUM(time_seconds) DESC LIMIT ?
-    """, limit) if r[1] > 0]
+    man = get_manual_secs_by_title()
+    # Fetch all titles (not LIMIT-ed in SQL): the manual shave can reorder the top
+    # set, so apply it, then sort and slice. Hours derived from adjusted secs.
+    rows = _q(
+        "SELECT COALESCE(NULLIF(title,''),activity_type,'Untitled') t, "
+        "COALESCE(SUM(time_seconds),0) FROM sessions GROUP BY t"
+    )
+    adjusted = []
+    for t, secs in rows:
+        secs = max(0, secs + man.get(t, 0))
+        if secs > 0:
+            adjusted.append((aliases.get(t, t), secs / 3600.0))
+    adjusted.sort(key=lambda kv: kv[1], reverse=True)
+    return adjusted[:limit]
 
 
 # ── Heatmap ───────────────────────────────────────────────────────────────────
@@ -786,17 +978,17 @@ def get_heatmap_data(days=371):
         earliest
     )
     base = {r[0]: r[1] for r in rows}
-    adj_rows = _q(
-        "SELECT rollover_date, source_date, time_seconds "
-        "FROM gsm_rollover_attributions WHERE rollover_date<>source_date "
-        "AND (rollover_date>=? OR source_date>=?)", earliest, earliest
-    )
-    for rd, sd, t in adj_rows:
-        if rd >= earliest:
-            base[rd] = base.get(rd, 0) + t
-        if sd >= earliest:
-            base[sd] = base.get(sd, 0) - t
-    return {d: v for d, v in base.items() if v > 0}
+    # Net per-day overlay (attribution + manual) from the shared chokepoint, so
+    # this path can never drift from the daily/weekly views (see CLAUDE.md).
+    adj = get_gsm_day_adjustments()
+    out = {}
+    for d in set(base) | set(adj):
+        if d < earliest:
+            continue
+        secs = max(0, base.get(d, 0) + adj.get(d, (0, 0, 0))[1])
+        if secs > 0:
+            out[d] = secs
+    return out
 
 
 # ── Media stats ───────────────────────────────────────────────────────────────
@@ -839,13 +1031,14 @@ def get_media_stats():
         ORDER BY total_secs DESC
     """)
     aliases = _get_aliases()
+    man = get_manual_secs_by_title()   # true reduction; attribution nets to zero per title
     return [
         {
             "title":         r[0],
             "display_title": aliases.get(r[0], r[0]),
             "source":        r[1],
             "activity_type": r[2],
-            "total_secs":    r[3],
+            "total_secs":    max(0, r[3] + man.get(r[0], 0)),
             "total_chars":   r[4],
             "session_count": r[5],
             "last_date":     r[6],
@@ -985,9 +1178,12 @@ def get_extra_stats():
         "SELECT SUM(chars_read), SUM(time_seconds) FROM sessions "
         "WHERE activity_type='Reading' AND time_seconds>0 AND chars_read>0"
     )
+    # cph denominator uses manual-adjusted reading time so it matches the page's
+    # adjusted "Total time" and the dashboard's cph (see CLAUDE.md, reading-speed).
     chars_per_hour = 0
     if reading and reading[1] and reading[1] > 0:
-        chars_per_hour = int((reading[0] or 0) / reading[1] * 3600)
+        r_secs = max(0, reading[1] + _manual_secs_sum())
+        chars_per_hour = int((reading[0] or 0) / r_secs * 3600) if r_secs > 0 else 0
 
     unique_titles = (_q1(
         "SELECT COUNT(DISTINCT NULLIF(title,'')) FROM sessions"
@@ -1049,7 +1245,8 @@ def get_range_extra_stats(n):
 
     chars_per_hour = 0
     if reading and reading[1] and reading[1] > 0:
-        chars_per_hour = int((reading[0] or 0) / reading[1] * 3600)
+        r_secs = max(0, reading[1] + _manual_secs_sum(since))
+        chars_per_hour = int((reading[0] or 0) / r_secs * 3600) if r_secs > 0 else 0
 
     consistency = round(active_days / window * 100, 1) if window > 0 else 0
 
@@ -1398,6 +1595,17 @@ def _compute_title_core(title):
             if c <= 0 and t <= 0 and cards <= 0:
                 continue
             _bump(rd, int(c), float(t), int(cards), 0)
+
+    # Manual per-game time overlay: shave dead/AFK time off this title's games on
+    # the same chars/time the rest of the app uses, so the media-panel reading-speed
+    # graph (and avg) recompute correctly. Keyed by (display date, game_id); deduct
+    # secs only — chars stay, so speed rises. Rides the same rails as the attribution
+    # deduction above (daily_map is keyed by display date, matching the manual key).
+    title_games = {s[10] for s in sessions if s[2] == 'gsm' and s[10]}
+    if title_games:
+        for (d, g), delta in get_manual_time_adjusts_all().items():
+            if g in title_games and delta < 0 and d in daily_map:
+                daily_map[d]["secs"] = max(0.0, daily_map[d]["secs"] + delta)
 
     # Total cards counts EVERY day's cards, even fully-displaced days that get
     # dropped below — the cards were mined reading this title, so they belong in

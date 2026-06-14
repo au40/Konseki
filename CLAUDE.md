@@ -65,6 +65,10 @@ in [db.py](db.py) and `get_recent_sessions` (History page). The shape is:
 [db.py](db.py). Helper: `get_gsm_day_adjustment(d)` returns
 `(chars_delta, secs_delta, cards_delta)` to add to date `d`'s raw GSM totals.
 Always `max(0, raw + delta)` — net can go negative if all chars rolled out.
+Note this helper's `secs_delta` **also folds in the manual time overlay**
+(`manual_time_adjust`, documented below — keyed per game but summed per day here),
+so consumers get both overlays from one call — don't re-apply the manual overlay
+on top.
 
 ## The invariant
 
@@ -126,7 +130,108 @@ explicitly (a closed calendar day can only grow via tail, so absorbing its
 growth needs no chars guard) — but it turns ambiguous on days that mixed a
 rollover session with later same-day reading, which again points to `game_lines`.
 
-# Reading speed = chars / time, never `sessions.reading_speed`
+# Manual per-game time overlay (`manual_time_adjust`)
+
+The `manual_time_adjust` table (defined in [db.py](db.py)) is the user's escape
+hatch for the rollover-tail desync above: when GSM strands dead/AFK time on a day
+(the documented limitation of the reopen catch-up), the user shaves it off by
+hand — **per game**, picking which game on the dashboard absorbs the shave. It's a
+second display-time overlay that lives **alongside** GSM rollover attribution, for
+the same reason the attribution table exists — it must survive GSM re-ingests,
+which `DELETE`+re-insert or `UPDATE` the underlying `sessions` rows
+([imports.py](imports.py)) and would wipe any edit made to the row itself.
+
+```
+manual_time_adjust (
+    date        TEXT,   -- the DISPLAY (logical) date, like rollover_date
+    game_id     TEXT,   -- which GSM game absorbs the shave (stable across re-ingest)
+    secs_delta  REAL,   -- signed; negative shaves dead time off that game that day
+    note        TEXT,
+    updated_at  TEXT,
+    PRIMARY KEY (date, game_id)
+)
+```
+
+`secs_delta` is signed but the UI only ever writes **negative** (subtract). The
+key is `(display date, game_id)`: the date is the logical/display date
+(`get_today()` for "today"), the same date a `rollover_date` uses — never a raw
+`session_date`; `game_id` is the GSM game's stable id (survives the re-ingest that
+churns rowids). Only GSM rows carry a `game_id`, so only GSM sessions can be
+adjusted. Helpers in [db.py](db.py): `set_manual_time_adjust(date, game_id, …)`,
+`get_manual_time_adjust(date, game_id)`, plus three read shapes —
+`get_manual_time_adjusts_by_day` (date→summed secs, for net-per-day),
+`get_manual_time_adjusts_all` ((date,game_id)→secs, for per-row), and
+`get_manual_time_adjusts_for_date` (game_id→secs, for the dashboard indicator). A
+zero delta deletes the row. Written from `set_game_time_adjust` in
+[tracker.py](tracker.py); the per-row pencil control is `adjustGameTime()` in
+[ui.js](ui.js) (shown on GSM rows in both the dashboard and History).
+
+**An earlier cut was day-level** (PRIMARY KEY `(date)`, no `game_id`, drained the
+day's GSM rows in `ingested_at` order). `init_db` drops that obsolete shape on
+sight — the per-game key is the current model.
+
+## How it's applied — same cross-cutting rule as attribution
+
+This is a **second instance of the load-bearing concern** at the top of this
+file: any query that surfaces session-level time must apply it. It is folded into
+the **same chokepoints** so the surface stays minimal:
+
+- **Net-per-day pattern:** folded directly into `get_gsm_day_adjustment` and
+  `get_gsm_day_adjustments` via `get_manual_time_adjusts_by_day` (sum across games
+  per date — aggregates don't care which game; the `secs` component only, never
+  chars/cards). Every consumer of those helpers — daily series, weekly summary,
+  heatmap data, `_adjusted_day_totals` (best-day/week/streak/consistency + range
+  totals), and goal progress — picks it up for free. **Do not re-apply it in those
+  callers.** The dict now also contains entries for manual-only dates (no
+  displacement), since callers default with `adj.get(d, (0,0,0))`.
+- **Per-row pattern:** `get_today_stats` and `get_recent_sessions` apply it
+  **per game**, shaving `secs` off the rows matching each adjusted `game_id` on the
+  display date (so the game the user picked absorbs it, not whichever row sorts
+  first). A game's shave budget is tracked across its rows in case the rollover
+  bucket holds more than one. Both functions now carry `game_id` as the last tuple
+  element (mapped into the dashboard/History payloads). `max(0, …)` floors
+  over-subtraction; chars are left intact (only time is dead time).
+- **Heatmaps go through the chokepoint too.** `get_heatmap_data` (rolling-window,
+  [db.py](db.py)) and `Api.get_heatmap` year-mode ([tracker.py](tracker.py)) build
+  `{session_date: raw_secs}` then apply `get_gsm_day_adjustments()` per date,
+  clamped to their window. They used to re-derive attribution+manual inline; that
+  was consolidated so they can't drift.
+- **Paths that legitimately need a different aggregation** than per-day — leave
+  these as-is, they're not whack-a-mole, they just can't use the per-day dict:
+  - `get_activity_breakdown` ([db.py](db.py)) unions manual-overlay dates into its
+    candidate-date set so a shave folds into the Reading slice (the per-day
+    `adj.get(d)[1]` it sums already bundles the manual delta — the union just makes
+    sure manual-only dates are visited; dedupe prevents double-count).
+  - `get_all_time_totals` ([db.py](db.py)) adds `_manual_secs_sum()`. GSM rollover
+    attribution nets to zero over all-time (both endpoints in range) so it's
+    ignored there, but the manual overlay is a **true reduction** and must be
+    subtracted or the dashboard all-time total drifts from the daily views.
+  - The chars/hour denominators in `get_extra_stats` / `get_range_extra_stats`
+    ([db.py](db.py)) use `_manual_secs_sum(since)` so reading speed is computed
+    against the same adjusted time the page shows as "Total time" (reading-speed
+    invariant below). The dashboard's cph falls out of the already-shaved
+    `get_today_stats` rows, so it's consistent for free.
+
+## Per-title applies it too (via game_id)
+
+Because the overlay is keyed **per game**, a shave maps cleanly to a title, so the
+media views honor it. Two rails:
+
+- **Per-day per-title** (detail panel + milestone chart): `_compute_title_core`
+  ([db.py](db.py)) deducts the `(date, game_id)` shave from its `daily_map` secs
+  right after the attribution deduction (secs only — chars stay, so reading speed
+  *rises*). The per-day speed line, the title average, and `db_get_milestone_detail`
+  (which slices `_compute_title_core`'s `daily`) all recompute from that adjusted
+  chars/time — the same Method-A chars÷time rule as everywhere else.
+- **Per-title totals** (media grid `get_media_stats`, Stats `get_top_titles`):
+  subtract `get_manual_secs_by_title()`. For an all-time title *total*, GSM rollover
+  attribution nets to zero (a displacement just relabels which of the title's own
+  days the time shows on), so only the manual shave — a true reduction — matters.
+  That helper maps each shave's `game_id` to its title via the game's sessions.
+
+There is **no per-title carve-out** anymore. (An earlier day-level cut skipped
+per-title, on the theory that day-level dead time wasn't any one title's; per-game
+keying removed that ambiguity.)
 
 Any chars/hour value shown to the user must be derived from a chars total
 divided by a time total — **never** from the stored `sessions.reading_speed`

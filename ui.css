@@ -204,6 +204,19 @@ select:focus { border-color: var(--accent); }
   z-index: 5;
 }
 .session-row:hover .btn-danger { opacity: 1; }
+/* Edit-time pencil: same circular chip as the delete ✕, stacked just under it. */
+.session-row .edit-time-btn {
+  position: absolute; top: 18px; right: -8px; margin: 0;
+  width: 22px; height: 22px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--inset); color: var(--accent);
+  border: 1px solid var(--grid); border-radius: 50%;
+  font-size: 11px; line-height: 1; cursor: pointer;
+  opacity: 0; transition: opacity 0.12s, background 0.12s, color 0.12s;
+  z-index: 5;
+}
+.session-row:hover .edit-time-btn { opacity: 1; }
+.session-row .edit-time-btn:hover { background: var(--accent); color: #fff; }
 .session-badge { width: 6px; flex-shrink: 0; }
 .session-body  { flex: 1; padding: 10px 14px; }
 .session-title { font-size: 13px; font-weight: 600; color: var(--text); }

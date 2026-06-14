@@ -192,9 +192,25 @@ async function changeDashHeatmapYear(delta) {
   await refreshDashHeatmap();
 }
 
+// Edit button shown only on GSM rows (those carrying a game_id) — lets the user
+// shave dead/AFK time off that specific game. Wired via a closure so titles with
+// quotes can't break an inline onclick.
+function editTimeBtnHtml(s) {
+  return (s.source === 'gsm' && s.game_id)
+    ? `<button class="btn edit-time-btn" title="Subtract dead/AFK time from this game">✎</button>`
+    : '';
+}
+function wireEditTimeBtn(el, s) {
+  if (s.source === 'gsm' && s.game_id) {
+    el.querySelector('.edit-time-btn').addEventListener('click', () =>
+      adjustGameTime(s.game_id, s.date || today(), s.title));
+  }
+}
+
 function makeSessionRow(s) {
-  const color = acolor(s.activity_type);
-  const el    = document.createElement('div');
+  const color  = acolor(s.activity_type);
+  const shaved = s.adjust_secs ? Math.round(-s.adjust_secs / 60) : 0;
+  const el     = document.createElement('div');
   el.className = 'session-row';
   el.innerHTML = `
     <div class="session-badge" style="background:${color}"></div>
@@ -205,8 +221,11 @@ function makeSessionRow(s) {
     <div class="session-right">
       ${s.seconds > 0 ? `<span class="session-time" style="color:${color}">${fmtTime(s.seconds)}</span>` : ''}
       ${s.chars   > 0 ? `<span class="session-chars">${fmtChars(s.chars)} chars</span>` : ''}
-      <button class="btn btn-xs btn-danger" style="margin-top:4px" onclick="doDeleteSession(${s.id}, this)">✕</button>
+      ${shaved > 0 ? `<span class="session-chars" style="color:var(--warn)">−${shaved}m dead time</span>` : ''}
+      <button class="btn btn-xs btn-danger" onclick="doDeleteSession(${s.id}, this)">✕</button>
+      ${editTimeBtnHtml(s)}
     </div>`;
+  wireEditTimeBtn(el, s);
   return el;
 }
 
@@ -214,6 +233,14 @@ function makeGroupedSessionRow(sessions) {
   const s = sessions[0];
   const totalSeconds = sessions.reduce((a, r) => a + r.seconds, 0);
   const totalChars   = sessions.reduce((a, r) => a + r.chars, 0);
+  // adjust_secs is per game_id and identical across a game's rows — sum once per
+  // distinct game so the indicator isn't multiplied by the session count.
+  const seenG = {};
+  let shaved = 0;
+  sessions.forEach(r => {
+    if (r.game_id && !(r.game_id in seenG)) { seenG[r.game_id] = 1; shaved += (r.adjust_secs || 0); }
+  });
+  const shavedM = shaved ? Math.round(-shaved / 60) : 0;
   const color = acolor(s.activity_type);
   const ids   = sessions.map(r => r.id);
   const el    = document.createElement('div');
@@ -228,9 +255,34 @@ function makeGroupedSessionRow(sessions) {
     <div class="session-right">
       ${totalSeconds > 0 ? `<span class="session-time" style="color:${color}">${fmtTime(totalSeconds)}</span>` : ''}
       ${totalChars   > 0 ? `<span class="session-chars">${fmtChars(totalChars)} chars</span>` : ''}
-      <button class="btn btn-xs btn-danger" style="margin-top:4px" onclick="doDeleteSessionGroup([${ids.join(',')}], this)">✕</button>
+      ${shavedM > 0 ? `<span class="session-chars" style="color:var(--warn)">−${shavedM}m dead time</span>` : ''}
+      <button class="btn btn-xs btn-danger" onclick="doDeleteSessionGroup([${ids.join(',')}], this)">✕</button>
+      ${editTimeBtnHtml(s)}
     </div>`;
+  wireEditTimeBtn(el, s);
   return el;
+}
+
+// ── Manual time adjustment ───────────────────────────────────────────────────
+// Subtract dead/AFK time GSM stranded on a specific game for a given display
+// date. Stored per (date, game_id) in a separate overlay table so GSM re-ingests
+// can't clobber it (see CLAUDE.md).
+async function adjustGameTime(gameId, dateStr, title) {
+  const cur   = await window.pywebview.api.get_game_time_adjust(gameId, dateStr);
+  const input = prompt(`Subtract dead/AFK time from "${title}" on ${dateStr} (minutes). Enter 0 to clear.`,
+                       cur.subtract_minutes || 0);
+  if (input === null) return;
+  const mins = parseFloat(input);
+  if (isNaN(mins) || mins < 0) { setStatus('Enter a non-negative number of minutes'); return; }
+  const r = await window.pywebview.api.set_game_time_adjust(gameId, mins, dateStr);
+  if (r.ok) {
+    statsCache = {};
+    setStatus(mins ? `Subtracting ${mins}m of dead time from ${title}` : 'Cleared time adjustment');
+    if (currentPage === 'dashboard') loadDashboard();
+    else if (currentPage === 'history') loadHistory();
+  } else {
+    setStatus('Adjustment failed: ' + (r.error || 'unknown'));
+  }
 }
 
 // ── Delete session ─────────────────────────────────────────────────────────

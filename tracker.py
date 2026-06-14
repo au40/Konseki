@@ -36,6 +36,8 @@ from db import (
     get_today_stats, get_weekly_summary, get_all_time_totals, get_range_totals,
     get_recent_sessions, get_daily_time_series, get_activity_breakdown,
     get_streak, get_top_titles, get_heatmap_data,
+    get_manual_time_adjust, set_manual_time_adjust, get_manual_time_adjusts_for_date,
+    get_manual_time_adjusts_all,
     get_media_stats, get_media_titles, get_series_data, get_extra_stats, get_range_extra_stats,
     db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
@@ -194,10 +196,14 @@ class Api:
         totals = get_all_time_totals()
         aliases = _get_aliases()
         cs, _  = get_streak()
+        today_date = get_today()
+        # Per-game shave active today, so each row can show a "−Nm" indicator.
+        adj = get_manual_time_adjusts_for_date(today_date)
         return {
             "today": [
                 {"id": r[0], "source": r[1], "title": aliases.get(r[2], r[2]),
-                 "activity_type": r[3], "chars": r[4], "lines": r[5], "seconds": r[6]}
+                 "activity_type": r[3], "chars": r[4], "lines": r[5], "seconds": r[6],
+                 "game_id": r[7], "date": today_date, "adjust_secs": adj.get(r[7], 0)}
                 for r in today
             ],
             "weekly": [
@@ -214,9 +220,14 @@ class Api:
     # ── History ───────────────────────────────────────────────────────────────
     def get_history(self):
         aliases = _get_aliases()
+        manual  = get_manual_time_adjusts_all()   # {(date, game_id): secs_delta}
+        # Indicator on the real GSM row that absorbed the shave (one per date+game);
+        # phantom rows (id=None) don't carry it, to avoid double-display.
         return [
             {"id": r[0], "date": r[1], "source": r[2], "title": aliases.get(r[3], r[3]),
-             "activity_type": r[4], "chars": r[5], "lines": r[6], "seconds": r[7]}
+             "activity_type": r[4], "chars": r[5], "lines": r[6], "seconds": r[7],
+             "game_id": r[8],
+             "adjust_secs": (manual.get((r[1], r[8]), 0) if r[0] is not None else 0)}
             for r in get_recent_sessions(30)
         ]
 
@@ -270,18 +281,17 @@ class Api:
                 start, end
             )
             base = {r[0]: r[1] for r in rows}
-            adj_rows = _q(
-                "SELECT rollover_date, source_date, time_seconds "
-                "FROM gsm_rollover_attributions WHERE rollover_date<>source_date "
-                "AND ((rollover_date>=? AND rollover_date<=?) OR (source_date>=? AND source_date<=?))",
-                start, end, start, end
-            )
-            for rd, sd, t in adj_rows:
-                if start <= rd <= end:
-                    base[rd] = base.get(rd, 0) + t
-                if start <= sd <= end:
-                    base[sd] = base.get(sd, 0) - t
-            return {d: v for d, v in base.items() if v > 0}
+            # Net per-day overlay (attribution + manual) from the shared chokepoint,
+            # clamped to the year window — no inline re-derivation (see CLAUDE.md).
+            adj = db.get_gsm_day_adjustments()
+            out = {}
+            for d in set(base) | set(adj):
+                if d < start or d > end:
+                    continue
+                secs = max(0, base.get(d, 0) + adj.get(d, (0, 0, 0))[1])
+                if secs > 0:
+                    out[d] = secs
+            return out
         return get_heatmap_data(int(days) if days else 371)
 
     # ── Media ─────────────────────────────────────────────────────────────────
@@ -359,6 +369,27 @@ class Api:
         try:
             datetime.strptime(session_date, "%Y-%m-%d")
             insert_manual_session(atype, float(minutes), title, session_date, chars)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Manual per-game time adjustment ─────────────────────────────────────────
+    def get_game_time_adjust(self, game_id, session_date=None):
+        """Current manual subtraction (in minutes) for one game on a display date."""
+        d = session_date or get_today()
+        return {"date": d, "game_id": game_id,
+                "subtract_minutes": round(-get_manual_time_adjust(d, game_id) / 60, 1)}
+
+    def set_game_time_adjust(self, game_id, subtract_minutes, session_date=None):
+        """Subtract `subtract_minutes` of dead/AFK time from one game on a display
+        date. 0 clears it. Survives GSM re-ingests (separate overlay table)."""
+        try:
+            if not game_id:
+                return {"ok": False, "error": "no game_id (only GSM games can be adjusted)"}
+            d = session_date or get_today()
+            datetime.strptime(d, "%Y-%m-%d")
+            mins = max(0.0, float(subtract_minutes))
+            set_manual_time_adjust(d, game_id, -mins * 60 if mins else 0)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
