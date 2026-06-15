@@ -34,7 +34,8 @@ from db import (
     init_db, scan_existing_files,
     get_setting, set_setting, get_today,
     get_today_stats, get_weekly_summary, get_all_time_totals, get_range_totals,
-    get_recent_sessions, get_daily_time_series, get_activity_breakdown,
+    get_recent_sessions, get_daily_time_series, get_daily_activity_series,
+    get_activity_breakdown,
     get_streak, get_top_titles, get_heatmap_data,
     get_manual_time_adjust, set_manual_time_adjust, get_manual_time_adjusts_for_date,
     get_manual_time_adjusts_all,
@@ -237,6 +238,7 @@ class Api:
         rc, rs, _   = get_range_totals(n)
         cs, _       = get_streak()
         daily       = get_daily_time_series(n)
+        daily_act   = dict(get_daily_activity_series(n))  # date -> {activity_type: secs}
         activity    = get_activity_breakdown(n)
         titles      = get_top_titles(8)
         extra       = get_range_extra_stats(n)
@@ -261,7 +263,8 @@ class Api:
             "consistency_pct": extra["consistency_pct"],
             "active_days":     extra["active_days"],
             "window_days":     extra["window_days"],
-            "daily":           [{"date": d, "seconds": s, "chars": c} for d, s, c in daily],
+            "daily":           [{"date": d, "seconds": s, "chars": c, "by_type": daily_act.get(d, {})}
+                                for d, s, c in daily],
             "activity":        [{"type": a[0], "seconds": a[1]} for a in activity],
             "titles":          [{"title": t[0], "hours": t[1]} for t in titles],
         }

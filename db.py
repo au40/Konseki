@@ -881,6 +881,46 @@ def get_daily_time_series(days):
                     max(0, chars.get(d, 0) + adj_c)))
     return out
 
+def get_daily_activity_series(days):
+    """Per-day time_seconds split by activity_type, GSM-adjustment-aware.
+
+    Parallel to get_daily_time_series (same window, same dense date range, same
+    clamping-by-loop-bound) but keeps the activity dimension so the Stats bars
+    can stack by type. GSM rows are always activity_type='Reading', so the net
+    per-day overlay (rollover attribution + manual shave) folds entirely into the
+    Reading slice — identical rule to get_activity_breakdown (see CLAUDE.md).
+    Returns a list of (date, {activity_type: secs}); days with no activity carry
+    an empty dict so the series stays dense and aligned with get_daily_time_series.
+    """
+    if days is None:
+        row = _q1("SELECT MIN(session_date) FROM sessions")
+        if not row or not row[0]:
+            return []
+        earliest   = datetime.strptime(row[0], "%Y-%m-%d").date()
+        total_days = (get_today_date() - earliest).days + 1
+    else:
+        earliest   = get_today_date() - timedelta(days=days - 1)
+        total_days = days
+    rows = _q(
+        "SELECT session_date, COALESCE(activity_type,'Other'), "
+        "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0) "
+        "FROM sessions WHERE session_date>=? GROUP BY session_date, COALESCE(activity_type,'Other')",
+        earliest.isoformat()
+    )
+    by_day = {}
+    for d, t, s in rows:
+        by_day.setdefault(d, {})[t] = s
+    adj = get_gsm_day_adjustments()
+    out = []
+    for i in range(total_days):
+        d     = (earliest + timedelta(days=i)).isoformat()
+        types = dict(by_day.get(d, {}))
+        adj_t = adj.get(d, (0, 0, 0))[1]
+        if adj_t:
+            types["Reading"] = max(0, types.get("Reading", 0) + adj_t)
+        out.append((d, {k: v for k, v in types.items() if v > 0}))
+    return out
+
 def get_activity_breakdown(n=None):
     """Time per activity_type over the range, GSM-attribution-adjusted.
 
@@ -1667,12 +1707,70 @@ def _compute_title_core(title):
     }
 
 
+def _attach_daily_milestone_split(daily, milestones):
+    """Annotate each day in `daily` with a per-milestone split of its chars and
+    seconds: d['by_milestone'] = {str(id)|'_uncovered': {'chars': float, 'secs':
+    float}}.
+
+    TIME is attributed on the cumulative-minute axis (start_min/end_min) — the
+    same axis db_get_milestone_detail slices on — so a day's secs split matches
+    the milestone view. CHARS on timed days follow that time split (scaled by the
+    minute-overlap fraction, exactly like the milestone view); a day with chars
+    but no time is placed whole by its cumulative-char position (start_chars/
+    end_chars) so its chars don't vanish from the stacked chars bar. Each metric's
+    segments sum to that day's flat total. '_uncovered' holds the remainder
+    outside every milestone — the title's accent region on the progress bar.
+
+    Milestone minute-intervals are disjoint (enforced on add/edit), so a session
+    minute maps to at most one milestone. Mutates `daily` in place; no-op when
+    there are no milestones (the stacked toggle is hidden in that case)."""
+    if not milestones:
+        return
+    mins = [(str(m["id"]), m["start_min"], m["end_min"]) for m in milestones
+            if m.get("start_min") is not None and m.get("end_min") is not None]
+    chrs = [(str(m["id"]), m["start_chars"], m["end_chars"]) for m in milestones
+            if m.get("start_chars") is not None and m.get("end_chars") is not None]
+
+    cum_min, cum_chars = 0.0, 0
+    for d in daily:
+        smin       = (d["seconds"] or 0) / 60.0
+        bmin, amin = cum_min, cum_min + smin
+        cum_min    = amin
+        dchars     = d["chars"] or 0
+        bch, ach   = cum_chars, cum_chars + dchars
+        cum_chars  = ach
+
+        by = {}
+        def _add(k, chars=0.0, secs=0.0):
+            v = by.setdefault(k, {"chars": 0.0, "secs": 0.0})
+            v["chars"] += chars
+            v["secs"]  += secs
+
+        if smin > 0:
+            covered = 0.0
+            for mid, sm, em in mins:
+                ov = max(0.0, min(em, amin) - max(sm, bmin))
+                if ov > 0:
+                    _add(mid, chars=dchars * (ov / smin), secs=ov * 60.0)
+                    covered += ov
+            unc = max(0.0, smin - covered)
+            if unc > 1e-9:
+                _add("_uncovered", chars=dchars * (unc / smin), secs=unc * 60.0)
+        elif dchars > 0:
+            mid_pos = (bch + ach) / 2.0
+            placed  = next((mid for mid, sc, ec in chrs if sc <= mid_pos < ec), None)
+            _add(placed if placed is not None else "_uncovered", chars=float(dchars))
+
+        d["by_milestone"] = by
+
+
 def db_get_title_detail(title):
     """Public: title detail including milestone summaries."""
     core = _compute_title_core(title)
     if core is None:
         return None
     core["milestones"] = db_list_milestones(title)
+    _attach_daily_milestone_split(core["daily"], core["milestones"])
     return core
 
 
