@@ -286,6 +286,39 @@ select:focus { border-color: var(--accent); }
 }
 .brush-reset:hover { opacity: 1; }
 
+/* ── Stats activity filter popover ───────────────────────────────────────────── */
+.filter-wrap { position: relative; }
+#activity-filter-btn.has-filter {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+}
+.filter-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  min-width: 180px; padding: 8px;
+  background: var(--card); border: 1px solid var(--grid); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+}
+.filter-head {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 11px; font-weight: 600; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .04em;
+  padding: 2px 6px 6px;
+}
+.filter-reset-link {
+  background: none; border: none; cursor: pointer; font-family: inherit;
+  font-size: 11px; font-weight: 600; color: var(--accent); padding: 0;
+  text-transform: none; letter-spacing: 0;
+}
+.filter-reset-link:hover { text-decoration: underline; }
+.filter-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px; border-radius: 7px; cursor: pointer; user-select: none;
+}
+.filter-row:hover { background: var(--input-bg); }
+.filter-row input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
+.filter-swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.filter-name { font-size: 13px; color: var(--text); }
+.filter-empty { font-size: 12px; color: var(--dim); padding: 8px 6px; }
+
 /* ── Heatmap ─────────────────────────────────────────────────────────────── */
 .heatmap-wrap {
   background: var(--card); border-radius: var(--radius);

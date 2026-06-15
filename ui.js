@@ -4,6 +4,7 @@ let currentRange       = '30d';
 let customBase         = '30d';   // preset range whose daily series the brush slices in Custom mode
 let selStartDay        = 0;        // selection start, inclusive day index into the loaded daily series
 let selEndDay          = Infinity; // selection end, inclusive day index (clamped to last day on use)
+let excludedTypes      = new Set(); // activity types hidden from the Stats view (only Reading has chars)
 let currentGranularity = 'day';
 let splitByActivity    = false;
 let statsCache    = {};
@@ -845,7 +846,7 @@ async function loadStats(range_val) {
     if (!statsCache[customBase]) {
       statsCache[customBase] = await window.pywebview.api.get_stats(customBase);
     }
-    renderCustomStats();
+    renderClientStats();
     return;
   }
 
@@ -854,7 +855,7 @@ async function loadStats(range_val) {
     const others = ['30d','90d','6m','1y','All'].filter(r => r !== range_val);
     setTimeout(() => prefetchStats(others, 0), 500);
   }
-  renderStats(statsCache[range_val]);
+  rerenderActiveStats();   // backend-exact cards unless an activity filter is on
 }
 
 function prefetchStats(ranges, idx) {
@@ -887,18 +888,17 @@ async function setRange(rv) {
 async function setGranularity(g) {
   currentGranularity = g;
   updateGranularityUI();
-  if (currentRange === 'Custom') renderCustomStats();
-  else if (statsCache[currentRange]) renderStats(statsCache[currentRange]);
+  rerenderActiveStats();
 }
 
 function onCumToggle() {
-  if (currentRange === 'Custom') { renderCustomStats(); return; }
+  if (statsNeedsClient()) { renderClientStats(); return; }
   if (statsCache[currentRange]) renderDailyChart(statsCache[currentRange].daily);
 }
 
 function onSplitToggle() {
   splitByActivity = document.getElementById('split-toggle').checked;
-  if (currentRange === 'Custom') { renderCustomStats(); return; }
+  if (statsNeedsClient()) { renderClientStats(); return; }
   if (statsCache[currentRange]) {
     renderDailyChart(statsCache[currentRange].daily);
     renderDowChart(statsCache[currentRange].daily);
@@ -1311,10 +1311,44 @@ function fmtShortDate(iso) {
   return `${M[+p[1] - 1]} ${+p[2]}`;
 }
 
-// The daily series the brush operates on (the loaded preset behind Custom mode).
-function statsBaseDaily() {
-  const base = currentRange === 'Custom' ? customBase : currentRange;
-  return statsCache[base] ? statsCache[base].daily : [];
+// The daily series everything downstream operates on: the loaded preset behind
+// Custom mode, with the activity filter applied. Filtering only zeroes per-type
+// time (via by_type) and — since Reading is the only char source — drops chars
+// wholesale when Reading is excluded. Rows are kept (dense series) so day
+// indices stay aligned; the array is rebuilt only when a filter is active.
+function activeDaily() {
+  const baseKey = currentRange === 'Custom' ? customBase : currentRange;
+  const base = statsCache[baseKey];
+  if (!base) return [];
+  if (!excludedTypes.size) return base.daily;
+  const readingOut = excludedTypes.has('Reading');
+  return base.daily.map(r => {
+    const bt = r.by_type || {};
+    let secs = 0;
+    const fbt = {};
+    for (const t in bt) if (!excludedTypes.has(t)) { secs += bt[t]; fbt[t] = bt[t]; }
+    return { date: r.date, seconds: secs, chars: readingOut ? 0 : r.chars, by_type: fbt };
+  });
+}
+
+function statsBaseDaily() { return activeDaily(); }
+
+// Whether the view must be recomputed client-side (a brush sub-range and/or an
+// activity filter is active) rather than rendered from the exact backend preset.
+function statsNeedsClient() {
+  return currentRange === 'Custom' || excludedTypes.size > 0;
+}
+
+// The full set of categories that exist in the tracker for the filter checkbox
+// list — the built-in types plus the user's custom categories — unioned with
+// anything present in the loaded data (so a legacy/unknown type still appears).
+// Built-ins first (canonical order), then custom categories alphabetically.
+function activityFilterTypes(cats) {
+  const present = new Set();
+  const baseKey = currentRange === 'Custom' ? customBase : currentRange;
+  const base = statsCache[baseKey];
+  (base ? base.daily : []).forEach(r => { for (const t in (r.by_type || {})) present.add(t); });
+  return orderedTypes(new Set([...BUILTIN_TYPES, ...cats.map(c => c.name), ...present]));
 }
 
 // Resolve the stored day-index selection to whole buckets of the CURRENT
@@ -1366,10 +1400,17 @@ function computeBrushView() {
   let bestWeek = null;
   for (const k in weeks) if (!bestWeek || weeks[k] > bestWeek.secs) bestWeek = { secs: weeks[k], start: k };
 
-  // Longest run of consecutive active days inside the window (the global
-  // "current streak" is meaningless for an arbitrary slice, so we relabel).
-  let streak = 0, run = 0;
-  sub.forEach(r => { if (r.seconds > 0) { run++; if (run > streak) streak = run; } else run = 0; });
+  // Streak: if the window reaches the latest day (today) it's a live "current
+  // streak" (trailing active run); otherwise a past slice, so report the longest
+  // run within it. Label swaps to match (set in applyBrushCards).
+  const includesLatest = endDay === daily.length - 1;
+  let streak = 0;
+  if (includesLatest) {
+    for (let i = sub.length - 1; i >= 0 && sub[i].seconds > 0; i--) streak++;
+  } else {
+    let run = 0;
+    sub.forEach(r => { if (r.seconds > 0) { run++; if (run > streak) streak = run; } else run = 0; });
+  }
 
   const windowDays = sub.length;
   const denomSecs  = readSecs > 0 ? readSecs : secs;       // Reading time, like the backend cph
@@ -1388,6 +1429,7 @@ function computeBrushView() {
     best_day:        bestDay,
     best_week:       bestWeek,
     streak,
+    streak_is_current: includesLatest,
     activity,
     start_date:      sub.length ? sub[0].date : null,
     end_date:        sub.length ? sub[sub.length - 1].date : null,
@@ -1395,9 +1437,16 @@ function computeBrushView() {
 }
 
 function applyBrushCards(v) {
-  const lbl = (v.start_date && v.end_date)
-    ? `${fmtShortDate(v.start_date)} – ${fmtShortDate(v.end_date)}`
-    : 'custom';
+  // Full preset span (filter-only, no brush) keeps the range name; a brushed
+  // sub-window shows its date span so the cards say what they're counting.
+  const sel  = effectiveDayRange();
+  const full = currentRange !== 'Custom'
+            && sel.startDay === 0 && sel.endDay === statsBaseDaily().length - 1;
+  const lbl = full
+    ? (currentRange === 'All' ? 'all time' : currentRange)
+    : (v.start_date && v.end_date
+        ? `${fmtShortDate(v.start_date)} – ${fmtShortDate(v.end_date)}`
+        : 'custom');
   document.getElementById('sc-time-lbl').textContent  = `Time (${lbl})`;
   document.getElementById('sc-chars-lbl').textContent = `Characters (${lbl})`;
   document.getElementById('sc-cph-lbl').textContent   = `Chars / hour (${lbl})`;
@@ -1405,7 +1454,7 @@ function applyBrushCards(v) {
   document.getElementById('sc-time').textContent   = fmtTime(v.secs);
   document.getElementById('sc-chars').textContent  = fmtChars(v.chars);
   document.getElementById('sc-cph').textContent    = v.cph ? fmtChars(v.cph) : '—';
-  setStreakLabel('Longest streak');
+  setStreakLabel(v.streak_is_current ? 'Current Streak' : 'Longest streak');
   document.getElementById('sc-streak').textContent = `${v.streak}d`;
   document.getElementById('sc-avg').textContent    = fmtTime(v.avg_secs);
   document.getElementById('es-best-day').textContent       = fmtTime(v.best_day ? v.best_day.secs : 0);
@@ -1417,18 +1466,32 @@ function applyBrushCards(v) {
     v.active_days ? `${v.active_days}/${v.window_days}d active` : '';
 }
 
-function renderCustomStats() {
-  const base = statsCache[customBase];
-  if (!base) return;
+// Client-recompute render path, used whenever a brush sub-range and/or an
+// activity filter is active (a plain unfiltered preset uses renderStats with
+// the backend-exact cards instead). Everything flows from the filtered+sliced
+// daily series via computeBrushView.
+function renderClientStats() {
+  const baseKey = currentRange === 'Custom' ? customBase : currentRange;
+  if (!statsCache[baseKey]) return;
+  const daily = activeDaily();
+  const sel   = effectiveDayRange();
+  const isFullSpan = sel.startDay === 0 && sel.endDay === daily.length - 1;
   const brush = document.getElementById('daily-brush');
-  if (brush) brush.classList.add('active');
+  // Dimming + the floating date label appear only for a real sub-range.
+  if (brush) brush.classList.toggle('active', currentRange === 'Custom' && !isFullSpan);
   const v = computeBrushView();
   applyBrushCards(v);
-  renderDailyChart(base.daily);          // full series stays; masks dim the unselected part
+  renderDailyChart(daily);               // filtered full series; masks dim the unselected part
   renderDailyCharsChart(v.sub);          // downstream views follow the selection
   renderDowChart(v.sub);
   renderDonutChart(v.activity);
   requestAnimationFrame(positionDailyBrush);
+}
+
+// Pick the right render path for the current filter/brush state.
+function rerenderActiveStats() {
+  if (statsNeedsClient()) renderClientStats();
+  else if (statsCache[currentRange]) renderStats(statsCache[currentRange]);
 }
 
 function enterCustomMode() {
@@ -1438,7 +1501,7 @@ function enterCustomMode() {
     currentRange = 'Custom';
   }
   setSegActive('Custom');
-  renderCustomStats();
+  renderClientStats();
 }
 
 function clearBrush() {
@@ -1446,7 +1509,7 @@ function clearBrush() {
   currentRange = customBase;
   setSegActive(customBase);
   document.getElementById('daily-brush')?.classList.remove('active');
-  if (statsCache[customBase]) renderStats(statsCache[customBase]);
+  rerenderActiveStats();                 // keeps any active activity filter applied
 }
 
 // ── Brush geometry + drag ───────────────────────────────────────────────────
@@ -1509,7 +1572,7 @@ function startBrushDrag(e, side) {
     window.removeEventListener('pointerup', up);
     brush.classList.remove('dragging');
     _brushDrag = null;
-    renderCustomStats();                  // settle: redraw downstream charts at the final selection
+    renderClientStats();                  // settle: redraw downstream charts at the final selection
   };
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', up);
@@ -1546,6 +1609,88 @@ function initDailyBrush() {
   const reset = brush.querySelector('.brush-reset');
   if (reset) reset.addEventListener('click', clearBrush);
   window.addEventListener('resize', () => requestAnimationFrame(positionDailyBrush));
+}
+
+// ── Stats activity filter ───────────────────────────────────────────────────
+// Check off activity types to drop them from the whole Stats view. Only time is
+// per-type; chars come solely from Reading, so excluding Reading zeroes chars
+// while excluding anything else leaves chars intact (see activeDaily()).
+async function toggleActivityFilterPop(ev) {
+  ev.stopPropagation();
+  const pop = document.getElementById('activity-filter-pop');
+  if (!pop) return;
+  if (pop.hidden) {
+    await buildActivityFilterPop();
+    pop.hidden = false;
+    document.addEventListener('click', closeActivityFilterOnOutside);
+  } else {
+    closeActivityFilterPop();
+  }
+}
+
+function closeActivityFilterPop() {
+  const pop = document.getElementById('activity-filter-pop');
+  if (pop) pop.hidden = true;
+  document.removeEventListener('click', closeActivityFilterOnOutside);
+}
+
+function closeActivityFilterOnOutside(e) {
+  const wrap = document.querySelector('.filter-wrap');
+  if (wrap && !wrap.contains(e.target)) closeActivityFilterPop();
+}
+
+async function buildActivityFilterPop() {
+  const pop = document.getElementById('activity-filter-pop');
+  let cats = [];
+  try { cats = await window.pywebview.api.get_categories(); } catch (e) { cats = []; }
+  // Real category colors (built-in palette + each custom category's own color),
+  // so the swatches read clearly even though the donut greys customs out.
+  const colorMap = Object.fromEntries([
+    ...BUILTIN_TYPES.map(t => [t, ACOLORS[t]]),
+    ...cats.map(c => [c.name, c.color]),
+  ]);
+  const types = activityFilterTypes(cats);
+  if (!types.length) { pop.innerHTML = '<div class="filter-empty">No categories</div>'; return; }
+  pop.innerHTML =
+    `<div class="filter-head"><span>Show activities</span>` +
+    `<button class="filter-reset-link" data-reset>All</button></div>` +
+    types.map(() =>
+      `<label class="filter-row"><input type="checkbox">` +
+      `<span class="filter-swatch"></span><span class="filter-name"></span></label>`
+    ).join('');
+  const rows = pop.querySelectorAll('.filter-row');
+  types.forEach((t, i) => {
+    const row = rows[i];
+    row.querySelector('.filter-swatch').style.background = colorMap[t] || acolor(t);
+    row.querySelector('.filter-name').textContent = t;
+    const cb = row.querySelector('input');
+    cb.checked = !excludedTypes.has(t);
+    cb.addEventListener('change', () => toggleActivityType(t, cb.checked));
+  });
+  pop.querySelector('[data-reset]').addEventListener('click', resetActivityFilter);
+}
+
+function toggleActivityType(t, checked) {
+  if (checked) excludedTypes.delete(t);
+  else         excludedTypes.add(t);
+  updateActivityFilterBtn();
+  rerenderActiveStats();
+}
+
+function resetActivityFilter() {
+  excludedTypes.clear();
+  updateActivityFilterBtn();
+  buildActivityFilterPop();   // re-check every box
+  rerenderActiveStats();
+}
+
+function updateActivityFilterBtn() {
+  const btn = document.getElementById('activity-filter-btn');
+  const lbl = document.getElementById('activity-filter-label');
+  if (!btn || !lbl) return;
+  const n = excludedTypes.size;
+  btn.classList.toggle('has-filter', n > 0);
+  lbl.textContent = n > 0 ? `Filter (${n})` : 'Filter';
 }
 
 // ── Goals ──────────────────────────────────────────────────────────────────

@@ -153,6 +153,16 @@
     <div id="page-stats" class="page">
       <div class="stats-ctrl">
         <h1>Stats</h1>
+        <div style="display:flex;align-items:flex-start;gap:10px">
+        <div class="filter-wrap">
+          <button id="activity-filter-btn" class="btn btn-outline btn-sm" onclick="toggleActivityFilterPop(event)">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex-shrink:0">
+              <path d="M1.5 2.5h13L9 9v4.5L7 12V9L1.5 2.5z" fill="currentColor"/>
+            </svg>
+            <span id="activity-filter-label">Filter</span>
+          </button>
+          <div id="activity-filter-pop" class="filter-pop" hidden></div>
+        </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
           <div class="seg" id="range-seg">
             <button class="seg-btn active" data-range="30d" onclick="setRange('30d')">30d</button>
@@ -170,6 +180,7 @@
             <button class="seg-btn"        data-gran="month" onclick="setGranularity('month')">Month</button>
             <button class="seg-btn"        data-gran="year"  onclick="setGranularity('year')">Year</button>
           </div>
+        </div>
         </div>
       </div>
 
