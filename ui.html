@@ -160,12 +160,15 @@
             <button class="seg-btn"        data-range="6m"  onclick="setRange('6m')">6m</button>
             <button class="seg-btn"        data-range="1y"  onclick="setRange('1y')">1y</button>
             <button class="seg-btn"        data-range="All" onclick="setRange('All')">All</button>
+            <button class="seg-btn"        data-range="Custom" onclick="setRange('Custom')"
+                    title="Drag the handles on the daily chart to pick an exact range">Custom</button>
           </div>
           <div class="seg" id="gran-seg">
             <button class="seg-btn active" data-gran="day"   onclick="setGranularity('day')">Day</button>
             <button class="seg-btn"        data-gran="week"  onclick="setGranularity('week')">Week</button>
             <button class="seg-btn"        data-gran="2wk"   onclick="setGranularity('2wk')">2 Wk</button>
             <button class="seg-btn"        data-gran="month" onclick="setGranularity('month')">Month</button>
+            <button class="seg-btn"        data-gran="year"  onclick="setGranularity('year')">Year</button>
           </div>
         </div>
       </div>
@@ -177,7 +180,7 @@
           <div class="value" id="sc-chars" style="color:var(--success)">—</div></div>
         <div class="stat-card"><div class="label" id="sc-cph-lbl">Chars / hour</div>
           <div class="value" id="sc-cph" style="color:var(--warn)">—</div></div>
-        <div class="stat-card"><div class="label">Current Streak</div>
+        <div class="stat-card"><div class="label" id="sc-streak-lbl">Current Streak</div>
           <div class="value" id="sc-streak" style="color:var(--purple)">—</div></div>
       </div>
 
@@ -214,11 +217,17 @@
           </label>
         </div>
       </div>
-      <div class="chart-wrap"><canvas id="chart-daily" height="180"></canvas></div>
-
-      <div id="time-rolling-section" style="margin-top:16px;display:none">
-        <h2>Time — 7d rolling avg</h2>
-        <div class="chart-wrap"><canvas id="chart-time-rolling" height="180"></canvas></div>
+      <div class="chart-wrap" id="daily-chart-wrap"><canvas id="chart-daily" height="180"></canvas>
+        <div id="daily-brush" class="brush" hidden>
+          <div class="brush-mask brush-mask-l"></div>
+          <div class="brush-mask brush-mask-r"></div>
+          <div class="brush-label">
+            <span class="brush-range"></span>
+            <span class="brush-reset" title="Clear selection">✕</span>
+          </div>
+          <div class="brush-handle brush-handle-l" data-side="l"><span></span></div>
+          <div class="brush-handle brush-handle-r" data-side="r"><span></span></div>
+        </div>
       </div>
 
       <div style="margin-top:16px">

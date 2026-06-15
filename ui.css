@@ -251,6 +251,41 @@ select:focus { border-color: var(--accent); }
                 cursor: pointer; user-select: none; }
 .toggle-label input { accent-color: var(--accent); width: 14px; height: 14px; cursor: pointer; }
 
+/* ── Daily-chart range brush (custom range selector) ─────────────────────────── */
+.brush { position: absolute; pointer-events: none; z-index: 4; }
+.brush-mask {
+  position: absolute; top: 0; bottom: 0; background: var(--card);
+  opacity: 0.6; pointer-events: none; transition: opacity .12s;
+}
+.brush-mask-l { left: 0; }
+.brush-mask-r { right: 0; }
+.brush-handle {
+  position: absolute; top: -6px; bottom: -6px; width: 16px; margin-left: -8px;
+  pointer-events: auto; cursor: ew-resize; touch-action: none;
+  display: flex; align-items: center; justify-content: center;
+}
+.brush-handle span {
+  display: block; width: 4px; height: 34px; border-radius: 3px;
+  background: var(--accent); opacity: .85;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.3), 0 1px 4px rgba(0,0,0,.35);
+  transition: height .12s, opacity .12s;
+}
+.brush-handle:hover span,
+.brush.dragging .brush-handle span { opacity: 1; height: 46px; }
+.brush-label {
+  position: absolute; top: -27px; transform: translateX(-50%);
+  background: var(--accent); color: #fff; font-size: 11px; font-weight: 600;
+  padding: 3px 8px; border-radius: 6px; white-space: nowrap;
+  pointer-events: none; display: none; align-items: center; gap: 6px;
+  box-shadow: 0 2px 8px rgba(0,0,0,.4);
+}
+.brush.active .brush-label { display: inline-flex; }
+.brush-reset {
+  pointer-events: auto; cursor: pointer; opacity: .8; font-weight: 700;
+  margin-left: 1px; line-height: 1;
+}
+.brush-reset:hover { opacity: 1; }
+
 /* ── Heatmap ─────────────────────────────────────────────────────────────── */
 .heatmap-wrap {
   background: var(--card); border-radius: var(--radius);

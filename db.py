@@ -684,7 +684,7 @@ def get_today_stats():
         # Drop sessions whose displayed values are all zero (e.g. fully attributed-away GSM rows)
         if chars == 0 and secs == 0 and (lines or 0) == 0:
             continue
-        result.append((rid, src, title, atype, chars, lines, secs, gid))
+        result.append((rid, src, title, atype, chars, lines, secs, gid, sd))
 
     # Incoming attributions: chars coming from outside the bucket → add phantom rows
     in_rows = _q(
@@ -701,27 +701,34 @@ def get_today_stats():
             )
             game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
             game_id   = (game_row[1] if game_row else None)
-            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), game_id))
+            # sd=None: phantom rows aren't a logical-day-native row, so they're
+            # lowest priority for the manual shave below.
+            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), game_id, None))
 
     # Manual overlay: shave secs off the SPECIFIC game's row(s) for this display
     # date, so the right game absorbs the dead time (the user picks which). Tracked
     # per game so multiple rows of one game across the rollover bucket share its
     # budget; max(0,…) floors over-subtraction.
+    #
+    # Priority: shave the row whose session_date IS the logical day (today) first,
+    # so a shave set on day D lands on D's own row — not on a post-midnight session
+    # that merged into D's bucket during the rollover window. This mirrors
+    # get_recent_sessions (History), keeping the dashboard and History consistent.
     rem_by_game = {g: -s for g, s in get_manual_time_adjusts_for_date(today).items() if s < 0}
     if rem_by_game:
-        adjusted = []
-        for rid, src, title, atype, chars, lines, secs, gid in result:
+        for i in sorted(range(len(result)), key=lambda i: 0 if result[i][8] == today else 1):
+            rid, src, title, atype, chars, lines, secs, gid, sd = result[i]
             rem = rem_by_game.get(gid, 0)
             if src == 'gsm' and rem > 0 and secs > 0:
                 take = min(secs, rem)
                 secs -= take
                 rem_by_game[gid] = rem - take
-            if chars == 0 and secs == 0 and (lines or 0) == 0:
-                continue
-            adjusted.append((rid, src, title, atype, chars, lines, secs, gid))
-        result = adjusted
+                result[i] = (rid, src, title, atype, chars, lines, secs, gid, sd)
 
-    return result
+    # Strip the internal session_date element and drop rows zeroed by the shave.
+    return [(rid, src, title, atype, chars, lines, secs, gid)
+            for (rid, src, title, atype, chars, lines, secs, gid, sd) in result
+            if not (chars == 0 and secs == 0 and (lines or 0) == 0)]
 
 def get_weekly_summary():
     days = [(get_today_date() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]

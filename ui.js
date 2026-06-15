@@ -1,6 +1,9 @@
 // ── Globals ────────────────────────────────────────────────────────────────
 let currentPage        = 'dashboard';
 let currentRange       = '30d';
+let customBase         = '30d';   // preset range whose daily series the brush slices in Custom mode
+let selStartDay        = 0;        // selection start, inclusive day index into the loaded daily series
+let selEndDay          = Infinity; // selection end, inclusive day index (clamped to last day on use)
 let currentGranularity = 'day';
 let splitByActivity    = false;
 let statsCache    = {};
@@ -725,6 +728,53 @@ function updateGranularityUI() {
     b.classList.toggle('active', b.dataset.gran === currentGranularity));
 }
 
+// Bucket key for a day row at the given granularity. Factored out so the range
+// brush can derive identical bucket boundaries (snap-to-bar) with no drift.
+function makeBucketKey(daily, gran) {
+  const weekStart = dateStr => {
+    const d = new Date(dateStr);
+    const day = d.getDay();
+    d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)); // snap to Monday
+    return d.toISOString().slice(0, 10);
+  };
+  const origin = daily.length ? new Date(daily[0].date) : null;
+  return r => {
+    if (gran === 'week') return weekStart(r.date);
+    if (gran === '2wk') {
+      const dt  = new Date(r.date);
+      const idx = Math.floor((dt - origin) / (86400000 * 14));
+      return new Date(+origin + idx * 14 * 86400000).toISOString().slice(0, 10);
+    }
+    if (gran === 'month') return r.date.slice(0, 7);
+    if (gran === 'year')  return r.date.slice(0, 4);
+    return r.date; // 'day'
+  };
+}
+
+// Day-index boundaries delimiting each display bucket: [0, b1, b2, …, N].
+// Bucket k spans daily[bounds[k] .. bounds[k+1]-1]; there are bounds.length-1
+// buckets. Keys are monotonic in date order, so one pass finds the edges.
+function bucketDayBounds(daily, gran) {
+  const n = daily.length;
+  if (!n) return [0];
+  if (gran === 'day') return Array.from({ length: n + 1 }, (_, i) => i);
+  const keyOf = makeBucketKey(daily, gran);
+  const bounds = [0];
+  let cur = keyOf(daily[0]);
+  for (let i = 1; i < n; i++) {
+    const k = keyOf(daily[i]);
+    if (k !== cur) { bounds.push(i); cur = k; }
+  }
+  bounds.push(n);
+  return bounds;
+}
+
+// Index of the bucket containing a given day index.
+function bucketIndexOfDay(bounds, day) {
+  for (let k = 0; k < bounds.length - 1; k++) if (day < bounds[k + 1]) return k;
+  return Math.max(0, bounds.length - 2);
+}
+
 function bucketDaily(daily, gran) {
   const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   if (!daily.length) return { labels: [], secs: [], chars: [] };
@@ -739,24 +789,7 @@ function bucketDaily(daily, gran) {
   }
 
   const buckets = {}, order = [];
-  const weekStart = dt => {
-    const d = new Date(dt);
-    const day = d.getDay();
-    d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)); // snap to Monday
-    return d.toISOString().slice(0, 10);
-  };
-
-  const getKey = r => {
-    if (gran === 'week') return weekStart(r.date);
-    if (gran === '2wk') {
-      const origin = new Date(daily[0].date);
-      const dt     = new Date(r.date);
-      const idx    = Math.floor((dt - origin) / (86400000 * 14));
-      const start  = new Date(+origin + idx * 14 * 86400000);
-      return start.toISOString().slice(0, 10);
-    }
-    if (gran === 'month') return r.date.slice(0, 7);
-  };
+  const getKey = makeBucketKey(daily, gran);
 
   daily.forEach(r => {
     const k = getKey(r);
@@ -769,7 +802,9 @@ function bucketDaily(daily, gran) {
 
   const multiYear = order[0].slice(0, 4) !== order[order.length - 1].slice(0, 4);
   let labels;
-  if (gran === 'week' || gran === '2wk') {
+  if (gran === 'year') {
+    labels = order;                                   // key is the 4-digit year
+  } else if (gran === 'week' || gran === '2wk') {
     labels = order.map(k => multiYear ? k.slice(2, 10).replace(/-/g, '/') : k.slice(5));
   } else {
     labels = order.map(k => {
@@ -804,6 +839,16 @@ function bucketByDayOfWeek(daily) {
 async function loadStats(range_val) {
   await refreshStatsHeatmap();
 
+  // 'Custom' isn't a backend range — re-render the live brush over its base
+  // preset, fetching that base first if the cache was cleared (e.g. new ingest).
+  if (range_val === 'Custom') {
+    if (!statsCache[customBase]) {
+      statsCache[customBase] = await window.pywebview.api.get_stats(customBase);
+    }
+    renderCustomStats();
+    return;
+  }
+
   if (!statsCache[range_val]) {
     statsCache[range_val] = await window.pywebview.api.get_stats(range_val);
     const others = ['30d','90d','6m','1y','All'].filter(r => r !== range_val);
@@ -825,25 +870,35 @@ function prefetchStats(ranges, idx) {
   }
 }
 
-async function setRange(rv) {
-  currentRange = rv;
+function setSegActive(rv) {
   document.querySelectorAll('#range-seg .seg-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.range === rv));
+}
+
+async function setRange(rv) {
+  if (rv === 'Custom') { enterCustomMode(); return; }
+  currentRange = rv;
+  customBase   = rv;
+  selStartDay = 0; selEndDay = Infinity; // a preset selection clears any custom brush
+  setSegActive(rv);
   await loadStats(rv);
 }
 
 async function setGranularity(g) {
   currentGranularity = g;
   updateGranularityUI();
-  if (statsCache[currentRange]) renderStats(statsCache[currentRange]);
+  if (currentRange === 'Custom') renderCustomStats();
+  else if (statsCache[currentRange]) renderStats(statsCache[currentRange]);
 }
 
 function onCumToggle() {
+  if (currentRange === 'Custom') { renderCustomStats(); return; }
   if (statsCache[currentRange]) renderDailyChart(statsCache[currentRange].daily);
 }
 
 function onSplitToggle() {
   splitByActivity = document.getElementById('split-toggle').checked;
+  if (currentRange === 'Custom') { renderCustomStats(); return; }
   if (statsCache[currentRange]) {
     renderDailyChart(statsCache[currentRange].daily);
     renderDowChart(statsCache[currentRange].daily);
@@ -908,8 +963,12 @@ function renderStats(d) {
   document.getElementById('sc-avg').textContent        = fmtTime(d.avg_secs);
   document.getElementById('es-consistency').textContent    = `${d.consistency_pct}%`;
   document.getElementById('es-consistency-sub').textContent = d.active_days ? `${d.active_days}/${d.window_days}d active` : '';
+  // Preset range: park the brush handles at the edges (full span, no dimming)
+  // and restore the streak card to its live "Current Streak" meaning.
+  selStartDay = 0; selEndDay = Infinity;
+  document.getElementById('daily-brush')?.classList.remove('active');
+  setStreakLabel('Current Streak');
   renderDailyChart(d.daily);
-  renderTimeRollingChart(d.daily);
   renderDailyCharsChart(d.daily);
   renderDowChart(d.daily);
   renderDonutChart(d.activity);
@@ -1120,6 +1179,7 @@ function renderDailyChart(daily) {
     data: { labels: shownLabels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      onResize: () => positionDailyBrush(),
       interaction: splitByActivity ? { mode: 'index', intersect: false } : undefined,
       plugins: {
         legend: { display: cum || splitByActivity,
@@ -1141,66 +1201,9 @@ function renderDailyChart(daily) {
       }
     }
   });
-}
 
-function renderTimeRollingChart(daily) {
-  const section = document.getElementById('time-rolling-section');
-  const show = (currentRange === 'All' || currentRange === '1y') && currentGranularity === 'day';
-  if (!show || !daily.length || !daily.some(r => r.seconds > 0)) {
-    section.style.display = 'none';
-    destroyChart('time-rolling');
-    return;
-  }
-  section.style.display = 'block';
-
-  const win     = 7;
-  const secsArr = daily.map(r => r.seconds);
-  const rollHrs = secsArr.map((_, i) => {
-    const start = Math.max(0, i - win + 1);
-    let s = 0;
-    for (let j = start; j <= i; j++) s += secsArr[j];
-    return s / (i - start + 1) / 3600;
-  });
-
-  const labels      = daily.map(r => r.date.slice(5));
-  const step        = Math.max(1, Math.floor(labels.length / 14));
-  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
-
-  upsertChart('time-rolling', 'chart-time-rolling', {
-    type: 'line',
-    data: {
-      labels: shownLabels,
-      datasets: [{
-        label: 'Time (7d rolling avg)',
-        data: rollHrs,
-        borderColor: '#5B8CFF',
-        backgroundColor: 'rgba(91,140,255,0.08)',
-        borderWidth: 2,
-        pointRadius: 0,
-        pointHoverRadius: 6,
-        pointBackgroundColor: '#5B8CFF',
-        pointBorderColor: '#24243A',
-        pointBorderWidth: 2,
-        fill: true,
-        tension: 0.35,
-        spanGaps: true,
-      }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
-      plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: {
-          title: c => labels[c[0].dataIndex],
-          label: c => `${fmtTime(c.raw * 3600)}/day`
-        } }
-      },
-      scales: {
-        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => `${v.toFixed(1)}h`}, beginAtZero: true, afterFit: s => { s.width = 62; } },
-      }
-    }
-  });
+  // Keep the range-selector handles aligned with the (re)laid-out plot area.
+  requestAnimationFrame(positionDailyBrush);
 }
 
 function renderDailyCharsChart(daily) {
@@ -1287,6 +1290,262 @@ function renderDonutChart(activity) {
       }
     }
   });
+}
+
+// ── Daily-chart range brush (custom range selector) ─────────────────────────
+// Draggable handles on the daily-time chart let the user narrow the Stats page
+// to an exact date window. The whole feature is client-side: the loaded `daily`
+// series already has every load-bearing per-day overlay (GSM rollover
+// attribution + manual shave) folded into each day's final number, so summing a
+// contiguous sub-slice is correct by construction — no backend round-trip and
+// no re-touching the attribution machinery. The brush slices statsCache[customBase].
+
+function setStreakLabel(text) {
+  const el = document.getElementById('sc-streak-lbl');
+  if (el) el.textContent = text;
+}
+
+function fmtShortDate(iso) {
+  const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const p = iso.split('-');
+  return `${M[+p[1] - 1]} ${+p[2]}`;
+}
+
+// The daily series the brush operates on (the loaded preset behind Custom mode).
+function statsBaseDaily() {
+  const base = currentRange === 'Custom' ? customBase : currentRange;
+  return statsCache[base] ? statsCache[base].daily : [];
+}
+
+// Resolve the stored day-index selection to whole buckets of the CURRENT
+// granularity, so the handles snap to bar edges and the recomputed stats cover
+// exactly the bars the user sees. Returns the inclusive day span plus the
+// bucket-space edges (kL, kR over B buckets) used to place the handles/masks.
+function effectiveDayRange() {
+  const daily  = statsBaseDaily();
+  const n      = daily.length;
+  const bounds = bucketDayBounds(daily, currentGranularity);
+  const B      = bounds.length - 1;
+  if (n === 0 || B < 1) return { startDay: 0, endDay: -1, kL: 0, kR: 0, B: 1, bounds };
+  const start = Math.max(0, Math.min(selStartDay, n - 1));
+  const end   = Math.max(start, Math.min(selEndDay, n - 1));
+  const kL = bucketIndexOfDay(bounds, start);
+  const kR = bucketIndexOfDay(bounds, end);
+  return { startDay: bounds[kL], endDay: bounds[kR + 1] - 1, kL, kR, B, bounds };
+}
+
+// Recompute every Stats card + chart input from the brushed sub-slice. Mirrors
+// the backend helpers (get_range_totals / get_range_extra_stats) but over the
+// selected window: totals are plain sums of already-adjusted per-day values;
+// cph divides chars by the slice's Reading time (never sessions.reading_speed).
+function computeBrushView() {
+  const daily = statsBaseDaily();
+  const { startDay, endDay } = effectiveDayRange();
+  const sub = daily.slice(startDay, endDay + 1);
+
+  let secs = 0, chars = 0, readSecs = 0, active = 0, bestDay = null;
+  const byTypeTotals = {};
+  sub.forEach(r => {
+    secs += r.seconds; chars += r.chars;
+    const bt = r.by_type || {};
+    readSecs += (bt['Reading'] || 0);
+    for (const t in bt) byTypeTotals[t] = (byTypeTotals[t] || 0) + bt[t];
+    if (r.seconds > 0) active++;
+    if (!bestDay || r.seconds > bestDay.secs) bestDay = { secs: r.seconds, date: r.date };
+  });
+
+  // Best Mon-anchored week within the window (matches _best_week server-side).
+  const weeks = {};
+  sub.forEach(r => {
+    const [y, m, d] = r.date.split('-').map(Number);
+    const dt = new Date(y, m - 1, d);
+    dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7));   // back up to Monday
+    const key = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+    weeks[key] = (weeks[key] || 0) + r.seconds;
+  });
+  let bestWeek = null;
+  for (const k in weeks) if (!bestWeek || weeks[k] > bestWeek.secs) bestWeek = { secs: weeks[k], start: k };
+
+  // Longest run of consecutive active days inside the window (the global
+  // "current streak" is meaningless for an arbitrary slice, so we relabel).
+  let streak = 0, run = 0;
+  sub.forEach(r => { if (r.seconds > 0) { run++; if (run > streak) streak = run; } else run = 0; });
+
+  const windowDays = sub.length;
+  const denomSecs  = readSecs > 0 ? readSecs : secs;       // Reading time, like the backend cph
+  const cph = (chars > 0 && denomSecs > 0) ? Math.round(chars / (denomSecs / 3600)) : 0;
+  const activity = Object.keys(byTypeTotals)
+    .map(t => ({ type: t, seconds: byTypeTotals[t] }))
+    .filter(a => a.seconds > 0)
+    .sort((a, b) => b.seconds - a.seconds);
+
+  return {
+    sub, secs, chars, cph,
+    avg_secs:        windowDays ? secs / windowDays : 0,
+    window_days:     windowDays,
+    active_days:     active,
+    consistency_pct: windowDays ? Math.round(active / windowDays * 1000) / 10 : 0,
+    best_day:        bestDay,
+    best_week:       bestWeek,
+    streak,
+    activity,
+    start_date:      sub.length ? sub[0].date : null,
+    end_date:        sub.length ? sub[sub.length - 1].date : null,
+  };
+}
+
+function applyBrushCards(v) {
+  const lbl = (v.start_date && v.end_date)
+    ? `${fmtShortDate(v.start_date)} – ${fmtShortDate(v.end_date)}`
+    : 'custom';
+  document.getElementById('sc-time-lbl').textContent  = `Time (${lbl})`;
+  document.getElementById('sc-chars-lbl').textContent = `Characters (${lbl})`;
+  document.getElementById('sc-cph-lbl').textContent   = `Chars / hour (${lbl})`;
+  document.getElementById('sc-avg-lbl').textContent   = `Avg / day (${lbl})`;
+  document.getElementById('sc-time').textContent   = fmtTime(v.secs);
+  document.getElementById('sc-chars').textContent  = fmtChars(v.chars);
+  document.getElementById('sc-cph').textContent    = v.cph ? fmtChars(v.cph) : '—';
+  setStreakLabel('Longest streak');
+  document.getElementById('sc-streak').textContent = `${v.streak}d`;
+  document.getElementById('sc-avg').textContent    = fmtTime(v.avg_secs);
+  document.getElementById('es-best-day').textContent       = fmtTime(v.best_day ? v.best_day.secs : 0);
+  document.getElementById('es-best-day-date').textContent  = v.best_day ? v.best_day.date : '—';
+  document.getElementById('es-best-week').textContent      = fmtTime(v.best_week ? v.best_week.secs : 0);
+  document.getElementById('es-best-week-date').textContent = v.best_week ? `w/o ${v.best_week.start}` : '—';
+  document.getElementById('es-consistency').textContent     = `${v.consistency_pct}%`;
+  document.getElementById('es-consistency-sub').textContent =
+    v.active_days ? `${v.active_days}/${v.window_days}d active` : '';
+}
+
+function renderCustomStats() {
+  const base = statsCache[customBase];
+  if (!base) return;
+  const brush = document.getElementById('daily-brush');
+  if (brush) brush.classList.add('active');
+  const v = computeBrushView();
+  applyBrushCards(v);
+  renderDailyChart(base.daily);          // full series stays; masks dim the unselected part
+  renderDailyCharsChart(v.sub);          // downstream views follow the selection
+  renderDowChart(v.sub);
+  renderDonutChart(v.activity);
+  requestAnimationFrame(positionDailyBrush);
+}
+
+function enterCustomMode() {
+  if (currentRange !== 'Custom') {
+    if (!statsCache[currentRange]) return;
+    customBase   = currentRange;
+    currentRange = 'Custom';
+  }
+  setSegActive('Custom');
+  renderCustomStats();
+}
+
+function clearBrush() {
+  selStartDay = 0; selEndDay = Infinity;
+  currentRange = customBase;
+  setSegActive(customBase);
+  document.getElementById('daily-brush')?.classList.remove('active');
+  if (statsCache[customBase]) renderStats(statsCache[customBase]);
+}
+
+// ── Brush geometry + drag ───────────────────────────────────────────────────
+function positionDailyBrush() {
+  const chart  = charts['daily'];
+  const brush  = document.getElementById('daily-brush');
+  const canvas = document.getElementById('chart-daily');
+  if (!brush) return;
+  if (!chart || !canvas || !chart.chartArea || !(chart.chartArea.right > chart.chartArea.left)) {
+    brush.hidden = true;
+    return;
+  }
+  const ca = chart.chartArea;
+  brush.hidden = false;
+  brush.style.left   = (canvas.offsetLeft + ca.left) + 'px';
+  brush.style.top    = (canvas.offsetTop  + ca.top)  + 'px';
+  brush.style.width  = (ca.right - ca.left) + 'px';
+  brush.style.height = (ca.bottom - ca.top) + 'px';
+  updateBrushVisual();
+}
+
+function updateBrushVisual() {
+  const brush = document.getElementById('daily-brush');
+  if (!brush || brush.hidden) return;
+  const daily = statsBaseDaily();
+  const { startDay, endDay, kL, kR, B } = effectiveDayRange();
+  const lPct = kL / B * 100;              // left edge of the first selected bucket
+  const rPct = (kR + 1) / B * 100;        // right edge of the last selected bucket
+  brush.querySelector('.brush-mask-l').style.width    = lPct.toFixed(3) + '%';
+  brush.querySelector('.brush-mask-r').style.width    = (100 - rPct).toFixed(3) + '%';
+  brush.querySelector('.brush-handle-l').style.left   = lPct.toFixed(3) + '%';
+  brush.querySelector('.brush-handle-r').style.left   = rPct.toFixed(3) + '%';
+  const label = brush.querySelector('.brush-label');
+  if (label) {
+    label.style.left = ((lPct + rPct) / 2).toFixed(3) + '%';
+    if (daily.length && endDay >= startDay) {
+      brush.querySelector('.brush-range').textContent =
+        `${fmtShortDate(daily[startDay].date)} – ${fmtShortDate(daily[endDay].date)} · ${endDay - startDay + 1}d`;
+    }
+  }
+}
+
+let _brushDrag = null;
+function startBrushDrag(e, side) {
+  e.preventDefault();
+  const daily = statsBaseDaily();
+  if (!daily.length) return;
+  const brush = document.getElementById('daily-brush');
+  brush.classList.add('dragging');
+  if (currentRange !== 'Custom') {        // first touch of a handle flips the filter to Custom
+    customBase   = currentRange;
+    currentRange = 'Custom';
+    setSegActive('Custom');
+    brush.classList.add('active');
+  }
+  _brushDrag = { side };
+  const move = ev => onBrushDrag(ev);
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    brush.classList.remove('dragging');
+    _brushDrag = null;
+    renderCustomStats();                  // settle: redraw downstream charts at the final selection
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+}
+
+function onBrushDrag(ev) {
+  if (!_brushDrag) return;
+  const brush = document.getElementById('daily-brush');
+  const rect  = brush.getBoundingClientRect();
+  let f = (ev.clientX - rect.left) / Math.max(1, rect.width);
+  f = Math.max(0, Math.min(1, f));
+  // Snap the dragged edge to the nearest bucket boundary; the opposite edge
+  // stays pinned to its current bucket. Selection never shrinks below one bucket.
+  const { kL, kR, B, bounds } = effectiveDayRange();
+  if (_brushDrag.side === 'l') {
+    const k = Math.max(0, Math.min(Math.round(f * B), kR));        // start bucket, ≤ right bucket
+    selStartDay = bounds[k];
+    selEndDay   = bounds[kR + 1] - 1;
+  } else {
+    const kb = Math.max(kL + 1, Math.min(Math.round(f * B), B));   // end boundary, > left bucket
+    selStartDay = bounds[kL];
+    selEndDay   = bounds[kb] - 1;
+  }
+  updateBrushVisual();
+  applyBrushCards(computeBrushView());    // live, lightweight: cards only while dragging
+}
+
+function initDailyBrush() {
+  const brush = document.getElementById('daily-brush');
+  if (!brush || brush.dataset.init) return;
+  brush.dataset.init = '1';
+  brush.querySelectorAll('.brush-handle').forEach(h =>
+    h.addEventListener('pointerdown', e => startBrushDrag(e, h.dataset.side)));
+  const reset = brush.querySelector('.brush-reset');
+  if (reset) reset.addEventListener('click', clearBrush);
+  window.addEventListener('resize', () => requestAnimationFrame(positionDailyBrush));
 }
 
 // ── Goals ──────────────────────────────────────────────────────────────────
@@ -3286,6 +3545,7 @@ async function saveMilestoneModal() {
 document.addEventListener('DOMContentLoaded', () => {
   const unitSel = document.getElementById('milestone-input-unit');
   if (unitSel) unitSel.addEventListener('change', updateMilestoneHintsForUnit);
+  initDailyBrush();
 });
 
 // ── Milestone detail view ──────────────────────────────────────────────────

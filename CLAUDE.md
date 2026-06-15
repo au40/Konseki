@@ -191,6 +191,15 @@ the **same chokepoints** so the surface stays minimal:
   bucket holds more than one. Both functions now carry `game_id` as the last tuple
   element (mapped into the dashboard/History payloads). `max(0, …)` floors
   over-subtraction; chars are left intact (only time is dead time).
+  - **Rollover-bucket targeting:** `get_today_stats` merges logical-today with the
+    real calendar date during the rollover window, so a game can have two rows in
+    one bucket (its own day + a post-midnight session). The shave is applied to the
+    row whose `session_date` equals the logical day **first** (then spills to
+    others), so a shave set on day D lands on D's own row — not on the live
+    post-midnight session that merged in. This matches `get_recent_sessions`, where
+    each date is processed separately and the real row precedes the phantom — keep
+    the two consistent or the dashboard and History will disagree on which row
+    shows the shave.
 - **Heatmaps go through the chokepoint too.** `get_heatmap_data` (rolling-window,
   [db.py](db.py)) and `Api.get_heatmap` year-mode ([tracker.py](tracker.py)) build
   `{session_date: raw_secs}` then apply `get_gsm_day_adjustments()` per date,
