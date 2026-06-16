@@ -123,6 +123,7 @@ async function loadPage(page) {
   else if (page === 'stats')     await loadStats(currentRange);
   else if (page === 'goals')     await loadGoals();
   else if (page === 'media')     await loadMedia();
+  else if (page === 'catalog')   await loadCatalog();
   else if (page === 'settings')  await loadSettings();
 }
 
@@ -3123,6 +3124,134 @@ function setTheme(theme) {
   applyTheme(theme);
   document.querySelectorAll('.theme-opt').forEach(el =>
     el.classList.toggle('selected', el.dataset.theme === theme));
+}
+
+// ── Catalog ────────────────────────────────────────────────────────────────
+let catalogRows = [];
+
+async function loadCatalog() {
+  const data = await window.pywebview.api.get_catalog();
+  catalogRows = data.rows || [];
+  const books = document.getElementById('catalog-books');
+  if (books) books.textContent = (+(data.total_books || 0)).toFixed(1);
+  renderCatalogBody();
+}
+
+function catTypeLabel(t) { return t === 'game' ? 'Game' : t === 'manga' ? 'Manga' : 'Book'; }
+function catCountText(r) {
+  if (r.reading_type === 'manga') return `${r.volumes} vol${r.volumes === 1 ? '' : 's'}`;
+  return `${fmtChars(r.chars)} chars`;
+}
+
+function renderCatalogBody() {
+  const body  = document.getElementById('catalog-body');
+  const empty = document.getElementById('catalog-empty');
+  body.innerHTML = '';
+  if (!catalogRows.length) { empty.style.display = ''; return; }
+  empty.style.display = 'none';
+  catalogRows.forEach(r => {
+    const tr = document.createElement('tr');
+    const nameCell = r.linked
+      ? `<span class="cat-name">${escHtml(r.display_name)}</span><span class="cat-chip" title="Auto-added from your sessions; char count grows as you read more">tracked</span>`
+      : `<span class="cat-name cat-editable" title="Double-click to rename"
+           ondblclick="startCatNameEdit(this, ${r.id})">${escHtml(r.name)}</span>`;
+    tr.innerHTML = `
+      <td>${nameCell}</td>
+      <td><span class="cat-editable" title="Double-click to change"
+            ondblclick="startCatTypeEdit(this, ${r.id})">${catTypeLabel(r.reading_type)}</span></td>
+      <td class="cat-count-cell"><span class="cat-editable" title="Double-click to edit"
+            ondblclick="startCatCountEdit(this, ${r.id})">${catCountText(r)}</span></td>
+      <td><button class="cat-del" title="Remove" onclick="deleteCatalogEntry(${r.id})">✕</button></td>`;
+    body.appendChild(tr);
+  });
+}
+
+async function _catSave(id, fields) {
+  const res = await window.pywebview.api.update_catalog_entry(id, fields);
+  if (res && res.ok === false) { alert(res.error || 'Could not save'); }
+  await loadCatalog();
+}
+// Every field is plain text until you double-click it. The edit control commits
+// on blur (or Enter / select-change) and reverts to text on Escape or no-change.
+// Manual editing is rare, so the table reads cleanly by default.
+function startCatNameEdit(span, id) {
+  const cur = span.textContent.trim();
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'cat-input cat-name-input';
+  input.value = cur;
+  _catEdit(span, () => {
+    const next = input.value.trim();
+    return (next && next !== cur) ? { name: next } : null;
+  }, input, id);
+  input.select();
+}
+
+function startCatTypeEdit(span, id) {
+  const r = catalogRows.find(x => x.id === id); if (!r) return;
+  const sel = document.createElement('select');
+  sel.className = 'cat-input cat-type';
+  [['book','Book'], ['game','Game'], ['manga','Manga']].forEach(([v, l]) => {
+    const o = document.createElement('option');
+    o.value = v; o.textContent = l;
+    if (r.reading_type === v) o.selected = true;
+    sel.appendChild(o);
+  });
+  _catEdit(span, () => sel.value !== r.reading_type ? { reading_type: sel.value } : null,
+           sel, id, 'change');
+}
+
+function startCatCountEdit(span, id) {
+  const r = catalogRows.find(x => x.id === id); if (!r) return;
+  const field = r.reading_type === 'manga' ? 'volumes' : 'chars';
+  const cur   = r.reading_type === 'manga' ? r.volumes : r.chars;
+  const input = document.createElement('input');
+  input.type = 'number'; input.min = '0'; input.className = 'cat-input cat-count';
+  input.value = cur;
+  _catEdit(span, () => {
+    const next = parseInt(input.value || '0', 10);
+    return (!isNaN(next) && next !== cur) ? { [field]: next } : null;
+  }, input, id);
+  input.select();
+}
+
+// Shared inline-edit lifecycle: swap `span` for `control`, focus it, then commit
+// (via `diff()` → fields-or-null) on blur/Enter/change, or revert on Escape/no-op.
+function _catEdit(span, diff, control, id, commitOn) {
+  const td = span.parentElement;
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    const fields = save ? diff() : null;
+    if (fields) _catSave(id, fields);   // reloads the table
+    else renderCatalogBody();           // revert to text style
+  };
+  control.addEventListener('blur', () => finish(true));
+  control.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter')  { e.preventDefault(); control.blur(); }
+    else if (e.key === 'Escape') { done = true; renderCatalogBody(); }
+  });
+  if (commitOn === 'change') control.addEventListener('change', () => finish(true));
+  td.innerHTML = '';
+  td.appendChild(control);
+  control.focus();
+}
+
+async function addCatalogRow() {
+  const name = (prompt('Title name?') || '').trim();
+  if (!name) return;
+  const res = await window.pywebview.api.add_catalog_entry(name, 'book', 0, 0);
+  if (res && res.ok === false) { alert(res.error || 'Could not add'); return; }
+  await loadCatalog();
+}
+
+async function deleteCatalogEntry(id) {
+  const r = catalogRows.find(x => x.id === id);
+  const label = r ? (r.display_name || r.name) : 'this entry';
+  if (!confirm(`Remove "${label}" from the catalog?`)) return;
+  await window.pywebview.api.delete_catalog_entry(id);
+  await loadCatalog();
 }
 
 // ── Settings ───────────────────────────────────────────────────────────────

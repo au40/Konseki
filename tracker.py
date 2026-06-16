@@ -29,6 +29,7 @@ except ImportError:
 import db
 import imports
 import backup
+import catalog
 from db import (
     APP_NAME, DB_PATH, SESSIONS_DIR,
     init_db, scan_existing_files,
@@ -313,6 +314,37 @@ class Api:
     def set_media_order(self, ordered_keys):
         try:
             db.db_set_media_card_order(list(ordered_keys))
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Catalog ───────────────────────────────────────────────────────────────
+    # Read-only reading ledger in its own catalog.db. Never writes tracker.db.
+    def get_catalog(self):
+        return catalog.get_catalog()
+
+    def add_catalog_entry(self, name, reading_type="book", chars=0, volumes=0):
+        try:
+            catalog.add_catalog_entry(name, reading_type, chars, volumes)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def update_catalog_entry(self, entry_id, fields):
+        try:
+            f = fields or {}
+            catalog.update_catalog_entry(
+                entry_id,
+                name=f.get("name"), reading_type=f.get("reading_type"),
+                chars=f.get("chars"), volumes=f.get("volumes"),
+            )
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_catalog_entry(self, entry_id):
+        try:
+            catalog.delete_catalog_entry(entry_id)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -748,6 +780,7 @@ gsm_wal_handler = None  # set in main(); read by Api.save_settings
 def main():
     global gsm_wal_handler
     init_db()
+    catalog.init_catalog_db()
     scan_existing_files()
     backup.ensure_backup()
     backup.schedule_backups()

@@ -1,4 +1,5 @@
 tracker.db
+catalog.db
 sessions/
 .claude
 __pycache__

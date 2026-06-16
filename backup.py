@@ -60,6 +60,11 @@ def make_backup() -> Path | None:
 
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(tmp_db, arcname="tracker.db")
+            # The Catalog ledger lives in its own file — fold it into the same
+            # daily zip so it's covered by the existing rolling backup.
+            catalog_db = DATA_DIR / "catalog.db"
+            if catalog_db.exists():
+                zf.write(catalog_db, arcname="catalog.db")
     finally:
         if tmp_db.exists():
             try:

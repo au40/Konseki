@@ -35,6 +35,9 @@
     <div class="nav-item" data-page="media" onclick="navigate('media')">
       <span class="nav-icon">▦</span>Media
     </div>
+    <div class="nav-item" data-page="catalog" onclick="navigate('catalog')">
+      <span class="nav-icon">▤</span>Catalog
+    </div>
     <div class="nav-item" data-page="settings" onclick="navigate('settings')">
       <span class="nav-icon">⚙</span>Settings
     </div>
@@ -503,6 +506,42 @@
         <div style="height:24px"></div>
       </div>
 
+    </div>
+
+    <!-- ── Catalog ────────────────────────────────────────────────────────── -->
+    <div id="page-catalog" class="page">
+      <div class="page-header"><h1>Catalog</h1></div>
+
+      <div class="catalog-top">
+        <div class="catalog-left">
+          <p class="muted catalog-intro">
+            A reading ledger for character / volume tracking. Titles you read in the
+            tracker are added automatically and their char counts grow as you read more —
+            nothing here ever touches your stats.
+          </p>
+          <button class="btn btn-outline btn-sm" onclick="addCatalogRow()">＋ Add entry</button>
+        </div>
+        <div class="catalog-hero">
+          <div class="catalog-hero-main">
+            <span class="catalog-hero-num" id="catalog-books">0.0</span>
+            <span class="catalog-hero-label">books read</span>
+          </div>
+          <div class="catalog-hero-sub">1 book = 100,000 characters or 7 manga volumes</div>
+        </div>
+      </div>
+
+      <table class="catalog-table" id="catalog-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th class="cat-col-type">Type</th>
+            <th class="cat-col-count">Count</th>
+            <th class="cat-col-del"></th>
+          </tr>
+        </thead>
+        <tbody id="catalog-body"></tbody>
+      </table>
+      <p class="empty-msg" id="catalog-empty" style="display:none">Nothing in the catalog yet.</p>
     </div>
 
     <!-- ── Settings ───────────────────────────────────────────────────────── -->
