@@ -844,6 +844,14 @@ select:focus { border-color: var(--accent); }
 }
 #confirm-message { font-size: 14px; color: var(--text); line-height: 1.5; }
 
+/* ── Edit-log modal ──────────────────────────────────────────────────────── */
+#edit-log-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+}
+#edit-log-dialog { width: 480px; max-width: 92vw; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+
 /* ── First-run welcome dialog ────────────────────────────────────────────── */
 #firstrun-overlay {
   position: fixed; inset: 0; z-index: 1000;

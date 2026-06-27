@@ -205,6 +205,7 @@ class Api:
         return {
             "today": [
                 {"id": r[0], "source": r[1], "title": aliases.get(r[2], r[2]),
+                 "raw_title": r[2],
                  "activity_type": r[3], "chars": r[4], "lines": r[5], "seconds": r[6],
                  "game_id": r[7], "date": today_date, "adjust_secs": adj.get(r[7], 0)}
                 for r in today
@@ -228,6 +229,7 @@ class Api:
         # phantom rows (id=None) don't carry it, to avoid double-display.
         return [
             {"id": r[0], "date": r[1], "source": r[2], "title": aliases.get(r[3], r[3]),
+             "raw_title": r[3],
              "activity_type": r[4], "chars": r[5], "lines": r[6], "seconds": r[7],
              "game_id": r[8],
              "adjust_secs": (manual.get((r[1], r[8]), 0) if r[0] is not None else 0)}
@@ -405,6 +407,17 @@ class Api:
         try:
             datetime.strptime(session_date, "%Y-%m-%d")
             insert_manual_session(atype, float(minutes), title, session_date, chars)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def update_manual_session(self, session_id, atype, minutes, title, session_date, chars=0):
+        try:
+            datetime.strptime(session_date, "%Y-%m-%d")
+            changed = db.update_manual_session(int(session_id), atype, float(minutes),
+                                               title, session_date, chars)
+            if not changed:
+                return {"ok": False, "error": "Only manual entries can be edited."}
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}

@@ -140,8 +140,8 @@
         <div class="muted" id="tlog-baseline" style="margin:-4px 0 14px;font-size:13px"></div>
         <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
           <div class="form-group" style="width:140px;flex-shrink:0">
-            <label>New total time (H:MM)</label>
-            <input type="text" id="tlog-time" placeholder="52:30" oninput="updateTotalLogPreview()">
+            <label>New total time (H:MM:SS)</label>
+            <input type="text" id="tlog-time" oninput="updateTotalLogPreview()">
           </div>
           <div class="form-group" style="width:150px;flex-shrink:0">
             <label>New total chars (optional)</label>
@@ -828,6 +828,45 @@
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
       <button class="btn btn-outline btn-sm" onclick="confirmResolve(false)">Cancel</button>
       <button class="btn btn-sm" id="confirm-ok-btn" onclick="confirmResolve(true)">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Edit manual log modal ───────────────────────────────────────────── -->
+<div id="edit-log-overlay" style="display:none">
+  <div id="edit-log-dialog" class="card">
+    <h2 style="margin:0 0 16px">Edit log entry</h2>
+    <div class="form-group">
+      <label>Activity type</label>
+      <div class="pill-group" id="edit-log-atype-pills"></div>
+    </div>
+    <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+      <div class="form-group" style="width:120px;flex-shrink:0">
+        <label>Time (minutes)</label>
+        <input type="number" id="edit-log-minutes" min="0" step="any" oninput="updateEditCharsHint()">
+      </div>
+      <div class="form-group" id="edit-log-chars-group" style="display:none;width:130px;flex-shrink:0">
+        <label>Characters (optional)</label>
+        <input type="number" id="edit-log-chars" min="0" oninput="updateEditCharsHint()">
+      </div>
+      <div class="form-group" id="edit-log-cph-group" style="display:none;width:120px;flex-shrink:0">
+        <label>Chars / hour (optional)</label>
+        <input type="number" id="edit-log-cph" min="0" oninput="updateEditCharsHint()">
+      </div>
+      <div class="form-group" style="flex:1;min-width:160px">
+        <label>Title / media (optional)</label>
+        <input type="text" id="edit-log-title" list="media-titles" placeholder="Type, or pick existing media">
+      </div>
+    </div>
+    <div id="edit-log-chars-hint" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
+    <div class="form-group" style="max-width:180px">
+      <label>Date</label>
+      <input type="text" id="edit-log-date">
+    </div>
+    <div class="feedback" id="edit-log-feedback"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="closeLogEdit()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitLogEdit()">Save changes</button>
     </div>
   </div>
 </div>

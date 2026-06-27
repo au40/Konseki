@@ -223,6 +223,20 @@ function wireEditTimeBtn(el, s) {
   }
 }
 
+// Edit pencil shown only on manual rows with a real id (phantom rollover rows have
+// id=null). Reuses the games' edit-pencil chip styling; a row is either GSM or
+// manual, never both, so the two pencils never collide.
+function editLogBtnHtml(s) {
+  return (s.source === 'manual' && s.id)
+    ? `<button class="btn edit-time-btn edit-log-btn" title="Edit this log entry">✎</button>`
+    : '';
+}
+function wireEditLogBtn(el, s) {
+  if (s.source === 'manual' && s.id) {
+    el.querySelector('.edit-log-btn').addEventListener('click', () => openLogEdit(s));
+  }
+}
+
 function makeSessionRow(s) {
   const color  = acolor(s.activity_type);
   const shaved = s.adjust_secs ? Math.round(-s.adjust_secs / 60) : 0;
@@ -240,8 +254,10 @@ function makeSessionRow(s) {
       ${shaved > 0 ? `<span class="session-chars" style="color:var(--warn)">−${shaved}m dead time</span>` : ''}
       <button class="btn btn-xs btn-danger" onclick="doDeleteSession(${s.id}, this)">✕</button>
       ${editTimeBtnHtml(s)}
+      ${editLogBtnHtml(s)}
     </div>`;
   wireEditTimeBtn(el, s);
+  wireEditLogBtn(el, s);
   return el;
 }
 
@@ -630,25 +646,153 @@ async function doLogSession() {
   }
 }
 
+// ── Edit manual log (modal) ──────────────────────────────────────────────────
+// Pops the manual-log form pre-filled with an existing entry and updates it in
+// place. Only manual rows expose the pencil (see editLogBtnHtml); GSM/ttsu/anki
+// rows are re-ingested, so the backend also guards UPDATE to source='manual'.
+let editingSessionId  = null;
+let selectedEditAtype = 'Reading';
+
+// Build activity-type pills into `container`; onSelect(type) fires on click.
+function renderAtypePills(container, allTypes, allColors, getSelected, onSelect) {
+  container.innerHTML = '';
+  allTypes.forEach(t => {
+    const b = document.createElement('button');
+    b.className = 'pill' + (t === getSelected() ? ' active' : '');
+    b.textContent = t;
+    const paint = el => {
+      const col = allColors[t] || 'var(--accent)';
+      el.style.background = col; el.style.borderColor = col; el.style.color = '#fff';
+    };
+    if (t === getSelected()) paint(b);
+    b.onclick = () => {
+      container.querySelectorAll('.pill').forEach(p => {
+        p.classList.remove('active'); p.style.background = ''; p.style.borderColor = ''; p.style.color = '';
+      });
+      b.classList.add('active'); paint(b);
+      onSelect(t);
+    };
+    container.appendChild(b);
+  });
+}
+
+function toggleEditReadingFields(isReading) {
+  const cg = document.getElementById('edit-log-chars-group');
+  const pg = document.getElementById('edit-log-cph-group');
+  if (cg) cg.style.display = isReading ? '' : 'none';
+  if (pg) pg.style.display = isReading ? '' : 'none';
+  updateEditCharsHint();
+}
+
+function updateEditCharsHint() {
+  const hint = document.getElementById('edit-log-chars-hint');
+  if (!hint) return;
+  if (selectedEditAtype !== 'Reading') { hint.style.display = 'none'; return; }
+  const mins  = Number(document.getElementById('edit-log-minutes').value);
+  const chars = Number(document.getElementById('edit-log-chars').value);
+  const cph   = Number(document.getElementById('edit-log-cph').value);
+  if (chars > 0) {
+    hint.style.display = '';
+    hint.textContent = mins > 0
+      ? `≈ ${fmtChars(Math.round(chars / (mins / 60)))}/hr at this pace`
+      : `${fmtChars(chars)} chars will be logged`;
+  } else if (cph > 0 && mins > 0) {
+    hint.style.display = '';
+    hint.textContent = `≈ ${fmtChars(Math.round(cph * mins / 60))} chars will be logged`;
+  } else {
+    hint.style.display = 'none';
+  }
+}
+
+async function openLogEdit(s) {
+  editingSessionId  = s.id;
+  selectedEditAtype = s.activity_type || 'Reading';
+  const customCats = await window.pywebview.api.get_categories();
+  const allTypes   = [...BUILTIN_TYPES, ...customCats.map(c => c.name)];
+  const allColors  = Object.fromEntries([
+    ...BUILTIN_TYPES.map(t => [t, ACOLORS[t]]),
+    ...customCats.map(c => [c.name, c.color])
+  ]);
+  renderAtypePills(
+    document.getElementById('edit-log-atype-pills'), allTypes, allColors,
+    () => selectedEditAtype,
+    t => { selectedEditAtype = t; toggleEditReadingFields(t === 'Reading'); });
+
+  document.getElementById('edit-log-minutes').value = +(s.seconds / 60).toFixed(2);
+  document.getElementById('edit-log-chars').value   = s.chars > 0 ? s.chars : '';
+  document.getElementById('edit-log-cph').value     = '';
+  document.getElementById('edit-log-title').value   = s.raw_title || '';
+  document.getElementById('edit-log-feedback').textContent = '';
+  toggleEditReadingFields(selectedEditAtype === 'Reading');
+
+  const dp = document.getElementById('edit-log-date')._flatpickr;
+  if (dp) dp.setDate(s.date || today(), false);
+  else    document.getElementById('edit-log-date').value = s.date || today();
+
+  document.getElementById('edit-log-overlay').style.display = 'flex';
+}
+
+function closeLogEdit() {
+  document.getElementById('edit-log-overlay').style.display = 'none';
+  editingSessionId = null;
+}
+
+async function submitLogEdit() {
+  const fb       = document.getElementById('edit-log-feedback');
+  const minutes  = document.getElementById('edit-log-minutes').value.trim();
+  const title    = document.getElementById('edit-log-title').value.trim();
+  const dt       = document.getElementById('edit-log-date').value.trim();
+  const charsRaw = document.getElementById('edit-log-chars').value.trim();
+  const cphRaw   = document.getElementById('edit-log-cph').value.trim();
+
+  if (editingSessionId == null) { closeLogEdit(); return; }
+  if (!minutes || isNaN(minutes) || Number(minutes) <= 0) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a positive number of minutes.'; return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) {
+    fb.className = 'feedback err'; fb.textContent = 'Date must be YYYY-MM-DD.'; return;
+  }
+  // Same chars resolution as the new-entry form: explicit count wins, else extrapolate.
+  let chars = 0;
+  if (selectedEditAtype === 'Reading') {
+    if (charsRaw)    chars = Number(charsRaw);
+    else if (cphRaw) chars = Math.round(Number(cphRaw) * Number(minutes) / 60);
+  }
+  const r = await window.pywebview.api.update_manual_session(
+    editingSessionId, selectedEditAtype, Number(minutes), title, dt, chars);
+  if (r.ok) {
+    closeLogEdit();
+    statsCache = {};
+    setStatus('Session updated');
+    if      (currentPage === 'history')   loadHistory();
+    else if (currentPage === 'dashboard') loadDashboard();
+  } else {
+    fb.className = 'feedback err'; fb.textContent = r.error || 'Something went wrong.';
+  }
+}
+
 // ── Total time log ───────────────────────────────────────────────────────────
 // The user pastes their reading app's running cumulative total; we log the
 // *difference* since the last entry as a normal manual session. The totals
 // themselves persist in a private baseline (db: total_log_baselines) keyed by
 // '' (global) or the selected media title (per-media) — never counted as stats.
 
-// Parse "H:MM" (or a bare hours number) into seconds; null if unparseable.
-function parseHMM(str) {
+// Parse "H:MM:SS" / "H:MM" (or a bare hours number) into seconds; null if bad.
+function parseHMS(str) {
   const s = (str || '').trim();
   if (!s) return null;
-  let m = s.match(/^(\d+):([0-5]?\d)$/);
+  let m = s.match(/^(\d+):([0-5]?\d):([0-5]?\d)$/);    // H:MM:SS
+  if (m) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  m = s.match(/^(\d+):([0-5]?\d)$/);                    // H:MM
   if (m) return (Number(m[1]) * 60 + Number(m[2])) * 60;
-  m = s.match(/^\d+(\.\d+)?$/);          // bare hours, e.g. "52" or "52.5"
+  m = s.match(/^\d+(\.\d+)?$/);                          // bare hours, e.g. "52" or "52.5"
   if (m) return Math.round(Number(s) * 3600);
   return null;
 }
-function secsToHMM(secs) {
-  const t = Math.max(0, Math.round(secs / 60));
-  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+function secsToHMS(secs) {
+  const t = Math.max(0, Math.round(secs));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+  return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
 }
 
 // Active baseline key: '' for global, the selected media title for per-media.
@@ -713,7 +857,7 @@ async function refreshTotalLogBaseline() {
     : '';
   if (tlogHasBaseline) {
     const charsPart = tlogBaseChars > 0 ? ` · ${fmtChars(tlogBaseChars)} chars` : '';
-    line.textContent = `Last recorded total ${scope}: ${secsToHMM(tlogBaseSecs)}${charsPart}`;
+    line.textContent = `Last recorded total ${scope}: ${secsToHMS(tlogBaseSecs)}${charsPart}`;
   } else {
     line.textContent = `No baseline set yet ${scope} — enter your current total and press “Set as baseline”.`;
   }
@@ -728,7 +872,7 @@ async function refreshTotalLogBaseline() {
 function updateTotalLogPreview() {
   const prev = document.getElementById('tlog-preview');
   if (!prev) return;
-  const newSecs  = parseHMM(document.getElementById('tlog-time').value);
+  const newSecs  = parseHMS(document.getElementById('tlog-time').value);
   const charsRaw = document.getElementById('tlog-chars').value.trim();
   const cphRaw   = document.getElementById('tlog-cph').value.trim();
   if (newSecs === null) { prev.style.display = 'none'; return; }
@@ -741,7 +885,7 @@ function updateTotalLogPreview() {
   const deltaSecs = newSecs - tlogBaseSecs;
   if (deltaSecs <= 0) {
     prev.style.display = '';
-    prev.textContent = `New total must exceed the last recorded total (${secsToHMM(tlogBaseSecs)}).`;
+    prev.textContent = `New total must exceed the last recorded total (${secsToHMS(tlogBaseSecs)}).`;
     return;
   }
   const deltaHours = deltaSecs / 3600;
@@ -761,10 +905,10 @@ function updateTotalLogPreview() {
 // Seed/re-sync the baseline for the active key WITHOUT logging anything.
 async function doSetTotalBaseline() {
   const fb       = document.getElementById('tlog-feedback');
-  const newSecs  = parseHMM(document.getElementById('tlog-time').value);
+  const newSecs  = parseHMS(document.getElementById('tlog-time').value);
   const charsRaw = document.getElementById('tlog-chars').value.trim();
   if (newSecs === null) {
-    fb.className = 'feedback err'; fb.textContent = 'Enter a total time as H:MM (e.g. 52:30).'; return;
+    fb.className = 'feedback err'; fb.textContent = 'Enter a total time as H:MM:SS.'; return;
   }
   if (tlogMode === 'per_media' && !tlogKey()) {
     fb.className = 'feedback err'; fb.textContent = 'Pick a media to set its baseline.'; return;
@@ -782,13 +926,13 @@ async function doSetTotalBaseline() {
 async function doTotalLog() {
   const fb       = document.getElementById('tlog-feedback');
   const dt       = document.getElementById('tlog-date').value.trim();
-  const newSecs  = parseHMM(document.getElementById('tlog-time').value);
+  const newSecs  = parseHMS(document.getElementById('tlog-time').value);
   const charsRaw = document.getElementById('tlog-chars').value.trim();
   const cphRaw   = document.getElementById('tlog-cph').value.trim();
   const title    = tlogMode === 'per_media' ? tlogKey() : (document.getElementById('tlog-media').value || '');
 
   if (newSecs === null) {
-    fb.className = 'feedback err'; fb.textContent = 'Enter a total time as H:MM (e.g. 52:30).'; return;
+    fb.className = 'feedback err'; fb.textContent = 'Enter a total time as H:MM:SS.'; return;
   }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) {
     fb.className = 'feedback err'; fb.textContent = 'Date must be YYYY-MM-DD.'; return;
@@ -805,6 +949,7 @@ async function doTotalLog() {
     document.getElementById('tlog-time').value  = '';
     document.getElementById('tlog-chars').value = '';
     document.getElementById('tlog-cph').value   = '';
+    document.getElementById('tlog-date')._flatpickr?.setDate(today(), false);
     await refreshTotalLogBaseline();
     await populateMediaTitles();
     statsCache = {};
@@ -3732,6 +3877,7 @@ function scheduleRolloverRefresh() {
   rolloverTimer = setTimeout(() => {
     rolloverTimer = null;
     document.getElementById('log-date')._flatpickr?.setDate(today(), false);
+    document.getElementById('tlog-date')._flatpickr?.setDate(today(), false);
     loadPage(currentPage);
     scheduleRolloverRefresh();
   }, ms);
@@ -3768,6 +3914,11 @@ async function init() {
     disableMobile: true,
   });
   flatpickr('#tlog-date', {
+    dateFormat:    'Y-m-d',
+    defaultDate:   today(),
+    disableMobile: true,
+  });
+  flatpickr('#edit-log-date', {
     dateFormat:    'Y-m-d',
     defaultDate:   today(),
     disableMobile: true,

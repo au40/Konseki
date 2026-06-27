@@ -620,6 +620,21 @@ def insert_manual_session(atype, minutes, title, session_date, chars=0):
     con.commit()
     con.close()
 
+def update_manual_session(session_id, atype, minutes, title, session_date, chars=0):
+    """Edit an existing manual log row in place. Guarded to source='manual' so GSM/
+    ttsu/anki rows (which are re-ingested, not hand-edited) can't be clobbered.
+    Returns the number of rows changed (0 = id missing or not a manual entry)."""
+    con = sqlite3.connect(DB_PATH)
+    cur = con.execute("""
+        UPDATE sessions
+        SET activity_type=?, title=?, session_date=?, chars_read=?, time_seconds=?
+        WHERE id=? AND source='manual'
+    """, (atype, title or "", session_date, int(chars or 0), float(minutes) * 60, int(session_id)))
+    con.commit()
+    changed = cur.rowcount
+    con.close()
+    return changed
+
 def import_csv_file(fp):
     imported = skipped = 0
     try:
