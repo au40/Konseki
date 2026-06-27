@@ -183,6 +183,10 @@ select:focus { border-color: var(--accent); }
 .feedback { font-size: 12px; min-height: 18px; margin-top: 8px; }
 .feedback.ok  { color: var(--success); }
 .feedback.err { color: #FF6B6B; }
+/* While empty, the log-page feedback lines reserve no space, so the submit
+   buttons sit tight under the form and don't shift between page visits (the
+   reserved height only appears when a message is actually shown). */
+#log-feedback:empty, #tlog-feedback:empty { min-height: 0; margin-top: 0; }
 
 
 /* ── Session rows ────────────────────────────────────────────────────────── */
@@ -434,7 +438,9 @@ select:focus { border-color: var(--accent); }
 .media-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-  gap: 12px;
+  /* gap must clear the series-stack back-layer peek (translate 20px, see
+     .series-layer-back) or stacked covers overlap the neighbouring card. */
+  gap: 22px;
   margin-top: 4px;
   align-items: start;
 }

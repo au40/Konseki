@@ -45,6 +45,7 @@ from db import (
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     _get_aliases, _q, _q1,
     insert_manual_session, import_csv_file,
+    get_total_log_baseline, set_total_log_baseline,
 )
 from imports import (pull_gsm_now, import_ttsu_zip_data,
                      list_gsm_db_games, import_gsm_history_preview,
@@ -405,6 +406,71 @@ class Api:
             datetime.strptime(session_date, "%Y-%m-%d")
             insert_manual_session(atype, float(minutes), title, session_date, chars)
             return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Total time log ──────────────────────────────────────────────────────────
+    # A logging aid: the user enters their reading app's running cumulative total
+    # and we log the *difference* since their last entry as a normal manual
+    # session. The cumulative totals themselves live in `total_log_baselines`
+    # (private; never counted as stats) so the next diff works. media_key='' is the
+    # global bucket; a non-empty key is a per-media baseline.
+    def get_total_log_state(self, media_key=""):
+        b = get_total_log_baseline(media_key or "")
+        return {
+            "mode":         get_setting("total_log_mode", "global"),
+            "has_baseline": b is not None,
+            "base_secs":    b["base_secs"]  if b else 0,
+            "base_chars":   b["base_chars"] if b else 0,
+        }
+
+    def set_total_log_mode(self, mode):
+        set_setting("total_log_mode", "per_media" if mode == "per_media" else "global")
+        return {"ok": True}
+
+    def save_total_log_baseline(self, media_key, secs, chars=0):
+        try:
+            set_total_log_baseline(media_key or "", float(secs), int(chars or 0))
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def submit_total_log(self, media_key, title, new_secs, new_chars, cph, session_date):
+        try:
+            datetime.strptime(session_date, "%Y-%m-%d")
+            base = get_total_log_baseline(media_key or "")
+            if base is None:
+                return {"ok": False, "error": "Set a baseline before logging a difference."}
+
+            new_secs   = float(new_secs)
+            base_secs  = float(base["base_secs"])
+            delta_secs = new_secs - base_secs
+            if delta_secs <= 0:
+                return {"ok": False, "error": "New total must be greater than the last recorded total."}
+            delta_hours = delta_secs / 3600.0
+
+            has_chars = new_chars not in (None, "", 0, "0")
+            base_chars = int(base["base_chars"])
+            if has_chars:
+                delta_chars = max(0, int(float(new_chars)) - base_chars)
+            elif cph not in (None, "", 0, "0"):
+                delta_chars = int(round(float(cph) * delta_hours))
+            else:
+                delta_chars = 0
+
+            insert_manual_session("Reading", delta_secs / 60.0, title or "", session_date, delta_chars)
+
+            # Advance the baseline: time always, chars only if a new total was given.
+            new_base_chars = int(float(new_chars)) if has_chars else base_chars
+            set_total_log_baseline(media_key or "", new_secs, new_base_chars)
+
+            return {
+                "ok": True,
+                "logged_secs":  delta_secs,
+                "logged_chars": delta_chars,
+                "base_secs":    new_secs,
+                "base_chars":   new_base_chars,
+            }
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

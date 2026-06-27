@@ -123,7 +123,49 @@
           <input type="text" id="log-date">
         </div>
         <div class="feedback" id="log-feedback"></div>
-        <button class="btn btn-primary" style="margin-top:12px" onclick="doLogSession()">Add entry</button>
+        <button class="btn btn-primary" style="margin-top:4px" onclick="doLogSession()">Add entry</button>
+      </div>
+
+      <h2 style="display:flex;align-items:center;gap:7px">Total time log<span
+        style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;border:1px solid var(--dim);color:var(--dim);font-size:10px;font-style:italic;font-weight:700;cursor:help"
+        title="Paste your reading app's running total — it logs the difference since your last entry. The totals are kept privately just to compute the next diff; only the difference is logged.">i</span></h2>
+      <div class="card" style="margin-bottom:16px">
+        <div class="form-group">
+          <label>Totals are tracked</label>
+          <div class="pill-group" id="tlog-mode-pills">
+            <button class="pill active" id="tlog-mode-global" onclick="toggleTotalLogMode('global')">Globally</button>
+            <button class="pill" id="tlog-mode-permedia" onclick="toggleTotalLogMode('per_media')">Per media</button>
+          </div>
+        </div>
+        <div class="muted" id="tlog-baseline" style="margin:-4px 0 14px;font-size:13px"></div>
+        <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+          <div class="form-group" style="width:140px;flex-shrink:0">
+            <label>New total time (H:MM)</label>
+            <input type="text" id="tlog-time" placeholder="52:30" oninput="updateTotalLogPreview()">
+          </div>
+          <div class="form-group" style="width:150px;flex-shrink:0">
+            <label>New total chars (optional)</label>
+            <input type="number" id="tlog-chars" min="0" oninput="updateTotalLogPreview()">
+          </div>
+          <div class="form-group" style="width:140px;flex-shrink:0">
+            <label>Chars / hour (optional)</label>
+            <input type="number" id="tlog-cph" min="0" oninput="updateTotalLogPreview()">
+          </div>
+          <div class="form-group" style="flex:1;min-width:200px">
+            <label>Media (optional)</label>
+            <select id="tlog-media" onchange="onTotalLogMediaChange()"></select>
+          </div>
+        </div>
+        <div class="form-group" style="max-width:180px">
+          <label>Date</label>
+          <input type="text" id="tlog-date">
+        </div>
+        <div id="tlog-preview" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
+        <div class="feedback" id="tlog-feedback"></div>
+        <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="tlog-submit" onclick="doTotalLog()">Log difference</button>
+          <button class="btn btn-outline" onclick="doSetTotalBaseline()">Set as baseline</button>
+        </div>
       </div>
 
       <h2>Custom Categories</h2>

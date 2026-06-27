@@ -11,6 +11,10 @@ let statsCache    = {};
 let charts        = {};
 let selectedAtype = 'Listening';
 let selectedCatColor = '#5B8CFF';
+let tlogMode      = 'global';   // 'global' | 'per_media' — Total time log baseline scope
+let tlogBaseSecs  = 0;          // currently-loaded baseline for the active key
+let tlogBaseChars = 0;
+let tlogHasBaseline = false;
 let mediaAllData  = [];
 let seriesData    = [];
 let mediaOrderMap = {}; // key -> position; key is "t:<title>" or "s:<id>"
@@ -98,8 +102,12 @@ function mediaIcon(source, atype) {
 // ── Navigation ─────────────────────────────────────────────────────────────
 function navigate(page) {
   if (currentPage === 'log' && page !== 'log') {
+    // Keep the base 'feedback' class (just clear the message); dropping the class
+    // used to collapse the reserved line and shift the Add-entry button on return.
     const fb = document.getElementById('log-feedback');
-    if (fb) { fb.className = ''; fb.textContent = ''; }
+    if (fb) { fb.className = 'feedback'; fb.textContent = ''; }
+    const tfb = document.getElementById('tlog-feedback');
+    if (tfb) { tfb.className = 'feedback'; tfb.textContent = ''; }
   }
   if (currentPage === 'settings' && page !== 'settings') {
     const setup = document.getElementById('settings-setup-view');
@@ -470,6 +478,7 @@ async function buildLogPage() {
 
   toggleReadingFields(selectedAtype === 'Reading');
   await populateMediaTitles();
+  await initTotalLog();
   renderCustomCatList(customCats);
   buildColorSwatches();
 }
@@ -616,6 +625,191 @@ async function doLogSession() {
     populateMediaTitles();
     statsCache = {};
     setStatus('Session logged');
+  } else {
+    fb.className = 'feedback err'; fb.textContent = r.error || 'Something went wrong.';
+  }
+}
+
+// ── Total time log ───────────────────────────────────────────────────────────
+// The user pastes their reading app's running cumulative total; we log the
+// *difference* since the last entry as a normal manual session. The totals
+// themselves persist in a private baseline (db: total_log_baselines) keyed by
+// '' (global) or the selected media title (per-media) — never counted as stats.
+
+// Parse "H:MM" (or a bare hours number) into seconds; null if unparseable.
+function parseHMM(str) {
+  const s = (str || '').trim();
+  if (!s) return null;
+  let m = s.match(/^(\d+):([0-5]?\d)$/);
+  if (m) return (Number(m[1]) * 60 + Number(m[2])) * 60;
+  m = s.match(/^\d+(\.\d+)?$/);          // bare hours, e.g. "52" or "52.5"
+  if (m) return Math.round(Number(s) * 3600);
+  return null;
+}
+function secsToHMM(secs) {
+  const t = Math.max(0, Math.round(secs / 60));
+  return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`;
+}
+
+// Active baseline key: '' for global, the selected media title for per-media.
+function tlogKey() {
+  return tlogMode === 'per_media' ? (document.getElementById('tlog-media').value || '') : '';
+}
+
+// Populate the media <select> from the same source as the manual-log dropdown.
+async function populateTotalLogMedia() {
+  const sel = document.getElementById('tlog-media');
+  if (!sel) return;
+  const prev = sel.value;
+  try {
+    const titles = await window.pywebview.api.get_media_titles();
+    sel.innerHTML = '<option value="">— none —</option>';
+    titles.forEach(m => {
+      if (!m.title) return;
+      const o = document.createElement('option');
+      o.value = m.title;
+      o.textContent = m.display_title || m.title;
+      sel.appendChild(o);
+    });
+    sel.value = prev;
+  } catch (e) { /* leave the "none" option only */ }
+}
+
+async function initTotalLog() {
+  const st = await window.pywebview.api.get_total_log_state('');
+  tlogMode = st.mode === 'per_media' ? 'per_media' : 'global';
+  document.getElementById('tlog-mode-global').classList.toggle('active', tlogMode === 'global');
+  document.getElementById('tlog-mode-permedia').classList.toggle('active', tlogMode === 'per_media');
+  await populateTotalLogMedia();
+  await refreshTotalLogBaseline();
+}
+
+async function toggleTotalLogMode(mode) {
+  if (mode !== 'per_media') mode = 'global';
+  tlogMode = mode;
+  document.getElementById('tlog-mode-global').classList.toggle('active', mode === 'global');
+  document.getElementById('tlog-mode-permedia').classList.toggle('active', mode === 'per_media');
+  await window.pywebview.api.set_total_log_mode(mode);
+  await refreshTotalLogBaseline();
+}
+
+async function onTotalLogMediaChange() {
+  // In per-media mode a different media has a different baseline; reload it.
+  if (tlogMode === 'per_media') await refreshTotalLogBaseline();
+  else updateTotalLogPreview();
+}
+
+// Load the baseline for the active key, paint the read-only line, and gate the
+// "Log difference" button (disabled until a baseline exists for this key).
+async function refreshTotalLogBaseline() {
+  const st = await window.pywebview.api.get_total_log_state(tlogKey());
+  tlogHasBaseline = !!st.has_baseline;
+  tlogBaseSecs    = st.base_secs  || 0;
+  tlogBaseChars   = st.base_chars || 0;
+
+  const line = document.getElementById('tlog-baseline');
+  const scope = tlogMode === 'per_media'
+    ? (tlogKey() ? `for “${tlogKey()}”` : '(pick a media)')
+    : '';
+  if (tlogHasBaseline) {
+    const charsPart = tlogBaseChars > 0 ? ` · ${fmtChars(tlogBaseChars)} chars` : '';
+    line.textContent = `Last recorded total ${scope}: ${secsToHMM(tlogBaseSecs)}${charsPart}`;
+  } else {
+    line.textContent = `No baseline set yet ${scope} — enter your current total and press “Set as baseline”.`;
+  }
+
+  const btn = document.getElementById('tlog-submit');
+  btn.disabled = !tlogHasBaseline;
+  btn.style.opacity = tlogHasBaseline ? '' : '0.5';
+  updateTotalLogPreview();
+}
+
+// Live preview of the difference that will be logged.
+function updateTotalLogPreview() {
+  const prev = document.getElementById('tlog-preview');
+  if (!prev) return;
+  const newSecs  = parseHMM(document.getElementById('tlog-time').value);
+  const charsRaw = document.getElementById('tlog-chars').value.trim();
+  const cphRaw   = document.getElementById('tlog-cph').value.trim();
+  if (newSecs === null) { prev.style.display = 'none'; return; }
+
+  if (!tlogHasBaseline) {
+    prev.style.display = '';
+    prev.textContent = 'No baseline yet — “Set as baseline” will store this as your starting total.';
+    return;
+  }
+  const deltaSecs = newSecs - tlogBaseSecs;
+  if (deltaSecs <= 0) {
+    prev.style.display = '';
+    prev.textContent = `New total must exceed the last recorded total (${secsToHMM(tlogBaseSecs)}).`;
+    return;
+  }
+  const deltaHours = deltaSecs / 3600;
+  let deltaChars = 0;
+  if (charsRaw)    deltaChars = Math.max(0, Number(charsRaw) - tlogBaseChars);
+  else if (cphRaw) deltaChars = Math.round(Number(cphRaw) * deltaHours);
+
+  const parts = [`Will log: ${fmtTime(deltaSecs)}`];
+  if (deltaChars > 0) {
+    parts.push(`${fmtChars(deltaChars)} chars`);
+    parts.push(`~${fmtChars(Math.round(deltaChars / deltaHours))}/hr`);
+  }
+  prev.style.display = '';
+  prev.textContent = parts.join(' · ');
+}
+
+// Seed/re-sync the baseline for the active key WITHOUT logging anything.
+async function doSetTotalBaseline() {
+  const fb       = document.getElementById('tlog-feedback');
+  const newSecs  = parseHMM(document.getElementById('tlog-time').value);
+  const charsRaw = document.getElementById('tlog-chars').value.trim();
+  if (newSecs === null) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a total time as H:MM (e.g. 52:30).'; return;
+  }
+  if (tlogMode === 'per_media' && !tlogKey()) {
+    fb.className = 'feedback err'; fb.textContent = 'Pick a media to set its baseline.'; return;
+  }
+  const r = await window.pywebview.api.save_total_log_baseline(tlogKey(), newSecs, charsRaw ? Number(charsRaw) : 0);
+  if (r.ok) {
+    fb.className = 'feedback ok'; fb.textContent = '✓ Baseline set. Your next entry will log the difference.';
+    await refreshTotalLogBaseline();
+  } else {
+    fb.className = 'feedback err'; fb.textContent = r.error || 'Something went wrong.';
+  }
+}
+
+// Log the difference since the last entry, then advance the baseline.
+async function doTotalLog() {
+  const fb       = document.getElementById('tlog-feedback');
+  const dt       = document.getElementById('tlog-date').value.trim();
+  const newSecs  = parseHMM(document.getElementById('tlog-time').value);
+  const charsRaw = document.getElementById('tlog-chars').value.trim();
+  const cphRaw   = document.getElementById('tlog-cph').value.trim();
+  const title    = tlogMode === 'per_media' ? tlogKey() : (document.getElementById('tlog-media').value || '');
+
+  if (newSecs === null) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a total time as H:MM (e.g. 52:30).'; return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) {
+    fb.className = 'feedback err'; fb.textContent = 'Date must be YYYY-MM-DD.'; return;
+  }
+  if (tlogMode === 'per_media' && !tlogKey()) {
+    fb.className = 'feedback err'; fb.textContent = 'Pick a media to log against.'; return;
+  }
+
+  const r = await window.pywebview.api.submit_total_log(
+    tlogKey(), title, newSecs, charsRaw ? Number(charsRaw) : null, cphRaw ? Number(cphRaw) : null, dt);
+  if (r.ok) {
+    const charsPart = r.logged_chars > 0 ? ` · ${fmtChars(r.logged_chars)} chars` : '';
+    fb.className = 'feedback ok'; fb.textContent = `✓ Logged ${fmtTime(r.logged_secs)}${charsPart}`;
+    document.getElementById('tlog-time').value  = '';
+    document.getElementById('tlog-chars').value = '';
+    document.getElementById('tlog-cph').value   = '';
+    await refreshTotalLogBaseline();
+    await populateMediaTitles();
+    statsCache = {};
+    setStatus('Session logged');
+    if (currentPage === 'dashboard') await loadDashboard();
   } else {
     fb.className = 'feedback err'; fb.textContent = r.error || 'Something went wrong.';
   }
@@ -3569,6 +3763,11 @@ async function init() {
   if (urlInput && appSettings.gsm_url) urlInput.value = appSettings.gsm_url;
 
   flatpickr('#log-date', {
+    dateFormat:    'Y-m-d',
+    defaultDate:   today(),
+    disableMobile: true,
+  });
+  flatpickr('#tlog-date', {
     dateFormat:    'Y-m-d',
     defaultDate:   today(),
     disableMobile: true,

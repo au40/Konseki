@@ -73,6 +73,20 @@ def init_db():
         )
     """)
 
+    # Private baselines for the "Total time log" box (Log entry page). These store
+    # the user's last-entered external cumulative total so the next entry can log
+    # the *difference*. They are NOT stats and no read path consults them — only
+    # the computed delta is inserted as a normal manual session. media_key='' is
+    # the global bucket; a non-empty key is a per-media baseline.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS total_log_baselines (
+            media_key  TEXT PRIMARY KEY,
+            base_secs  REAL    NOT NULL DEFAULT 0,
+            base_chars INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT
+        )
+    """)
+
     con.execute("""
         CREATE TABLE IF NOT EXISTS goals (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,6 +298,28 @@ def get_setting(key, default=""):
 def set_setting(key, value):
     con = sqlite3.connect(DB_PATH)
     con.execute("INSERT OR REPLACE INTO settings (key,value) VALUES (?,?)", (key, str(value)))
+    con.commit()
+    con.close()
+
+# ── Total-time-log baselines ──────────────────────────────────────────────────
+# Private logging aid for the "Total time log" box; see init_db. Never read by a
+# stats query — only used to diff the user's externally-entered cumulative total.
+def get_total_log_baseline(media_key=""):
+    r = _q1(
+        "SELECT base_secs, base_chars, updated_at FROM total_log_baselines WHERE media_key=?",
+        media_key or "",
+    ) if Path(DB_PATH).exists() else None
+    if not r:
+        return None
+    return {"base_secs": r[0], "base_chars": int(r[1] or 0), "updated_at": r[2]}
+
+def set_total_log_baseline(media_key, base_secs, base_chars):
+    con = sqlite3.connect(DB_PATH)
+    con.execute(
+        "INSERT OR REPLACE INTO total_log_baselines (media_key, base_secs, base_chars, updated_at) "
+        "VALUES (?,?,?,?)",
+        (media_key or "", float(base_secs or 0), int(base_chars or 0), datetime.now().isoformat()),
+    )
     con.commit()
     con.close()
 
