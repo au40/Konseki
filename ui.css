@@ -852,6 +852,13 @@ select:focus { border-color: var(--accent); }
 }
 #edit-log-dialog { width: 480px; max-width: 92vw; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
 
+#add-media-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+}
+#add-media-dialog { width: 520px; max-width: 92vw; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+
 /* ── First-run welcome dialog ────────────────────────────────────────────── */
 #firstrun-overlay {
   position: fixed; inset: 0; z-index: 1000;

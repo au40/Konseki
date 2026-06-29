@@ -73,7 +73,7 @@ function escHtml(s) {
   return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function srcLabel(s) {
-  return {gsm:'Game',anki:'Anki',ttu:'Book',ttsureader:'Book',manual:'Manual',csv:'Import'}[s?.toLowerCase()] || (s||'').toUpperCase();
+  return {gsm:'Game',anki:'Anki',ttu:'Book',ttsureader:'Book',manual:'Manual',manual_media:'Manual',csv:'Import'}[s?.toLowerCase()] || (s||'').toUpperCase();
 }
 function acolor(t) { return ACOLORS[t] || '#6B6B8A'; }
 function setStatus(msg) { document.getElementById('status').textContent = msg; }
@@ -227,12 +227,12 @@ function wireEditTimeBtn(el, s) {
 // id=null). Reuses the games' edit-pencil chip styling; a row is either GSM or
 // manual, never both, so the two pencils never collide.
 function editLogBtnHtml(s) {
-  return (s.source === 'manual' && s.id)
+  return ((s.source === 'manual' || s.source === 'manual_media') && s.id)
     ? `<button class="btn edit-time-btn edit-log-btn" title="Edit this log entry">✎</button>`
     : '';
 }
 function wireEditLogBtn(el, s) {
-  if (s.source === 'manual' && s.id) {
+  if ((s.source === 'manual' || s.source === 'manual_media') && s.id) {
     el.querySelector('.edit-log-btn').addEventListener('click', () => openLogEdit(s));
   }
 }
@@ -769,6 +769,121 @@ async function submitLogEdit() {
   } else {
     fb.className = 'feedback err'; fb.textContent = r.error || 'Something went wrong.';
   }
+}
+
+// ── Add media (modal) ────────────────────────────────────────────────────────
+// Manually create a media card for titles tracked by hand. Inserts one seed
+// session with source='manual_media' (which surfaces on the grid, unlike
+// quick-log source='manual'); subsequent time is logged from the Log page,
+// whose dropdown picks up the new title automatically.
+let selectedAddMediaAtype = 'Reading';
+let addMediaCoverFile     = null;
+
+function toggleAddMediaReadingFields(isReading) {
+  document.getElementById('add-media-chars-group').style.display = isReading ? '' : 'none';
+  document.getElementById('add-media-cph-group').style.display   = isReading ? '' : 'none';
+  updateAddMediaCharsHint();
+}
+
+function updateAddMediaCharsHint() {
+  const hint = document.getElementById('add-media-chars-hint');
+  if (selectedAddMediaAtype !== 'Reading') { hint.style.display = 'none'; return; }
+  const mins  = Number(document.getElementById('add-media-minutes').value);
+  const chars = Number(document.getElementById('add-media-chars').value);
+  const cph   = Number(document.getElementById('add-media-cph').value);
+  if (chars > 0) {
+    hint.style.display = '';
+    hint.textContent = mins > 0
+      ? `≈ ${fmtChars(Math.round(chars / (mins / 60)))}/hr at this pace`
+      : `${fmtChars(chars)} chars will be logged`;
+  } else if (cph > 0 && mins > 0) {
+    hint.style.display = '';
+    hint.textContent = `≈ ${fmtChars(Math.round(cph * mins / 60))} chars will be logged`;
+  } else {
+    hint.style.display = 'none';
+  }
+}
+
+function pickAddMediaCover() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = () => {
+    addMediaCoverFile = input.files[0] || null;
+    document.getElementById('add-media-cover-name').textContent = addMediaCoverFile ? addMediaCoverFile.name : '';
+  };
+  input.click();
+}
+
+async function openAddMediaModal() {
+  selectedAddMediaAtype = 'Reading';
+  addMediaCoverFile     = null;
+  const customCats = await window.pywebview.api.get_categories();
+  const allTypes   = [...BUILTIN_TYPES, ...customCats.map(c => c.name)];
+  const allColors  = Object.fromEntries([
+    ...BUILTIN_TYPES.map(t => [t, ACOLORS[t]]),
+    ...customCats.map(c => [c.name, c.color])
+  ]);
+  renderAtypePills(
+    document.getElementById('add-media-atype-pills'), allTypes, allColors,
+    () => selectedAddMediaAtype,
+    t => { selectedAddMediaAtype = t; toggleAddMediaReadingFields(t === 'Reading'); });
+
+  document.getElementById('add-media-title').value   = '';
+  document.getElementById('add-media-minutes').value = '';
+  document.getElementById('add-media-chars').value   = '';
+  document.getElementById('add-media-cph').value     = '';
+  document.getElementById('add-media-cover-name').textContent = '';
+  document.getElementById('add-media-feedback').textContent   = '';
+  document.getElementById('add-media-feedback').className      = 'feedback';
+  toggleAddMediaReadingFields(true);
+
+  const dp = document.getElementById('add-media-date')._flatpickr;
+  if (dp) dp.setDate(today(), false);
+  else    document.getElementById('add-media-date').value = today();
+
+  document.getElementById('add-media-overlay').style.display = 'flex';
+}
+
+function closeAddMediaModal() {
+  document.getElementById('add-media-overlay').style.display = 'none';
+}
+
+async function submitAddMedia() {
+  const fb       = document.getElementById('add-media-feedback');
+  const title    = document.getElementById('add-media-title').value.trim();
+  const minutes  = document.getElementById('add-media-minutes').value.trim();
+  const dt       = document.getElementById('add-media-date').value.trim();
+  const charsRaw = document.getElementById('add-media-chars').value.trim();
+  const cphRaw   = document.getElementById('add-media-cph').value.trim();
+
+  if (!title) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a title.'; return;
+  }
+  if (!minutes || isNaN(minutes) || Number(minutes) <= 0) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a positive number of minutes.'; return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) {
+    fb.className = 'feedback err'; fb.textContent = 'Date must be YYYY-MM-DD.'; return;
+  }
+  // Same chars resolution as the manual-log form: explicit count wins, else extrapolate.
+  let chars = 0;
+  if (selectedAddMediaAtype === 'Reading') {
+    if (charsRaw)    chars = Number(charsRaw);
+    else if (cphRaw) chars = Math.round(Number(cphRaw) * Number(minutes) / 60);
+  }
+
+  const r = await window.pywebview.api.add_media(title, selectedAddMediaAtype, Number(minutes), dt, chars);
+  if (!r.ok) {
+    fb.className = 'feedback err'; fb.textContent = r.error || 'Something went wrong.'; return;
+  }
+  // Title row now exists, so the cover (keyed by title) can attach.
+  if (addMediaCoverFile) await uploadCoverFile(addMediaCoverFile, title);
+
+  closeAddMediaModal();
+  statsCache = {};
+  setStatus('Media added');
+  loadMedia();
 }
 
 // ── Total time log ───────────────────────────────────────────────────────────
@@ -3919,6 +4034,11 @@ async function init() {
     disableMobile: true,
   });
   flatpickr('#edit-log-date', {
+    dateFormat:    'Y-m-d',
+    defaultDate:   today(),
+    disableMobile: true,
+  });
+  flatpickr('#add-media-date', {
     dateFormat:    'Y-m-d',
     defaultDate:   today(),
     disableMobile: true,

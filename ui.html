@@ -397,8 +397,11 @@
       <!-- Grid view -->
       <div id="media-grid-view">
         <div class="page-header">
-          <h1>Media</h1>
-          <span class="muted" id="media-count"></span>
+          <div style="display:flex;align-items:center;gap:12px">
+            <h1>Media</h1>
+            <span class="muted" id="media-count"></span>
+          </div>
+          <button class="btn btn-outline btn-sm" onclick="openAddMediaModal()">+ Add media</button>
         </div>
         <p class="muted" style="margin:6px 0 14px">All tracked titles — click any card to see details.</p>
         <div class="media-grid" id="media-grid">
@@ -867,6 +870,51 @@
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
       <button class="btn btn-outline btn-sm" onclick="closeLogEdit()">Cancel</button>
       <button class="btn btn-primary btn-sm" onclick="submitLogEdit()">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Add media modal ─────────────────────────────────────────────────── -->
+<div id="add-media-overlay" style="display:none">
+  <div id="add-media-dialog" class="card">
+    <h2 style="margin:0 0 4px">Add media</h2>
+    <p class="muted" style="margin:0 0 16px;font-size:12px">Manually add a title you track by hand, with an initial logged session.</p>
+    <div class="form-group">
+      <label>Title / media</label>
+      <input type="text" id="add-media-title" placeholder="e.g. ある小説のタイトル">
+    </div>
+    <div class="form-group">
+      <label>Activity type</label>
+      <div class="pill-group" id="add-media-atype-pills"></div>
+    </div>
+    <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+      <div class="form-group" style="width:120px;flex-shrink:0">
+        <label>Time (minutes)</label>
+        <input type="number" id="add-media-minutes" min="0" step="any" oninput="updateAddMediaCharsHint()">
+      </div>
+      <div class="form-group" id="add-media-chars-group" style="display:none;width:130px;flex-shrink:0">
+        <label>Characters (optional)</label>
+        <input type="number" id="add-media-chars" min="0" oninput="updateAddMediaCharsHint()">
+      </div>
+      <div class="form-group" id="add-media-cph-group" style="display:none;width:120px;flex-shrink:0">
+        <label>Chars / hour (optional)</label>
+        <input type="number" id="add-media-cph" min="0" oninput="updateAddMediaCharsHint()">
+      </div>
+      <div class="form-group" style="max-width:180px">
+        <label>Date</label>
+        <input type="text" id="add-media-date">
+      </div>
+    </div>
+    <div id="add-media-chars-hint" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
+    <div class="form-group">
+      <label>Cover image (optional)</label>
+      <button class="btn btn-outline btn-sm" type="button" onclick="pickAddMediaCover()">Choose image…</button>
+      <span class="muted" id="add-media-cover-name" style="font-size:12px;margin-left:8px"></span>
+    </div>
+    <div class="feedback" id="add-media-feedback"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="closeAddMediaModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitAddMedia()">Add media</button>
     </div>
   </div>
 </div>

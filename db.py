@@ -620,15 +620,31 @@ def insert_manual_session(atype, minutes, title, session_date, chars=0):
     con.commit()
     con.close()
 
+def create_manual_media(title, atype, minutes, session_date, chars=0):
+    """Create a hand-added media entry. Same shape as insert_manual_session but with
+    source='manual_media' so the title surfaces on the media grid — quick-log
+    source='manual' rows are deliberately hidden there (see get_media_stats and the
+    grid filter in ui.js). A title is required (an untitled media card is meaningless)."""
+    con = sqlite3.connect(DB_PATH)
+    con.execute("""
+        INSERT INTO sessions
+          (source,title,activity_type,session_date,chars_read,lines_read,time_seconds,ingested_at)
+        VALUES (?,?,?,?,?,?,?,?)
+    """, ("manual_media", title, atype, session_date, int(chars or 0), 0,
+          minutes * 60, datetime.now().isoformat()))
+    con.commit()
+    con.close()
+
 def update_manual_session(session_id, atype, minutes, title, session_date, chars=0):
-    """Edit an existing manual log row in place. Guarded to source='manual' so GSM/
-    ttsu/anki rows (which are re-ingested, not hand-edited) can't be clobbered.
+    """Edit an existing hand-entered row in place. Guarded to the manual sources so
+    GSM/ttsu/anki rows (which are re-ingested, not hand-edited) can't be clobbered.
+    'manual_media' is included so an Add Media seed row stays editable via the pencil.
     Returns the number of rows changed (0 = id missing or not a manual entry)."""
     con = sqlite3.connect(DB_PATH)
     cur = con.execute("""
         UPDATE sessions
         SET activity_type=?, title=?, session_date=?, chars_read=?, time_seconds=?
-        WHERE id=? AND source='manual'
+        WHERE id=? AND source IN ('manual','manual_media')
     """, (atype, title or "", session_date, int(chars or 0), float(minutes) * 60, int(session_id)))
     con.commit()
     changed = cur.rowcount

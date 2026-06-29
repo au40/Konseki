@@ -44,7 +44,7 @@ from db import (
     db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     _get_aliases, _q, _q1,
-    insert_manual_session, import_csv_file,
+    insert_manual_session, create_manual_media, import_csv_file,
     get_total_log_baseline, set_total_log_baseline,
 )
 from imports import (pull_gsm_now, import_ttsu_zip_data,
@@ -407,6 +407,19 @@ class Api:
         try:
             datetime.strptime(session_date, "%Y-%m-%d")
             insert_manual_session(atype, float(minutes), title, session_date, chars)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def add_media(self, title, atype, minutes, session_date, chars=0):
+        try:
+            title = (title or "").strip()
+            if not title:
+                return {"ok": False, "error": "Enter a title."}
+            if float(minutes) <= 0:
+                return {"ok": False, "error": "Enter a positive number of minutes."}
+            datetime.strptime(session_date, "%Y-%m-%d")
+            create_manual_media(title, atype, float(minutes), session_date, chars)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
