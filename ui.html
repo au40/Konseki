@@ -874,6 +874,45 @@
   </div>
 </div>
 
+<!-- ── GSM entry adjust modal (subtract dead time / rollover) ──────────── -->
+<div id="gsm-edit-overlay" style="display:none">
+  <div id="gsm-edit-dialog" class="card">
+    <h2 style="margin:0 0 14px" id="gsm-edit-title">Adjust entry</h2>
+    <div class="seg" id="gsm-edit-seg" style="margin-bottom:16px">
+      <button class="seg-btn active" data-tab="subtract" onclick="switchGsmEditTab('subtract')">Subtract minutes</button>
+      <button class="seg-btn" data-tab="rollover" id="gsm-edit-rollover-tab" onclick="switchGsmEditTab('rollover')">Rollover</button>
+    </div>
+
+    <div class="gsm-edit-pane" id="gsm-edit-pane-subtract">
+      <div class="form-group" style="max-width:160px">
+        <label>Minutes</label>
+        <input type="number" id="gsm-edit-sub-minutes" min="0" step="any">
+      </div>
+      <div class="muted" style="font-size:12px;margin:-4px 0 4px" id="gsm-edit-sub-hint"></div>
+    </div>
+
+    <div class="gsm-edit-pane" id="gsm-edit-pane-rollover" style="display:none">
+      <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+        <div class="form-group" style="width:150px;flex-shrink:0">
+          <label>Characters</label>
+          <input type="number" id="gsm-edit-roll-chars" min="0" step="1">
+        </div>
+        <div class="form-group" style="width:150px;flex-shrink:0">
+          <label>Minutes</label>
+          <input type="number" id="gsm-edit-roll-minutes" min="0" step="any">
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px;margin:-4px 0 4px" id="gsm-edit-roll-hint"></div>
+    </div>
+
+    <div class="feedback" id="gsm-edit-feedback"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="closeGsmEdit()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitGsmEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Add media modal ─────────────────────────────────────────────────── -->
 <div id="add-media-overlay" style="display:none">
   <div id="add-media-dialog" class="card">

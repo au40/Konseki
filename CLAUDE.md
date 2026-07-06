@@ -22,20 +22,44 @@ The attribution table reconciles the two:
 gsm_rollover_attributions (
     rollover_date TEXT,   -- where chars should DISPLAY
     source_date   TEXT,   -- where the session row actually LIVES
+    game_id       TEXT,   -- which GSM game this displacement belongs to
     chars         INTEGER,
     time_seconds  REAL,
     cards         INTEGER,
     updated_at    TEXT,
-    PRIMARY KEY (rollover_date, source_date)
+    PRIMARY KEY (rollover_date, source_date, game_id)
 )
 ```
 
 Only rows with `rollover_date <> source_date` represent an actual displacement.
 Rows where they match are no-ops (they exist as snapshots for tail-settle).
 
+**`game_id` is in the PK** because two *different* games can be read on the same
+real `source_date` — one pre-rollover (displaced to the prior logical day) and one
+after. Without per-game keying, the second game's row inherited the first's
+displacement: the deduction zeroed the post-rollover game and the pre-rollover
+game's row (deleted by the old date-only live pull) was stranded on the wrong
+title. The live pull now keeps one file + one session row **per (real_date,
+game_id)** (matching the `sessions(game_id, session_date)` unique index), and every
+per-row/per-title consumer keys the deduction and phantom-title lookup on
+`(source_date, game_id)`. The **net-per-day** helpers (`get_gsm_day_adjustment(s)`)
+stay game-agnostic — they sum across games per date, so the extra column doesn't
+change their math. `init_db` migrates the pre-`game_id` shape by backfilling each
+old row's `game_id` from the sole GSM session that lived on its `source_date`.
+
 Attribution rows are written by `upsert_gsm_attribution` and
 `refresh_gsm_attribution_tail` in [db.py](db.py), called from the GSM import
-path in [imports.py](imports.py). When the history import (`import_gsm_history_apply`)
+path in [imports.py](imports.py) — and, manually, by `set_rollover_attribution`
+(also [db.py](db.py)), the **Rollover tab** of the per-row GSM adjust modal
+(`openGsmEdit()`/`submitGsmEdit()` in [ui.js](ui.js), Api `set_rollover_attribution`
+in [tracker.py](tracker.py), shown on real GSM rows in the dashboard and History).
+That control is the user's escape hatch
+for displacements the live pull missed — app closed at the rollover hour, or data
+corrected after the fact: it sets how many chars/minutes of a game's `source_date`
+reading belong to `source_date - 1`, clamped to the row's own totals (never exceeds
+what was read), and `0/0` deletes the row. It writes the *same* `(rollover_date,
+source_date, game_id)` shape every read path already understands, so no consumer
+needs special-casing. When the history import (`import_gsm_history_apply`)
 updates a session row's totals, `_sync_rollover_attribution_to` in
 [imports.py](imports.py) **clamps** that date's attributions so a displacement
 never exceeds the new total (preventing ghost rows in per-title charts). It must
@@ -52,13 +76,15 @@ There are two canonical patterns. Pick whichever fits the query shape:
 in [db.py](db.py) and `get_recent_sessions` (History page). The shape is:
 
 - Fetch raw session rows for the dates you care about.
-- For each date, **deduct** the sum of outgoing attributions
-  (`source_date=d AND rollover_date<>d`) from the first GSM row on that date.
+- For each `(date, game_id)`, **deduct** the sum of outgoing attributions
+  (`source_date=d AND game_id=g AND rollover_date<>d`) from *that game's* GSM row
+  on that date — not "the first GSM row on the date", or a second game read that
+  day eats the shave.
 - **Drop** any row whose chars/secs/lines are all zero after the deduction.
 - For each date, **synthesize phantom rows** for incoming attributions
-  (`rollover_date=d AND source_date<>d`), grouped by `source_date` so each
-  phantom row can borrow its title from a real session on that source date.
-  Phantom rows have `id=None`; the UI's `makeSessionRow` already handles this.
+  (`rollover_date=d AND source_date<>d`), grouped by `(source_date, game_id)` so
+  each phantom row borrows its title from that game's real session on the source
+  date. Phantom rows have `id=None`; the UI's `makeSessionRow` already handles this.
 
 **2. Net adjustment per day (single-number-per-day queries).** Used by
 `get_daily_time_series`, `get_weekly_summary`, and `get_heatmap` in
@@ -163,8 +189,10 @@ adjusted. Helpers in [db.py](db.py): `set_manual_time_adjust(date, game_id, …)
 `get_manual_time_adjusts_all` ((date,game_id)→secs, for per-row), and
 `get_manual_time_adjusts_for_date` (game_id→secs, for the dashboard indicator). A
 zero delta deletes the row. Written from `set_game_time_adjust` in
-[tracker.py](tracker.py); the per-row pencil control is `adjustGameTime()` in
-[ui.js](ui.js) (shown on GSM rows in both the dashboard and History).
+[tracker.py](tracker.py); the per-row control is the **Subtract minutes tab** of the
+GSM adjust modal (`openGsmEdit()`/`submitGsmEdit()` in [ui.js](ui.js), the ✎ chip
+shown on GSM rows in both the dashboard and History — the same modal also hosts the
+Rollover tab above).
 
 **An earlier cut was day-level** (PRIMARY KEY `(date)`, no `game_id`, drained the
 day's GSM rows in `ingested_at` order). `init_db` drops that obsolete shape on

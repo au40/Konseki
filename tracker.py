@@ -207,7 +207,8 @@ class Api:
                 {"id": r[0], "source": r[1], "title": aliases.get(r[2], r[2]),
                  "raw_title": r[2],
                  "activity_type": r[3], "chars": r[4], "lines": r[5], "seconds": r[6],
-                 "game_id": r[7], "date": today_date, "adjust_secs": adj.get(r[7], 0)}
+                 "game_id": r[7], "date": today_date, "session_date": r[8],
+                 "adjust_secs": adj.get(r[7], 0)}
                 for r in today
             ],
             "weekly": [
@@ -231,7 +232,7 @@ class Api:
             {"id": r[0], "date": r[1], "source": r[2], "title": aliases.get(r[3], r[3]),
              "raw_title": r[3],
              "activity_type": r[4], "chars": r[5], "lines": r[6], "seconds": r[7],
-             "game_id": r[8],
+             "game_id": r[8], "session_date": r[1],
              "adjust_secs": (manual.get((r[1], r[8]), 0) if r[0] is not None else 0)}
             for r in get_recent_sessions(30)
         ]
@@ -518,6 +519,25 @@ class Api:
             mins = max(0.0, float(subtract_minutes))
             set_manual_time_adjust(d, game_id, -mins * 60 if mins else 0)
             return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Manual rollover displacement ────────────────────────────────────────────
+    def get_rollover_attribution(self, game_id, source_date):
+        """Chars/minutes of this GSM game's source_date reading currently assigned to
+        the previous logical day. Backs the per-row rollover-edit prompt."""
+        return {"ok": True, **db.get_rollover_attribution(game_id, source_date)}
+
+    def set_rollover_attribution(self, game_id, source_date, chars, minutes):
+        """Assign `chars`/`minutes` of a GSM game's source_date reading to the previous
+        logical day (rollover displacement). Clamped to the row's totals; 0/0 clears."""
+        try:
+            if not game_id:
+                return {"ok": False, "error": "no game_id (only GSM rows can be rolled over)"}
+            datetime.strptime(source_date, "%Y-%m-%d")
+            res = db.set_rollover_attribution(game_id, source_date, chars, minutes)
+            self._notify()
+            return {"ok": True, **res}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

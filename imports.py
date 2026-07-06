@@ -4,6 +4,7 @@ Handles GSM (GameSentenceMiner) pulls and ッツ Reader zip imports.
 """
 
 import os
+import re
 import sqlite3
 import json
 import zipfile
@@ -289,10 +290,13 @@ def _sync_rollover_attribution_to(con, game_id, session_date, chars, time_second
     new_c = int(chars or 0)
     new_t = float(time_seconds or 0)
     new_cards = int(cards or 0)
+    # Clamp only THIS game's attributions on this source_date — the history import
+    # updates one game's row, so it must not touch another game's displacement that
+    # happens to share the date.
     rows = con.execute(
         "SELECT rollover_date, chars, time_seconds, cards "
-        "FROM gsm_rollover_attributions WHERE source_date=?",
-        (session_date,)
+        "FROM gsm_rollover_attributions WHERE source_date=? AND game_id=?",
+        (session_date, game_id or '')
     ).fetchall()
     for rollover_date, ac, at, acards in rows:
         ac = int(ac or 0); at = float(at or 0); acards = int(acards or 0)
@@ -302,8 +306,8 @@ def _sync_rollover_attribution_to(con, game_id, session_date, chars, time_second
         con.execute(
             "UPDATE gsm_rollover_attributions "
             "SET chars=?, time_seconds=?, cards=?, updated_at=? "
-            "WHERE rollover_date=? AND source_date=?",
-            (cc, ct, ccards, datetime.now().isoformat(), rollover_date, session_date)
+            "WHERE rollover_date=? AND source_date=? AND game_id=?",
+            (cc, ct, ccards, datetime.now().isoformat(), rollover_date, session_date, game_id or '')
         )
 
 
@@ -655,16 +659,30 @@ def pull_gsm_api_only(url=None):
             "cards_mined":   0,
         }
 
-        out = SESSIONS_DIR / f"gsm_{real_date}.json"
+        # One file + one session row PER GAME per real date (matching the
+        # sessions(game_id, session_date) unique index). Scoping by game_id is what
+        # lets two different games read on the same real date coexist — the old
+        # date-only file/DELETE kept only the last game pulled, which erased an
+        # earlier game's session (badly so across the rollover boundary; see CLAUDE.md).
+        safe_gid = re.sub(r'[^A-Za-z0-9_.-]', '_', game_id) if game_id else ''
+        out = SESSIONS_DIR / (f"gsm_{real_date}_{safe_gid}.json" if safe_gid
+                              else f"gsm_{real_date}.json")
         json.dump(s, open(out, "w", encoding="utf-8"), indent=2)
 
         # Clear old entry so re-pulls always refresh with latest data
         con = sqlite3.connect(DB_PATH)
         con.execute("DELETE FROM ingested_files WHERE filepath=?", (str(out),))
-        con.execute(
-            "DELETE FROM sessions WHERE source='gsm' AND session_date=?",
-            (real_date,)
-        )
+        if game_id:
+            con.execute(
+                "DELETE FROM sessions WHERE source='gsm' AND session_date=? AND game_id=?",
+                (real_date, game_id)
+            )
+        else:
+            con.execute(
+                "DELETE FROM sessions WHERE source='gsm' AND session_date=? "
+                "AND (game_id IS NULL OR game_id='')",
+                (real_date,)
+            )
         con.commit()
         con.close()
 
@@ -679,6 +697,7 @@ def pull_gsm_api_only(url=None):
             upsert_gsm_attribution(
                 rollover_date=get_today(),
                 source_date=real_date,
+                game_id=game_id,
                 chars=int(today_chars),
                 time_seconds=float(time_seconds),
                 cards=int(today_cards),
@@ -687,6 +706,7 @@ def pull_gsm_api_only(url=None):
             refresh_gsm_attribution_tail(
                 rollover_date=(get_today_date() - timedelta(days=1)).isoformat(),
                 source_date=real_date,
+                game_id=game_id,
                 chars=int(today_chars),
                 time_seconds=float(time_seconds),
                 cards=int(today_cards),

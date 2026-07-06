@@ -143,18 +143,60 @@ def init_db():
 
     # GSM rollover attributions: when a pull happens during the rollover window,
     # we capture (chars, time, cards) for that GSM real_date so they display under
-    # the rollover_date instead of source_date. PK ensures one row per (rollover, source) pair.
+    # the rollover_date instead of source_date. Keyed PER GAME (game_id in the PK):
+    # a displacement belongs to the specific game that was being read at pull time,
+    # so a *different* game read later on the same real date can't inherit or clobber
+    # it. Without game_id, reading game A pre-rollover then game B post-rollover
+    # deducted A's displacement off B's row (zeroing B) and stranded A — see the
+    # multi-game section of CLAUDE.md.
     con.execute("""
         CREATE TABLE IF NOT EXISTS gsm_rollover_attributions (
             rollover_date TEXT NOT NULL,
             source_date   TEXT NOT NULL,
+            game_id       TEXT NOT NULL DEFAULT '',
             chars         INTEGER NOT NULL DEFAULT 0,
             time_seconds  REAL    NOT NULL DEFAULT 0,
             cards         INTEGER NOT NULL DEFAULT 0,
             updated_at    TEXT    NOT NULL,
-            PRIMARY KEY (rollover_date, source_date)
+            PRIMARY KEY (rollover_date, source_date, game_id)
         )
     """)
+
+    # Migrate the pre-game_id shape (PK was (rollover_date, source_date)). Rebuild
+    # with game_id in the PK, backfilling each old row's game_id from the GSM
+    # session row that lived on its source_date. Under the old model there was one
+    # GSM row per real date (the pull path delete-then-inserted by date alone), so
+    # that lookup is unambiguous for historical data; rows with no surviving source
+    # row backfill to '' and behave exactly as before (game-agnostic net-per-day
+    # math is unchanged by the added column).
+    attr_cols = [r[1] for r in con.execute("PRAGMA table_info(gsm_rollover_attributions)").fetchall()]
+    if "game_id" not in attr_cols:
+        con.execute("""
+            CREATE TABLE gsm_rollover_attributions_new (
+                rollover_date TEXT NOT NULL,
+                source_date   TEXT NOT NULL,
+                game_id       TEXT NOT NULL DEFAULT '',
+                chars         INTEGER NOT NULL DEFAULT 0,
+                time_seconds  REAL    NOT NULL DEFAULT 0,
+                cards         INTEGER NOT NULL DEFAULT 0,
+                updated_at    TEXT    NOT NULL,
+                PRIMARY KEY (rollover_date, source_date, game_id)
+            )
+        """)
+        con.execute("""
+            INSERT INTO gsm_rollover_attributions_new
+              (rollover_date, source_date, game_id, chars, time_seconds, cards, updated_at)
+            SELECT a.rollover_date, a.source_date,
+                   COALESCE((SELECT s.game_id FROM sessions s
+                             WHERE s.source='gsm' AND s.session_date=a.source_date
+                               AND s.game_id IS NOT NULL AND s.game_id<>''
+                             ORDER BY s.ingested_at DESC LIMIT 1), ''),
+                   a.chars, a.time_seconds, a.cards, a.updated_at
+            FROM gsm_rollover_attributions a
+        """)
+        con.execute("DROP TABLE gsm_rollover_attributions")
+        con.execute("ALTER TABLE gsm_rollover_attributions_new "
+                    "RENAME TO gsm_rollover_attributions")
 
     # Manual time correction overlay, keyed by (DISPLAY date, game_id). secs_delta
     # is signed; negative shaves dead/AFK time GSM stranded on a specific game that
@@ -352,28 +394,33 @@ def window_bounds(n=None):
     return since, today
 
 
-def upsert_gsm_attribution(rollover_date, source_date, chars, time_seconds, cards):
+def upsert_gsm_attribution(rollover_date, source_date, game_id, chars, time_seconds, cards):
     """Record (or refresh) chars/time/cards from GSM source_date that should display under rollover_date.
-    Called only when pulling during the rollover window."""
+    Keyed per game so a later pull of a *different* game on the same source_date can't
+    overwrite this displacement. Called only when pulling during the rollover window."""
     con = sqlite3.connect(DB_PATH)
     con.execute("""
         INSERT INTO gsm_rollover_attributions
-          (rollover_date, source_date, chars, time_seconds, cards, updated_at)
-        VALUES (?,?,?,?,?,?)
-        ON CONFLICT(rollover_date, source_date) DO UPDATE SET
+          (rollover_date, source_date, game_id, chars, time_seconds, cards, updated_at)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(rollover_date, source_date, game_id) DO UPDATE SET
           chars=excluded.chars,
           time_seconds=excluded.time_seconds,
           cards=excluded.cards,
           updated_at=excluded.updated_at
-    """, (rollover_date, source_date, int(chars), float(time_seconds),
+    """, (rollover_date, source_date, game_id or '', int(chars), float(time_seconds),
           int(cards), datetime.now().isoformat()))
     con.commit()
     con.close()
 
 
-def refresh_gsm_attribution_tail(rollover_date, source_date, chars, time_seconds, cards):
+def refresh_gsm_attribution_tail(rollover_date, source_date, game_id, chars, time_seconds, cards):
     """Tail-settle refresh of an EXISTING attribution row, used when a post-rollover
     settle pull finds GSM has flushed additional tail time for pre-rollover reading.
+
+    Matched per game: only the row for THIS game_id is refreshed. A post-rollover
+    pull of a different game finds no matching row and no-ops (its reading correctly
+    stays on today), so it can't graft the prior game's displacement onto itself.
 
     Guard: chars must not exceed what's already stored. If they grew, real new
     reading has happened post-rollover and the snapshot must not absorb it.
@@ -381,8 +428,8 @@ def refresh_gsm_attribution_tail(rollover_date, source_date, chars, time_seconds
     con = sqlite3.connect(DB_PATH)
     row = con.execute(
         "SELECT chars, time_seconds, cards FROM gsm_rollover_attributions "
-        "WHERE rollover_date=? AND source_date=?",
-        (rollover_date, source_date),
+        "WHERE rollover_date=? AND source_date=? AND game_id=?",
+        (rollover_date, source_date, game_id or ''),
     ).fetchone()
     if row is None:
         con.close()
@@ -392,13 +439,67 @@ def refresh_gsm_attribution_tail(rollover_date, source_date, chars, time_seconds
         return False
     con.execute(
         "UPDATE gsm_rollover_attributions SET time_seconds=?, cards=?, updated_at=? "
-        "WHERE rollover_date=? AND source_date=?",
+        "WHERE rollover_date=? AND source_date=? AND game_id=?",
         (float(time_seconds), int(cards), datetime.now().isoformat(),
-         rollover_date, source_date),
+         rollover_date, source_date, game_id or ''),
     )
     con.commit()
     con.close()
     return True
+
+
+def get_rollover_attribution(game_id, source_date):
+    """Current rollover displacement moving this GSM game's reading from source_date
+    to the previous logical day (source_date - 1). Returns {chars, minutes} — the
+    amount currently shown on the previous day (0/0 if none). Backs the per-row
+    rollover-edit control."""
+    roll = (date.fromisoformat(source_date) - timedelta(days=1)).isoformat()
+    r = _q1("SELECT chars, time_seconds FROM gsm_rollover_attributions "
+            "WHERE rollover_date=? AND source_date=? AND game_id=?",
+            roll, source_date, game_id or '')
+    if not r:
+        return {"chars": 0, "minutes": 0}
+    return {"chars": int(r[0] or 0), "minutes": round(float(r[1] or 0) / 60.0, 2)}
+
+
+def set_rollover_attribution(game_id, source_date, chars, minutes):
+    """Manually set how much of a GSM game's reading on source_date belongs to the
+    previous logical day (source_date - 1) — the rollover displacement. This is the
+    same row the live pull captures automatically during the rollover window; the
+    control exists for cases it missed (app closed at the rollover hour, or data
+    corrected after the fact).
+
+    Clamped to the row's own raw totals so a displacement never exceeds what was
+    read (mirrors the _sync_rollover_attribution_to invariant). Setting both to 0
+    clears the displacement (deletes the row). Returns the applied {chars, minutes}."""
+    gid   = game_id or ''
+    roll  = (date.fromisoformat(source_date) - timedelta(days=1)).isoformat()
+    chars = max(0, int(chars or 0))
+    secs  = max(0.0, float(minutes or 0) * 60.0)
+    # Clamp to the raw session totals when the source row exists (the attribution is
+    # an overlay and never mutates sessions, so chars_read is the true ceiling).
+    row = _q1("SELECT chars_read, time_seconds FROM sessions "
+              "WHERE source='gsm' AND game_id=? AND session_date=?", gid, source_date)
+    if row:
+        chars = min(chars, int(row[0] or 0))
+        secs  = min(secs, float(row[1] or 0))
+    con = sqlite3.connect(DB_PATH)
+    if chars <= 0 and secs <= 0:
+        con.execute("DELETE FROM gsm_rollover_attributions "
+                    "WHERE rollover_date=? AND source_date=? AND game_id=?",
+                    (roll, source_date, gid))
+    else:
+        con.execute("""
+            INSERT INTO gsm_rollover_attributions
+              (rollover_date, source_date, game_id, chars, time_seconds, cards, updated_at)
+            VALUES (?,?,?,?,?,0,?)
+            ON CONFLICT(rollover_date, source_date, game_id) DO UPDATE SET
+              chars=excluded.chars, time_seconds=excluded.time_seconds,
+              cards=excluded.cards, updated_at=excluded.updated_at
+        """, (roll, source_date, gid, chars, secs, datetime.now().isoformat()))
+    con.commit()
+    con.close()
+    return {"chars": chars, "minutes": round(secs / 60.0, 2)}
 
 
 def get_gsm_day_adjustment(d):
@@ -726,51 +827,53 @@ def get_today_stats():
         ORDER BY session_date DESC, ingested_at DESC
     """, *bucket)
 
-    # Outgoing attributions per source_date: chars leaving a bucket date toward a date outside.
-    # Aggregate per source_date (not in total) so each is deducted from the first GSM row
-    # on its OWN date — otherwise an empty GSM row on one bucket date can eat the deduction
-    # via max(0, …) and the real row on the other date keeps its full unadjusted time.
+    # Outgoing attributions per (source_date, game_id): chars leaving a bucket date
+    # toward a date outside. Keyed per game so each displacement is deducted from
+    # the SAME game's row on its OWN source_date — a different game read on that
+    # date (e.g. post-rollover) keeps its full total instead of eating this shave.
     out_rows = _q(
-        f"SELECT source_date, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
+        f"SELECT source_date, game_id, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
         f"FROM gsm_rollover_attributions WHERE source_date IN ({placeholders}) "
-        f"AND rollover_date NOT IN ({placeholders}) GROUP BY source_date",
+        f"AND rollover_date NOT IN ({placeholders}) GROUP BY source_date, game_id",
         *bucket, *bucket
     )
-    out_by_date = {r[0]: (r[1], r[2]) for r in out_rows}
-    deducted_for = set()
+    out_by = {(sd, gid): (c, s) for sd, gid, c, s in out_rows}
+    deducted_for = set()   # (source_date, game_id) already deducted
 
     result = []
     for r in rows:
         rid, src, title, atype, chars, lines, secs, sd, gid = r
-        if src == 'gsm' and sd not in deducted_for and sd in out_by_date:
-            oc, os_ = out_by_date[sd]
+        key = (sd, gid)
+        if src == 'gsm' and key not in deducted_for and key in out_by:
+            oc, os_ = out_by[key]
             if oc or os_:
                 chars = max(0, chars - int(oc))
                 secs  = max(0, secs - float(os_))
-                deducted_for.add(sd)
+                deducted_for.add(key)
         # Drop sessions whose displayed values are all zero (e.g. fully attributed-away GSM rows)
         if chars == 0 and secs == 0 and (lines or 0) == 0:
             continue
         result.append((rid, src, title, atype, chars, lines, secs, gid, sd))
 
-    # Incoming attributions: chars coming from outside the bucket → add phantom rows
+    # Incoming attributions: chars coming from outside the bucket → add phantom rows,
+    # per (source_date, game_id) so each phantom borrows the title of the SPECIFIC
+    # game it displaced (not whichever game happens to sort first on that date).
     in_rows = _q(
-        f"SELECT source_date, SUM(chars), SUM(time_seconds) "
+        f"SELECT source_date, game_id, SUM(chars), SUM(time_seconds) "
         f"FROM gsm_rollover_attributions WHERE rollover_date IN ({placeholders}) "
-        f"AND source_date NOT IN ({placeholders}) GROUP BY source_date",
+        f"AND source_date NOT IN ({placeholders}) GROUP BY source_date, game_id",
         *bucket, *bucket
     )
-    for sd, ch, sec in in_rows:
+    for sd, gid, ch, sec in in_rows:
         if (ch or 0) > 0 or (sec or 0) > 0:
             game_row = _q1(
-                "SELECT title, game_id FROM sessions WHERE source='gsm' AND session_date=? "
-                "ORDER BY ingested_at DESC LIMIT 1", sd
+                "SELECT title FROM sessions WHERE source='gsm' AND session_date=? AND game_id=? "
+                "ORDER BY ingested_at DESC LIMIT 1", sd, gid
             )
             game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
-            game_id   = (game_row[1] if game_row else None)
             # sd=None: phantom rows aren't a logical-day-native row, so they're
             # lowest priority for the manual shave below.
-            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), game_id, None))
+            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), gid, None))
 
     # Manual overlay: shave secs off the SPECIFIC game's row(s) for this display
     # date, so the right game absorbs the dead time (the user picks which). Tracked
@@ -792,8 +895,10 @@ def get_today_stats():
                 rem_by_game[gid] = rem - take
                 result[i] = (rid, src, title, atype, chars, lines, secs, gid, sd)
 
-    # Strip the internal session_date element and drop rows zeroed by the shave.
-    return [(rid, src, title, atype, chars, lines, secs, gid)
+    # Keep session_date as the trailing element: the dashboard needs each real
+    # row's true source_date to target the rollover-edit control (phantom rows carry
+    # sd=None and get no control). Drop rows zeroed by the shave.
+    return [(rid, src, title, atype, chars, lines, secs, gid, sd)
             for (rid, src, title, atype, chars, lines, secs, gid, sd) in result
             if not (chars == 0 and secs == 0 and (lines or 0) == 0)]
 
@@ -857,54 +962,56 @@ def get_recent_sessions(limit=30):
     placeholders = ",".join("?" * len(dates))
 
     out_rows = _q(
-        f"SELECT source_date, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
+        f"SELECT source_date, game_id, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
         f"FROM gsm_rollover_attributions WHERE source_date IN ({placeholders}) "
-        f"AND rollover_date <> source_date GROUP BY source_date",
+        f"AND rollover_date <> source_date GROUP BY source_date, game_id",
         *dates
     )
-    out_by_date = {r[0]: (r[1], r[2]) for r in out_rows}
+    out_by = {(sd, gid): (c, s) for sd, gid, c, s in out_rows}
 
     # Pull incoming attributions that touch our window from either side, so phantom-only
     # rollover dates (where the source row was fully attributed away) still appear.
+    # Keyed per (source_date, game_id) so each phantom carries its own game's title.
     in_rows = _q(
-        f"SELECT rollover_date, source_date, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
+        f"SELECT rollover_date, source_date, game_id, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0) "
         f"FROM gsm_rollover_attributions WHERE rollover_date <> source_date "
         f"AND (source_date IN ({placeholders}) OR rollover_date IN ({placeholders})) "
-        f"GROUP BY rollover_date, source_date",
+        f"GROUP BY rollover_date, source_date, game_id",
         *dates, *dates
     )
     in_by_date = {}
-    for rd, sd, ch, sec in in_rows:
-        in_by_date.setdefault(rd, []).append((sd, ch, sec))
+    for rd, sd, gid, ch, sec in in_rows:
+        in_by_date.setdefault(rd, []).append((sd, gid, ch, sec))
 
     all_dates = sorted(set(by_date.keys()) | set(in_by_date.keys()), reverse=True)
     manual = get_manual_time_adjusts_all()   # {(date, game_id): secs_delta}
 
     result = []
     for d in all_dates:
-        out_chars, out_secs = out_by_date.get(d, (0, 0))
-        deducted = False
+        deducted = set()   # game_ids already deducted on this date
         day_rows = []
         for r in by_date.get(d, []):
             rid, sd, src, title, atype, chars, lines, secs, gid = r
-            if src == 'gsm' and not deducted and (out_chars or out_secs):
-                chars = max(0, chars - int(out_chars))
-                secs  = max(0, secs  - float(out_secs))
-                deducted = True
+            key = (sd, gid)
+            if src == 'gsm' and gid not in deducted and key in out_by:
+                oc, os_ = out_by[key]
+                if oc or os_:
+                    chars = max(0, chars - int(oc))
+                    secs  = max(0, secs  - float(os_))
+                    deducted.add(gid)
             if chars == 0 and secs == 0 and (lines or 0) == 0:
                 continue
             day_rows.append((rid, sd, src, title, atype, chars, lines, secs, gid))
 
-        for sd2, ch, sec in in_by_date.get(d, []):
+        for sd2, gid, ch, sec in in_by_date.get(d, []):
             if (ch or 0) <= 0 and (sec or 0) <= 0:
                 continue
             game_row = _q1(
-                "SELECT title, game_id FROM sessions WHERE source='gsm' AND session_date=? "
-                "ORDER BY ingested_at DESC LIMIT 1", sd2
+                "SELECT title FROM sessions WHERE source='gsm' AND session_date=? AND game_id=? "
+                "ORDER BY ingested_at DESC LIMIT 1", sd2, gid
             )
             game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
-            game_id   = (game_row[1] if game_row else None)
-            day_rows.append((None, d, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), game_id))
+            day_rows.append((None, d, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), gid))
 
         # Manual overlay for display date d — shave secs off the SPECIFIC game's
         # row(s), keeping History consistent with the per-game dashboard edit.
@@ -1667,21 +1774,29 @@ def _compute_title_core(title):
         else:
             game_meta = {"game_id": None, "desc": "", "image": book_cover[0], "genres": [], "first_date": "", "char_count": 0}
 
-    out_by_sd = {}
+    # Attribution deduction is keyed per (source_date, game_id): only THIS title's
+    # own games can displace its rows, and only onto/off the matching game's row.
+    # (A different game read on the same real date carries its own attribution row,
+    # which must not be deducted from this title.)
+    title_games = {s[10] for s in sessions if s[2] == 'gsm' and s[10]}
+    out_by = {}   # (source_date, game_id) -> [chars, secs, cards]
     in_by_rd  = {}
     gsm_sds = [s[1] for s in sessions if s[2] == 'gsm']
-    if gsm_sds:
-        ph = ",".join("?" * len(gsm_sds))
+    if gsm_sds and title_games:
+        ph  = ",".join("?" * len(gsm_sds))
+        gph = ",".join("?" * len(title_games))
         attr_rows = _q(
-            f"SELECT rollover_date, source_date, chars, time_seconds, cards "
+            f"SELECT rollover_date, source_date, game_id, chars, time_seconds, cards "
             f"FROM gsm_rollover_attributions "
-            f"WHERE source_date IN ({ph}) AND rollover_date <> source_date",
-            *gsm_sds
+            f"WHERE source_date IN ({ph}) AND game_id IN ({gph}) "
+            f"AND rollover_date <> source_date",
+            *gsm_sds, *title_games
         )
-        for rd, sd, c, t, cards in attr_rows:
-            out_by_sd.setdefault(sd, [0, 0, 0])
-            out_by_sd[sd][0] += c; out_by_sd[sd][1] += t; out_by_sd[sd][2] += cards
-            in_by_rd.setdefault(rd, []).append((sd, c, t, cards))
+        for rd, sd, gid, c, t, cards in attr_rows:
+            k = (sd, gid)
+            out_by.setdefault(k, [0, 0, 0])
+            out_by[k][0] += c; out_by[k][1] += t; out_by[k][2] += cards
+            in_by_rd.setdefault(rd, []).append((sd, gid, c, t, cards))
 
     daily_map = {}
     def _bump(d, chars, secs, cards, sentences):
@@ -1696,8 +1811,9 @@ def _compute_title_core(title):
         chars, secs = s[4], s[6]
         cards = s[8] or 0
         sentences = s[9] or 0
-        if s[2] == 'gsm' and sd in out_by_sd:
-            oc, ot, ocards = out_by_sd[sd]
+        k = (sd, s[10])
+        if s[2] == 'gsm' and k in out_by:
+            oc, ot, ocards = out_by[k]
             chars = max(0, chars - oc)
             secs  = max(0.0, secs - ot)
             cards = max(0, cards - ocards)
@@ -1705,7 +1821,7 @@ def _compute_title_core(title):
             _bump(sd, chars, secs, cards, sentences)
 
     for rd, attrs in in_by_rd.items():
-        for sd, c, t, cards in attrs:
+        for sd, gid, c, t, cards in attrs:
             if c <= 0 and t <= 0 and cards <= 0:
                 continue
             _bump(rd, int(c), float(t), int(cards), 0)
@@ -1715,7 +1831,7 @@ def _compute_title_core(title):
     # graph (and avg) recompute correctly. Keyed by (display date, game_id); deduct
     # secs only — chars stay, so speed rises. Rides the same rails as the attribution
     # deduction above (daily_map is keyed by display date, matching the manual key).
-    title_games = {s[10] for s in sessions if s[2] == 'gsm' and s[10]}
+    # title_games computed above (shared with the attribution filter).
     if title_games:
         for (d, g), delta in get_manual_time_adjusts_all().items():
             if g in title_games and delta < 0 and d in daily_map:

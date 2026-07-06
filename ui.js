@@ -208,18 +208,20 @@ async function changeDashHeatmapYear(delta) {
   await refreshDashHeatmap();
 }
 
-// Edit button shown only on GSM rows (those carrying a game_id) — lets the user
-// shave dead/AFK time off that specific game. Wired via a closure so titles with
-// quotes can't break an inline onclick.
+// Edit chip on GSM rows → opens the combined adjust modal: subtract dead/AFK time
+// (per display date) and/or roll part of the entry to the previous logical day
+// (per real source date). Wired via a closure so titles with quotes can't break an
+// inline onclick. allowRollover is false for grouped rows, whose merged sessions
+// have no single source date for a rollover.
 function editTimeBtnHtml(s) {
   return (s.source === 'gsm' && s.game_id)
-    ? `<button class="btn edit-time-btn" title="Subtract dead/AFK time from this game">✎</button>`
+    ? `<button class="btn edit-time-btn" title="Adjust this entry (subtract time / rollover)">✎</button>`
     : '';
 }
-function wireEditTimeBtn(el, s) {
+function wireEditTimeBtn(el, s, allowRollover = true) {
   if (s.source === 'gsm' && s.game_id) {
     el.querySelector('.edit-time-btn').addEventListener('click', () =>
-      adjustGameTime(s.game_id, s.date || today(), s.title));
+      openGsmEdit(s, allowRollover));
   }
 }
 
@@ -291,30 +293,96 @@ function makeGroupedSessionRow(sessions) {
       <button class="btn btn-xs btn-danger" onclick="doDeleteSessionGroup([${ids.join(',')}], this)">✕</button>
       ${editTimeBtnHtml(s)}
     </div>`;
-  wireEditTimeBtn(el, s);
+  wireEditTimeBtn(el, s, false);   // grouped: no single source date → subtract-only
   return el;
 }
 
-// ── Manual time adjustment ───────────────────────────────────────────────────
-// Subtract dead/AFK time GSM stranded on a specific game for a given display
-// date. Stored per (date, game_id) in a separate overlay table so GSM re-ingests
-// can't clobber it (see CLAUDE.md).
-async function adjustGameTime(gameId, dateStr, title) {
-  const cur   = await window.pywebview.api.get_game_time_adjust(gameId, dateStr);
-  const input = prompt(`Subtract dead/AFK time from "${title}" on ${dateStr} (minutes). Enter 0 to clear.`,
-                       cur.subtract_minutes || 0);
-  if (input === null) return;
-  const mins = parseFloat(input);
-  if (isNaN(mins) || mins < 0) { setStatus('Enter a non-negative number of minutes'); return; }
-  const r = await window.pywebview.api.set_game_time_adjust(gameId, mins, dateStr);
-  if (r.ok) {
-    statsCache = {};
-    setStatus(mins ? `Subtracting ${mins}m of dead time from ${title}` : 'Cleared time adjustment');
-    if (currentPage === 'dashboard') loadDashboard();
-    else if (currentPage === 'history') loadHistory();
+function isoPrevDay(dateStr) {
+  const dt = new Date(dateStr + 'T00:00:00');
+  dt.setDate(dt.getDate() - 1);
+  return isoDateFromObj(dt);
+}
+
+// ── GSM entry adjust modal (subtract time + rollover) ─────────────────────────
+// One modal, two tabs. "Subtract minutes" shaves dead/AFK time off this game for
+// its DISPLAY date (manual_time_adjust, keyed by display date + game_id). "Rollover"
+// moves part of the entry to the previous logical day for its real SOURCE date
+// (gsm_rollover_attributions). Both overlays survive GSM re-ingests (see CLAUDE.md).
+// Save applies both panes; each is an idempotent set pre-filled from current state,
+// so an untouched pane just re-commits its own value. Rollover is hidden when there
+// is no single source date (grouped rows, or phantom rollover rows with id=null).
+let gsmEditCtx = null;
+
+async function openGsmEdit(s, allowRollover = true) {
+  const gameId      = s.game_id;
+  const displayDate = s.date || today();
+  const sourceDate  = s.session_date;
+  const showRollover = allowRollover && s.id != null && !!sourceDate;
+  gsmEditCtx = { gameId, displayDate, sourceDate, title: s.title, showRollover,
+                 prevDay: sourceDate ? isoPrevDay(sourceDate) : null };
+
+  document.getElementById('gsm-edit-title').textContent = `Adjust “${s.title || 'entry'}”`;
+
+  const sub = await window.pywebview.api.get_game_time_adjust(gameId, displayDate);
+  document.getElementById('gsm-edit-sub-minutes').value = sub.subtract_minutes || 0;
+  document.getElementById('gsm-edit-sub-hint').textContent =
+    `Remove dead/AFK time from this game on ${displayDate}. 0 clears.`;
+
+  const rollTab = document.getElementById('gsm-edit-rollover-tab');
+  if (showRollover) {
+    const roll = await window.pywebview.api.get_rollover_attribution(gameId, sourceDate);
+    document.getElementById('gsm-edit-roll-chars').value   = roll.chars   || 0;
+    document.getElementById('gsm-edit-roll-minutes').value = roll.minutes || 0;
+    document.getElementById('gsm-edit-roll-hint').textContent =
+      `How much of ${sourceDate} belongs to ${gsmEditCtx.prevDay}. 0/0 clears; capped to the entry's totals.`;
+    rollTab.style.display = '';
   } else {
-    setStatus('Adjustment failed: ' + (r.error || 'unknown'));
+    rollTab.style.display = 'none';
   }
+
+  document.getElementById('gsm-edit-feedback').textContent = '';
+  switchGsmEditTab('subtract');
+  document.getElementById('gsm-edit-overlay').style.display = 'flex';
+}
+
+function switchGsmEditTab(name) {
+  document.querySelectorAll('#gsm-edit-seg .seg-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === name));
+  document.getElementById('gsm-edit-pane-subtract').style.display = name === 'subtract' ? '' : 'none';
+  document.getElementById('gsm-edit-pane-rollover').style.display = name === 'rollover' ? '' : 'none';
+}
+
+function closeGsmEdit() {
+  document.getElementById('gsm-edit-overlay').style.display = 'none';
+  gsmEditCtx = null;
+}
+
+async function submitGsmEdit() {
+  if (!gsmEditCtx) { closeGsmEdit(); return; }
+  const fb  = document.getElementById('gsm-edit-feedback');
+  const num = v => (v.trim() === '' ? 0 : Number(v.trim()));
+
+  const subMins = num(document.getElementById('gsm-edit-sub-minutes').value);
+  const chars   = num(document.getElementById('gsm-edit-roll-chars').value);
+  const rollMin = num(document.getElementById('gsm-edit-roll-minutes').value);
+  if (isNaN(subMins) || subMins < 0 ||
+      isNaN(chars) || chars < 0 || isNaN(rollMin) || rollMin < 0) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter non-negative numbers.'; return;
+  }
+
+  const { gameId, displayDate, sourceDate, showRollover } = gsmEditCtx;
+  const r1 = await window.pywebview.api.set_game_time_adjust(gameId, subMins, displayDate);
+  if (!r1.ok) { fb.className = 'feedback err'; fb.textContent = r1.error || 'Failed to save.'; return; }
+  if (showRollover) {
+    const r2 = await window.pywebview.api.set_rollover_attribution(gameId, sourceDate, chars, rollMin);
+    if (!r2.ok) { fb.className = 'feedback err'; fb.textContent = r2.error || 'Failed to save.'; return; }
+  }
+
+  closeGsmEdit();
+  statsCache = {};
+  setStatus('Adjustments saved');
+  if (currentPage === 'dashboard') loadDashboard();
+  else if (currentPage === 'history') loadHistory();
 }
 
 // ── Delete session ─────────────────────────────────────────────────────────
