@@ -401,7 +401,10 @@
             <h1>Media</h1>
             <span class="muted" id="media-count"></span>
           </div>
-          <button class="btn btn-outline btn-sm" onclick="openAddMediaModal()">+ Add media</button>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-outline btn-sm" onclick="openStatPortal()">📊 Stat portal</button>
+            <button class="btn btn-outline btn-sm" onclick="openAddMediaModal()">+ Add media</button>
+          </div>
         </div>
         <p class="muted" style="margin:6px 0 14px">All tracked titles — click any card to see details.</p>
         <div class="media-grid" id="media-grid">
@@ -485,6 +488,9 @@
           <div class="progress-track" id="detail-progress-track">
             <div id="detail-progress-fill" class="progress-fill"></div>
           </div>
+          <div class="detail-progress-foot">
+            <span id="detail-progress-eta" class="detail-progress-eta"></span>
+          </div>
         </div>
 
         <!-- Daily activity chart -->
@@ -549,6 +555,75 @@
         <h2 style="margin-top:20px">Sessions <span id="milestone-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
         <div class="detail-sessions" id="milestone-session-list"></div>
         <div style="height:24px"></div>
+      </div>
+
+      <!-- Stat portal view (compare titles side by side) -->
+      <div id="media-portal-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeStatPortal()">← Back</button>
+          <span class="muted" style="font-size:12px">Media  ›  Stat portal</span>
+        </div>
+
+        <div class="page-header">
+          <div style="display:flex;align-items:center;gap:12px">
+            <h1>Stat portal</h1>
+            <span class="muted" id="portal-sel-count"></span>
+          </div>
+        </div>
+        <p class="muted" style="margin:6px 0 10px">Compare titles side by side. Pick up to 8.</p>
+        <div class="portal-picker-wrap">
+          <div id="portal-picker" class="portal-picker"></div>
+          <div id="portal-add-panel" class="portal-add-panel" style="display:none">
+            <input id="portal-search" class="portal-search" type="text" placeholder="Search titles…" oninput="renderPortalAddList()">
+            <div id="portal-add-list" class="portal-add-list"></div>
+          </div>
+        </div>
+        <div class="portal-controls">
+          <label class="portal-toggle"><input type="checkbox" id="portal-align-toggle" onchange="onPortalAlign()"> Align to a common start (day 0)</label>
+          <label class="portal-toggle"><input type="checkbox" id="portal-split-toggle" onchange="onPortalSplit()"> Split series into entries</label>
+          <button class="btn btn-outline btn-sm" onclick="portalResetZoom()">Reset zoom</button>
+          <span class="muted" style="font-size:11px">Drag across a chart to zoom · double-click it to reset</span>
+        </div>
+
+        <p class="empty-msg" id="portal-empty" style="display:none">Select at least one title.</p>
+        <div id="portal-content">
+          <h2 style="margin-top:16px">Head to head</h2>
+          <div id="portal-table-wrap"></div>
+
+          <div id="portal-speed-section">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:22px">
+              <h2 style="margin:0">Read speed (chars/h)</h2>
+              <label class="portal-toggle"><input type="checkbox" id="portal-rolling-toggle" checked onchange="onPortalSpeedMode()"> 7d rolling</label>
+            </div>
+            <div class="chart-wrap portal-chart"><canvas id="chart-portal-speed" height="200"></canvas></div>
+          </div>
+
+          <div id="portal-norm-section">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:22px">
+              <h2 style="margin:0">Improvement curves (normalized)</h2>
+              <label class="portal-toggle"><input type="checkbox" id="portal-norm-toggle" onchange="onPortalNormMode()"> by reading day</label>
+            </div>
+            <div class="chart-wrap portal-chart"><canvas id="chart-portal-norm" height="200"></canvas></div>
+          </div>
+
+          <h2 style="margin-top:22px">Cumulative characters</h2>
+          <div class="chart-wrap portal-chart"><canvas id="chart-portal-cum-chars" height="200"></canvas></div>
+
+          <h2 style="margin-top:22px">Cumulative time</h2>
+          <div class="chart-wrap portal-chart"><canvas id="chart-portal-cum-time" height="200"></canvas></div>
+
+          <div id="portal-gain-section">
+            <h2 style="margin-top:22px">Speed gain — first 20% vs last 20% of chars</h2>
+            <div class="chart-wrap"><canvas id="chart-portal-gain" height="180"></canvas></div>
+            <p class="muted" id="portal-gain-note" style="margin:4px 0 0"></p>
+          </div>
+
+          <div id="portal-scatter-section">
+            <h2 style="margin-top:22px">Speed vs volume</h2>
+            <div class="chart-wrap"><canvas id="chart-portal-scatter" height="220"></canvas></div>
+          </div>
+        </div>
+        <div style="height:32px"></div>
       </div>
 
     </div>

@@ -31,6 +31,12 @@ let splitByMilestone    = false;       // stack media-detail bars by milestone c
 let _milestoneEditingId = null;        // null = adding, number = editing
 let _milestoneDragId    = null;        // dragged milestone id for reorder
 
+// ── Media stat portal state ────────────────────────────────────────────────
+let portalSelected  = new Set();       // raw title strings currently selected
+let portalDataCache = {};              // title -> compare payload entry
+let portalColorMap  = {};              // title -> hex, stable while the app is open
+const PORTAL_MAX = 8;
+
 const BUILTIN_TYPES = ['Listening','Reading','Speaking','Vocabulary','Other'];
 const ACOLORS = {
   Reading:'#5B8CFF', Listening:'#4ECBA0',
@@ -41,6 +47,7 @@ const CAT_PALETTE = [
   '#5BE8C4','#FFD15B','#FF6B6B','#6B6B8A','#38BDF8'
 ];
 const PALETTE = ['#5B8CFF','#4ECBA0','#FF9F5B','#C78BFF','#FF7BAC','#5BE8C4','#FFD15B','#6B6B8A'];
+const PORTAL_PALETTE = CAT_PALETTE;    // stat-portal per-title colors; 8-cap keeps them distinct
 let HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
 
 Chart.defaults.color       = '#9090A8';
@@ -67,6 +74,16 @@ function twRolling(charArr, secsArr, window) {
     for (let j = start; j <= i; j++) { c += charArr[j]; s += secsArr[j]; }
     return s > 0 && c > 0 ? c / (s / 3600) : null;
   });
+}
+
+// Trailing chars/hour over the last `days` entries of a title's daily series.
+// `daily` holds only days actually read, so this is the last N *reading* days —
+// the same window the detail page's 7d-rolling speed chart plots. Summed
+// chars ÷ summed time, never the stored reading_speed column.
+function recentSpeed(daily, days) {
+  let c = 0, s = 0;
+  (daily || []).slice(-days).forEach(d => { c += d.chars; s += d.seconds; });
+  return (s > 0 && c > 0) ? c / (s / 3600) : 0;
 }
 
 function escHtml(s) {
@@ -2607,6 +2624,7 @@ function showMediaView(name) {
     detail:    'media-detail-view',
     series:    'media-series-view',
     milestone: 'media-milestone-view',
+    portal:    'media-portal-view',
   };
   for (const [key, id] of Object.entries(views)) {
     document.getElementById(id).style.display = key === name ? 'block' : 'none';
@@ -2616,6 +2634,7 @@ function showMediaView(name) {
 async function loadMedia() {
   destroyChart('detail');
   destroyChart('detail-time');
+  destroyPortalCharts();
   currentDetailTitle = null;
   currentSeriesId    = null;
   showMediaView('grid');
@@ -3257,6 +3276,22 @@ function renderMediaDetail(d) {
     const fill = document.getElementById('detail-progress-fill');
     fill.style.width = `${pct}%`;
     fill.style.background = color;
+
+    // Est. hours to finish, projected from the trailing 7-reading-day speed.
+    // Blank when that window has no reading to project from.
+    const etaEl     = document.getElementById('detail-progress-eta');
+    const remaining = gcc - d.total_chars;
+    const spd       = recentSpeed(d.daily, 7);
+    if (remaining <= 0) {
+      etaEl.textContent = 'Complete';
+      etaEl.title = '';
+    } else if (spd > 0) {
+      etaEl.textContent = `Est. hours to complete: ${(remaining / spd).toFixed(1)}h`;
+      etaEl.title = `${fmtChars(remaining)} chars left at ${fmtChars(Math.round(spd))} chars/h (7-day avg)`;
+    } else {
+      etaEl.textContent = '';
+      etaEl.title = '';
+    }
 
     // Milestone section tints + boundary ticks. Positions are media-cumulative
     // char bounds (start_chars/end_chars) over the full game length, so they
@@ -4589,6 +4624,693 @@ async function deleteCurrentMilestone() {
     closeMilestoneDetail();
     await refreshCurrentMediaDetail();
   }
+}
+
+// ── Media stat portal ───────────────────────────────────────────────────────
+// Compares selected titles side by side. All derived series (rolling speed,
+// cumulative totals, normalized curves, speed-gain) are computed here from each
+// title's raw daily chars/seconds — the payload deliberately omits per-day speed
+// so every chars/hour value is chars/(secs/3600), never sessions.reading_speed.
+// Charts only ever render while #media-portal-view is visible (hidden-canvas
+// gotcha), and are destroyed on the way out via destroyPortalCharts().
+const PORTAL_CHART_IDS = ['portal-speed','portal-norm','portal-cum-chars','portal-cum-time','portal-gain','portal-scatter'];
+function destroyPortalCharts() { PORTAL_CHART_IDS.forEach(destroyChart); }
+
+// ── Drag-to-zoom ────────────────────────────────────────────────────────────
+// Drag across a chart to restrict its x-domain; double-click to reset. Works on
+// both axis kinds the portal uses: a category scale yields an index from
+// getValueForPixel (snapped to whole buckets), a linear scale yields the value.
+// Zoom lives on the chart instance, so re-rendering (any toggle) clears it.
+const PORTAL_ZOOMABLE = ['portal-speed','portal-norm','portal-cum-chars','portal-cum-time'];
+
+function portalResetZoom() {
+  PORTAL_ZOOMABLE.forEach(key => {
+    const c = charts[key];
+    if (!c) return;
+    delete c.options.scales.x.min;
+    delete c.options.scales.x.max;
+    c.update();
+  });
+}
+
+function portalAttachZoom(chartKey, canvasId) {
+  const canvas = document.getElementById(canvasId);
+  const chart  = charts[chartKey];
+  if (!canvas || !chart) return;
+  const wrap = canvas.parentElement;
+  let sel = wrap.querySelector('.portal-zoom-sel');
+  if (!sel) { sel = document.createElement('div'); sel.className = 'portal-zoom-sel'; wrap.appendChild(sel); }
+
+  let startX = null;
+  const clamp = px => Math.max(chart.chartArea.left, Math.min(px, chart.chartArea.right));
+  const posX  = e => clamp(e.clientX - canvas.getBoundingClientRect().left);
+
+  canvas.onpointerdown = e => {
+    if (!chart.chartArea) return;
+    startX = posX(e);
+    Object.assign(sel.style, {
+      display: 'block',
+      left:   (canvas.offsetLeft + startX) + 'px',
+      width:  '0px',
+      top:    (canvas.offsetTop + chart.chartArea.top) + 'px',
+      height: (chart.chartArea.bottom - chart.chartArea.top) + 'px',
+    });
+    canvas.setPointerCapture(e.pointerId);
+  };
+  canvas.onpointermove = e => {
+    if (startX == null) return;
+    const x = posX(e);
+    sel.style.left  = (canvas.offsetLeft + Math.min(startX, x)) + 'px';
+    sel.style.width = Math.abs(x - startX) + 'px';
+  };
+  canvas.onpointerup = e => {
+    if (startX == null) return;
+    const a = Math.min(startX, posX(e)), b = Math.max(startX, posX(e));
+    sel.style.display = 'none';
+    startX = null;
+    if (b - a < 8) return;                       // a click, not a drag
+    const scale = chart.scales.x;
+    let v1 = scale.getValueForPixel(a), v2 = scale.getValueForPixel(b);
+    if (v1 == null || v2 == null || !isFinite(v1) || !isFinite(v2)) return;
+    if (scale.type === 'category') {             // snap to whole buckets
+      v1 = Math.floor(v1); v2 = Math.ceil(v2);
+      if (v2 - v1 < 1) return;
+    }
+    chart.options.scales.x.min = v1;
+    chart.options.scales.x.max = v2;
+    chart.update();
+  };
+  canvas.ondblclick = () => {
+    delete chart.options.scales.x.min;
+    delete chart.options.scales.x.max;
+    chart.update();
+  };
+}
+
+async function openStatPortal() {
+  showMediaView('portal');                        // visibility FIRST
+  if (!mediaAllData.length) {
+    [mediaAllData, seriesData] = await Promise.all([
+      window.pywebview.api.get_media(), window.pywebview.api.get_series(),
+    ]);
+  }
+  seriesData = seriesData || [];
+  const entries = portalEntries();
+  if (!portalSelected.size) {                      // first open: preselect top 5 by time
+    entries.slice(0, 5).forEach(e => { portalSelected.add(e.key); portalColorFor(e.key); });
+  }
+  renderPortalPicker();
+  await portalFetchAndRender();
+}
+
+function closeStatPortal() { destroyPortalCharts(); closePortalAdd(); showMediaView('grid'); }
+
+// Selectable entries, keyed 's:<id>' (a whole series) or 't:<title>'. A series is
+// one long media item — its member titles collapse into a single entry — unless
+// "Split series" is on. Mirrors renderMediaGrid: manual-only titles hidden,
+// series members never also appear standalone. Sorted by total time desc.
+function portalSplitSeries() {
+  const el = document.getElementById('portal-split-toggle');
+  return !!(el && el.checked);
+}
+
+function portalEntries() {
+  const titles = mediaAllData.filter(m => m.source !== 'manual');
+  const out = [];
+  if (portalSplitSeries()) {
+    titles.forEach(m => out.push({
+      key: 't:' + m.title, isSeries: false, titles: [m.title],
+      display_title: m.display_title, total_secs: m.total_secs,
+    }));
+  } else {
+    // A series' time is summed from its members' get_media totals, NOT from
+    // get_series_data's raw SUM(time_seconds) — only the former carries the
+    // manual time overlay, so this keeps series chips consistent with title chips.
+    const secsByTitle = new Map(mediaAllData.map(m => [m.title, m.total_secs || 0]));
+    const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
+    seriesData.forEach(s => {
+      const members = s.members.map(m => m.title);
+      out.push({
+        key: 's:' + s.id, isSeries: true, titles: members, display_title: s.name,
+        total_secs: members.reduce((acc, t) => acc + (secsByTitle.get(t) || 0), 0),
+      });
+    });
+    titles.filter(m => !inSeries.has(m.title)).forEach(m => out.push({
+      key: 't:' + m.title, isSeries: false, titles: [m.title],
+      display_title: m.display_title, total_secs: m.total_secs,
+    }));
+  }
+  return out.sort((a, b) => (b.total_secs || 0) - (a.total_secs || 0));
+}
+
+function portalEntryMap() { return new Map(portalEntries().map(e => [e.key, e])); }
+
+// Assign the lowest-index palette color not held by another selected entry.
+function portalColorFor(key) {
+  if (portalColorMap[key]) return portalColorMap[key];
+  const taken = new Set([...portalSelected].filter(k => k !== key).map(k => portalColorMap[k]));
+  const color = PORTAL_PALETTE.find(c => !taken.has(c)) || PORTAL_PALETTE[0];
+  portalColorMap[key] = color;
+  return color;
+}
+
+// The picker shows ONLY selected entries as chips plus an "+ Add" button, so its
+// height stays constant no matter how large the library grows. Everything else
+// lives behind the searchable add-panel.
+function renderPortalPicker() {
+  const box = document.getElementById('portal-picker');
+  const byKey = portalEntryMap();
+  const atCap = portalSelected.size >= PORTAL_MAX;
+  box.innerHTML = '';
+  [...portalSelected].forEach(key => {
+    const e = byKey.get(key);
+    if (!e) return;
+    const color = portalColorMap[key] || '#6B6B8A';
+    const chip = document.createElement('div');
+    chip.className = 'portal-chip';
+    chip.style.color = color;
+    chip.innerHTML = `<span class="dot" style="background:${color}"></span>`
+      + `<span>${escHtml(e.display_title)}</span>`
+      + (e.isSeries ? `<span class="chip-badge">SERIES</span>` : '')
+      + `<span style="opacity:.6">${fmtTime(e.total_secs)}</span>`
+      + `<span class="chip-x" title="Remove">✕</span>`;
+    chip.querySelector('.chip-x').onclick = () => onPortalRemove(key);
+    box.appendChild(chip);
+  });
+  const add = document.createElement('button');
+  add.className = 'portal-add-btn';
+  add.textContent = atCap ? `+ Add title (${PORTAL_MAX} max)` : '+ Add title';
+  add.disabled = atCap;
+  add.onclick = e => { e.stopPropagation(); togglePortalAdd(); };
+  box.appendChild(add);
+  document.getElementById('portal-sel-count').textContent =
+    `${portalSelected.size}/${PORTAL_MAX} selected`;
+}
+
+function togglePortalAdd() {
+  const panel = document.getElementById('portal-add-panel');
+  const open = panel.style.display !== 'none';
+  if (open) { closePortalAdd(); return; }
+  panel.style.display = 'block';
+  const search = document.getElementById('portal-search');
+  search.value = '';
+  renderPortalAddList();
+  search.focus();
+  setTimeout(() => document.addEventListener('click', portalAddOutside), 0);
+}
+
+function closePortalAdd() {
+  const panel = document.getElementById('portal-add-panel');
+  if (panel) panel.style.display = 'none';
+  document.removeEventListener('click', portalAddOutside);
+}
+
+function portalAddOutside(e) {
+  if (!e.target.closest('.portal-picker-wrap')) closePortalAdd();
+}
+
+function renderPortalAddList() {
+  const q = (document.getElementById('portal-search').value || '').toLowerCase().trim();
+  const list = document.getElementById('portal-add-list');
+  const rows = portalEntries().filter(e =>
+    !portalSelected.has(e.key) && (!q || e.display_title.toLowerCase().includes(q)));
+  list.innerHTML = '';
+  if (!rows.length) {
+    list.innerHTML = '<div class="portal-add-empty">No matching titles.</div>';
+    return;
+  }
+  rows.forEach(e => {
+    const row = document.createElement('div');
+    row.className = 'portal-add-row';
+    row.innerHTML = `<span>${escHtml(e.display_title)}</span>`
+      + (e.isSeries ? `<span class="chip-badge">SERIES</span>` : '')
+      + `<span class="sub">${fmtTime(e.total_secs)}</span>`;
+    row.onclick = () => onPortalAdd(e.key);
+    list.appendChild(row);
+  });
+}
+
+async function onPortalAdd(key) {
+  if (portalSelected.size >= PORTAL_MAX || portalSelected.has(key)) return;
+  portalSelected.add(key);
+  portalColorFor(key);
+  closePortalAdd();
+  renderPortalPicker();
+  await portalFetchAndRender();
+}
+
+async function onPortalRemove(key) {
+  portalSelected.delete(key);
+  delete portalColorMap[key];                     // free the color for reuse
+  renderPortalPicker();
+  await portalFetchAndRender();
+}
+
+// Toggling split remaps the selection between series keys and member-title keys
+// so the user's picks survive the switch (capped, dedup'd).
+async function onPortalSplit() {
+  const split = portalSplitSeries();
+  const memberOf = new Map();                     // title -> series id
+  seriesData.forEach(s => s.members.forEach(m => memberOf.set(m.title, s.id)));
+  const next = [];
+  [...portalSelected].forEach(key => {
+    if (split && key.startsWith('s:')) {
+      const s = seriesData.find(x => String(x.id) === key.slice(2));
+      if (s) s.members.forEach(m => next.push('t:' + m.title));
+    } else if (!split && key.startsWith('t:')) {
+      const sid = memberOf.get(key.slice(2));
+      next.push(sid != null ? 's:' + sid : key);
+    } else {
+      next.push(key);
+    }
+  });
+  portalSelected = new Set(next.slice(0, PORTAL_MAX));
+  portalColorMap = {};
+  [...portalSelected].forEach(portalColorFor);
+  renderPortalPicker();
+  await portalFetchAndRender();
+}
+
+// Sum member titles into one synthetic entry. Totals are summed and avg_speed is
+// re-derived from them (chars ÷ time) — never averaged from the parts' speeds.
+function portalMergeEntry(key, name, parts) {
+  const map = new Map();
+  parts.forEach(p => p.daily.forEach(x => {
+    const cur = map.get(x.date) || { chars: 0, seconds: 0 };
+    cur.chars += x.chars; cur.seconds += x.seconds;
+    map.set(x.date, cur);
+  }));
+  const daily = [...map.keys()].sort().map(date => ({ date, ...map.get(date) }));
+  const total_chars = parts.reduce((s, p) => s + p.total_chars, 0);
+  const total_secs  = parts.reduce((s, p) => s + p.total_secs, 0);
+  return {
+    key, title: key, display_title: name,
+    source: parts[0].source, activity_type: parts[0].activity_type,
+    total_chars, total_secs,
+    avg_speed: (total_secs > 0 && total_chars > 0) ? total_chars / (total_secs / 3600) : 0,
+    session_count: parts.reduce((s, p) => s + p.session_count, 0),
+    days_count: daily.length,                     // distinct days across the series
+    first_date: daily.length ? daily[0].date : null,
+    last_date:  daily.length ? daily[daily.length - 1].date : null,
+    daily,
+  };
+}
+
+async function portalFetchAndRender() {
+  const byKey = portalEntryMap();
+  const missing = [...portalSelected].filter(k => !(k in portalDataCache) && byKey.has(k));
+  if (missing.length) {
+    const need = [...new Set(missing.flatMap(k => byKey.get(k).titles))];
+    const rows = await window.pywebview.api.get_compare_data(need);
+    const byTitle = new Map(rows.map(r => [r.title, r]));
+    missing.forEach(k => {
+      const e = byKey.get(k);
+      const parts = e.titles.map(t => byTitle.get(t)).filter(Boolean);
+      if (!parts.length) return;
+      portalDataCache[k] = (parts.length === 1 && !e.isSeries)
+        ? Object.assign({}, parts[0], { key: k })
+        : portalMergeEntry(k, e.display_title, parts);
+    });
+  }
+  renderPortal();
+}
+
+// ── Derived-series helpers (all chars/(secs/3600)) ──────────────────────────
+function portalUnionDates(sel) {
+  const set = new Set();
+  sel.forEach(d => d.daily.forEach(x => set.add(x.date)));
+  return [...set].sort();
+}
+
+// Map a title's daily rows onto the shared union axis, filling missing days.
+function portalAlignedRolling(d, dates) {
+  const byDate = new Map(d.daily.map(x => [x.date, x]));
+  const chars = d.daily.map(x => x.chars);
+  const secs  = d.daily.map(x => x.seconds);
+  const roll  = twRolling(chars, secs, 7);         // aligned to d.daily order
+  const rollByDate = new Map(d.daily.map((x, i) => [x.date, roll[i]]));
+  return dates.map(dt => {
+    if (!byDate.has(dt)) return null;
+    return rollByDate.get(dt);
+  });
+}
+
+function portalAlignedRaw(d, dates) {
+  const byDate = new Map(d.daily.map(x => [x.date, x]));
+  return dates.map(dt => {
+    const x = byDate.get(dt);
+    if (!x) return null;
+    return (x.seconds > 0 && x.chars > 0) ? x.chars / (x.seconds / 3600) : null;
+  });
+}
+
+// Cumulative running total on the union axis, carried forward on idle days,
+// null before the title's first read date so each line starts where it began.
+function portalCumulative(d, dates, field) {
+  const byDate = new Map(d.daily.map(x => [x.date, x]));
+  const first = d.daily.length ? d.daily[0].date : null;
+  let run = 0;
+  return dates.map(dt => {
+    if (first == null || dt < first) return null;
+    const x = byDate.get(dt);
+    if (x) run += (field === 'chars' ? x.chars : x.seconds / 3600);
+    return run;
+  });
+}
+
+// {x,y} points: x = cumulative hours into the title (or nth reading day),
+// y = 7d-rolling speed. Unequal per-title spacing → linear axis, not category.
+function portalNormPoints(d, byDay) {
+  const chars = d.daily.map(x => x.chars);
+  const secs  = d.daily.map(x => x.seconds);
+  const roll  = twRolling(chars, secs, 7);
+  let cumHours = 0;
+  const pts = [];
+  d.daily.forEach((x, i) => {
+    cumHours += x.seconds / 3600;
+    if (roll[i] != null) pts.push({ x: byDay ? i + 1 : cumHours, y: roll[i] });
+  });
+  return pts;
+}
+
+// ── "Align to a common start" mode ──────────────────────────────────────────
+// When on, the calendar charts (speed overlay + both cumulative races) re-plot
+// against days-since-each-title's-own-first-read-day, so every line begins at
+// x=0. Real pacing (gaps) is preserved; only the origin shifts.
+function portalIsAligned() {
+  const el = document.getElementById('portal-align-toggle');
+  return !!(el && el.checked);
+}
+
+function portalDayOffset(firstDate, dateStr) {
+  return Math.round((new Date(dateStr) - firstDate) / 86400000);
+}
+
+// Speed as {x: days since start, y: speed} — rolling or raw per the sub-toggle.
+function portalSpeedPoints(d, rolling) {
+  if (!d.daily.length) return [];
+  const first = new Date(d.daily[0].date);
+  const chars = d.daily.map(x => x.chars);
+  const secs  = d.daily.map(x => x.seconds);
+  const roll  = rolling ? twRolling(chars, secs, 7) : null;
+  const pts = [];
+  d.daily.forEach((x, i) => {
+    const y = rolling ? roll[i]
+                      : (x.seconds > 0 && x.chars > 0 ? x.chars / (x.seconds / 3600) : null);
+    if (y != null) pts.push({ x: portalDayOffset(first, x.date), y });
+  });
+  return pts;
+}
+
+// Cumulative total as {x: days since start, y: running total}.
+function portalCumPoints(d, field) {
+  if (!d.daily.length) return [];
+  const first = new Date(d.daily[0].date);
+  let run = 0;
+  return d.daily.map(x => {
+    run += field === 'chars' ? x.chars : x.seconds / 3600;
+    return { x: portalDayOffset(first, x.date), y: run };
+  });
+}
+
+// First vs last 20% of the title's chars. Chars, not time: the first fifth of
+// the material vs the last fifth is symmetric in content. Guarded for small
+// samples. Whole-day granularity (bucket includes the boundary day).
+function portalSpeedGain(d) {
+  if (d.days_count < 10 || d.total_chars < 20000) return null;
+  const target = d.total_chars * 0.2;
+  let c = 0, s = 0, i = 0;
+  for (; i < d.daily.length && c < target; i++) { c += d.daily[i].chars; s += d.daily[i].seconds; }
+  const early = s > 0 ? c / (s / 3600) : null;
+  c = 0; s = 0;
+  for (let j = d.daily.length - 1; j >= i && c < target; j--) { c += d.daily[j].chars; s += d.daily[j].seconds; }
+  const late = s > 0 ? c / (s / 3600) : null;
+  if (early == null || late == null || early <= 0) return null;
+  return { early, late, pct: (late - early) / early * 100 };
+}
+
+// ── Shared chart config ─────────────────────────────────────────────────────
+function portalLineDataset(d, data, extra) {
+  const color = portalColorMap[d.key] || '#6B6B8A';
+  return Object.assign({
+    label: d.display_title,
+    data,
+    borderColor: color,
+    backgroundColor: color,
+    pointBackgroundColor: color,
+    pointBorderColor: '#24243A',
+    pointBorderWidth: 1,
+    borderWidth: 2,
+    tension: 0.3,
+    fill: false,
+  }, extra || {});
+}
+
+function portalDateScale(yTickCb) {
+  return {
+    x: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', autoSkip: true, maxTicksLimit: 14, maxRotation: 0 } },
+    y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: yTickCb }, beginAtZero: false },
+  };
+}
+
+// Linear "days since start" x-axis, used by the calendar charts in aligned mode.
+function portalDayScale(yTickCb) {
+  return {
+    x: { type: 'linear', grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', maxRotation: 0, callback: v => v + 'd' }, title: { display: true, text: 'Days since start', color: '#9090A8' }, beginAtZero: true },
+    y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: yTickCb }, beginAtZero: false },
+  };
+}
+
+const PORTAL_LEGEND = { display: true, position: 'bottom', labels: { color: '#9090A8', usePointStyle: true, boxWidth: 8, padding: 12 } };
+
+function renderPortal() {
+  destroyPortalCharts();
+  const sel = [...portalSelected].map(t => portalDataCache[t]).filter(Boolean);
+  const empty = document.getElementById('portal-empty');
+  const content = document.getElementById('portal-content');
+  if (!sel.length) {
+    empty.style.display = 'block';
+    content.style.display = 'none';
+    return;
+  }
+  empty.style.display = 'none';
+  content.style.display = 'block';
+
+  const dates = portalUnionDates(sel);
+  const withChars = sel.filter(d => d.total_chars > 0);
+
+  renderPortalTable(sel);
+  renderPortalSpeed(withChars, dates);
+  renderPortalNorm(withChars);
+  renderPortalCum(sel, dates, 'chars', 'chart-portal-cum-chars', 'portal-cum-chars', v => fmtChars(v));
+  renderPortalCum(sel, dates, 'hours', 'chart-portal-cum-time', 'portal-cum-time', v => v.toFixed(0) + 'h');
+  renderPortalGain(withChars);
+  renderPortalScatter(withChars);
+}
+
+function renderPortalTable(sel) {
+  const dash = '—';
+  const rows = sel.map(d => {
+    const color = portalColorMap[d.key] || '#6B6B8A';
+    const speed = d.total_chars > 0 && d.total_secs > 0 ? fmtChars(Math.round(d.avg_speed)) + '/h' : dash;
+    const cpd = d.total_chars > 0 && d.days_count ? fmtChars(Math.round(d.total_chars / d.days_count)) : dash;
+    // Avg day, not avg session: GSM/ttsu collapse a day into one session row while
+    // manual logging can write several, so per-session would not be comparable.
+    const avgDay = d.days_count ? fmtTime(d.total_secs / d.days_count) : dash;
+    return `<tr>
+      <td><span class="dot" style="background:${color}"></span>${escHtml(d.display_title)}</td>
+      <td>${fmtTime(d.total_secs)}</td>
+      <td>${d.total_chars > 0 ? fmtChars(d.total_chars) : dash}</td>
+      <td>${speed}</td>
+      <td>${cpd}</td>
+      <td>${avgDay}</td>
+      <td>${d.days_count}</td>
+    </tr>`;
+  }).join('');
+  document.getElementById('portal-table-wrap').innerHTML = `
+    <table class="portal-table">
+      <thead><tr>
+        <th>Title</th><th>Total time</th><th>Total chars</th><th>Avg speed</th>
+        <th>Chars/active day</th><th>Avg day</th><th>Active days</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+}
+
+function renderPortalSpeed(withChars, dates) {
+  const section = document.getElementById('portal-speed-section');
+  if (!withChars.length) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  const rolling = document.getElementById('portal-rolling-toggle').checked;
+  const aligned = portalIsAligned();
+  const datasets = withChars.map(d => portalLineDataset(
+    d,
+    aligned ? portalSpeedPoints(d, rolling)
+            : (rolling ? portalAlignedRolling(d, dates) : portalAlignedRaw(d, dates)),
+    { spanGaps: rolling, pointRadius: rolling ? 0 : 2, pointHoverRadius: 5 }
+  ));
+  charts['portal-speed'] = new Chart(document.getElementById('chart-portal-speed').getContext('2d'), {
+    type: 'line',
+    data: aligned ? { datasets } : { labels: dates, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: aligned ? 'nearest' : 'index', intersect: false },
+      plugins: {
+        legend: PORTAL_LEGEND,
+        tooltip: { callbacks: { label: c => c.parsed.y != null ? `${c.dataset.label}: ${fmtChars(Math.round(c.parsed.y))}/h${aligned ? ' @ day ' + c.parsed.x : ''}` : '' } },
+      },
+      scales: aligned ? portalDayScale(v => fmtChars(v)) : portalDateScale(v => fmtChars(v)),
+    },
+  });
+  portalAttachZoom('portal-speed', 'chart-portal-speed');
+}
+
+function renderPortalNorm(withChars) {
+  const section = document.getElementById('portal-norm-section');
+  if (!withChars.length) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  const byDay = document.getElementById('portal-norm-toggle').checked;
+  const datasets = withChars.map(d => portalLineDataset(d, portalNormPoints(d, byDay),
+    { spanGaps: true, pointRadius: 0, pointHoverRadius: 5 }));
+  const unit = byDay ? 'd' : 'h';
+  charts['portal-norm'] = new Chart(document.getElementById('chart-portal-norm').getContext('2d'), {
+    type: 'line',
+    data: { datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      parsing: false,
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: PORTAL_LEGEND,
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmtChars(Math.round(c.parsed.y))}/h @ ${c.parsed.x.toFixed(byDay ? 0 : 1)}${unit}` } },
+      },
+      scales: {
+        x: { type: 'linear', grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', maxRotation: 0, callback: v => v + unit }, title: { display: true, text: byDay ? 'Reading day' : 'Hours into title', color: '#9090A8' } },
+        y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => fmtChars(v) }, beginAtZero: false },
+      },
+    },
+  });
+  portalAttachZoom('portal-norm', 'chart-portal-norm');
+}
+
+function renderPortalCum(sel, dates, field, canvasId, chartKey, yTickCb) {
+  const aligned = portalIsAligned();
+  const datasets = sel
+    .filter(d => field === 'hours' || d.total_chars > 0)
+    .map(d => portalLineDataset(d,
+      aligned ? portalCumPoints(d, field) : portalCumulative(d, dates, field),
+      { spanGaps: true, pointRadius: 0, pointHoverRadius: 4 }));
+  charts[chartKey] = new Chart(document.getElementById(canvasId).getContext('2d'), {
+    type: 'line',
+    data: aligned ? { datasets } : { labels: dates, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: aligned ? 'nearest' : 'index', intersect: false },
+      plugins: {
+        legend: PORTAL_LEGEND,
+        tooltip: { callbacks: { label: c => c.parsed.y != null ? `${c.dataset.label}: ${field === 'chars' ? fmtChars(Math.round(c.parsed.y)) + ' chars' : c.parsed.y.toFixed(1) + 'h'}${aligned ? ' @ day ' + c.parsed.x : ''}` : '' } },
+      },
+      scales: aligned ? portalDayScale(yTickCb) : portalDateScale(yTickCb),
+    },
+  });
+  portalAttachZoom(chartKey, canvasId);
+}
+
+function renderPortalGain(withChars) {
+  const section = document.getElementById('portal-gain-section');
+  const gains = withChars.map(d => ({ d, g: portalSpeedGain(d) }));
+  const ok = gains.filter(x => x.g).sort((a, b) => b.g.pct - a.g.pct);
+  const excluded = gains.filter(x => !x.g).map(x => x.d.display_title);
+  if (!ok.length) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  charts['portal-gain'] = new Chart(document.getElementById('chart-portal-gain').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: ok.map(x => x.d.display_title),
+      datasets: [{
+        data: ok.map(x => x.g.pct),
+        backgroundColor: ok.map(x => portalColorMap[x.d.key] || '#6B6B8A'),
+        borderRadius: 4,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: c => {
+          const g = ok[c.dataIndex].g;
+          return `${fmtChars(Math.round(g.early))} → ${fmtChars(Math.round(g.late))}/h  (${g.pct >= 0 ? '+' : ''}${g.pct.toFixed(0)}%)`;
+        } } },
+      },
+      scales: {
+        x: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => v + '%' }, beginAtZero: true },
+        y: { grid: { display: false }, ticks: { color: '#9090A8' } },
+      },
+    },
+  });
+  const note = document.getElementById('portal-gain-note');
+  note.textContent = excluded.length ? `Not enough data: ${excluded.join(', ')}` : '';
+}
+
+function renderPortalScatter(withChars) {
+  const section = document.getElementById('portal-scatter-section');
+  if (!withChars.length) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+  const maxHours = Math.max(...withChars.map(d => d.total_secs / 3600), 1);
+  const datasets = withChars.map(d => {
+    const color = portalColorMap[d.key] || '#6B6B8A';
+    const hours = d.total_secs / 3600;
+    const r = 6 + 16 * Math.sqrt(hours / maxHours);
+    return {
+      label: d.display_title,
+      data: [{ x: d.total_chars, y: d.avg_speed, r, _hours: hours }],
+      backgroundColor: color + 'cc',
+      borderColor: color,
+      borderWidth: 1,
+      hoverRadius: r + 2,
+    };
+  });
+  charts['portal-scatter'] = new Chart(document.getElementById('chart-portal-scatter').getContext('2d'), {
+    type: 'bubble',
+    data: { datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: PORTAL_LEGEND,
+        tooltip: { callbacks: { label: c => {
+          const p = c.raw;
+          return `${c.dataset.label}: ${fmtChars(p.x)} chars, ${fmtChars(Math.round(p.y))}/h, ${fmtTime(p._hours * 3600)}`;
+        } } },
+      },
+      scales: {
+        x: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => fmtChars(v) }, title: { display: true, text: 'Total characters', color: '#9090A8' } },
+        y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => fmtChars(v) }, title: { display: true, text: 'Avg speed (chars/h)', color: '#9090A8' }, beginAtZero: false },
+      },
+    },
+  });
+}
+
+function onPortalSpeedMode() {
+  destroyChart('portal-speed');
+  const sel = [...portalSelected].map(t => portalDataCache[t]).filter(Boolean);
+  renderPortalSpeed(sel.filter(d => d.total_chars > 0), portalUnionDates(sel));
+}
+
+function onPortalNormMode() {
+  destroyChart('portal-norm');
+  const sel = [...portalSelected].map(t => portalDataCache[t]).filter(Boolean);
+  renderPortalNorm(sel.filter(d => d.total_chars > 0));
+}
+
+// Re-render just the three calendar charts the align toggle affects.
+function onPortalAlign() {
+  const sel = [...portalSelected].map(t => portalDataCache[t]).filter(Boolean);
+  const dates = portalUnionDates(sel);
+  const withChars = sel.filter(d => d.total_chars > 0);
+  destroyChart('portal-speed');     renderPortalSpeed(withChars, dates);
+  destroyChart('portal-cum-chars'); renderPortalCum(sel, dates, 'chars', 'chart-portal-cum-chars', 'portal-cum-chars', v => fmtChars(v));
+  destroyChart('portal-cum-time');  renderPortalCum(sel, dates, 'hours', 'chart-portal-cum-time', 'portal-cum-time', v => v.toFixed(0) + 'h');
 }
 
 if (window.pywebview) {

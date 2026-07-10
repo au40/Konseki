@@ -312,6 +312,9 @@ class Api:
     def get_title_detail(self, title):
         return db.db_get_title_detail(title)
 
+    def get_compare_data(self, titles):
+        return db.db_get_compare_data(list(titles or []))
+
     def get_media_order(self):
         return db.db_get_media_card_order()
 
@@ -891,6 +894,17 @@ gsm_wal_handler = None  # set in main(); read by Api.save_settings
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
     global gsm_wal_handler
+
+    # Give Windows an explicit AppUserModelID so the taskbar button is treated
+    # as its own app (and uses the window's Konseki icon) instead of being
+    # grouped under pythonw.exe and borrowing Python's icon.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Konseki")
+        except Exception:
+            pass
+
     init_db()
     catalog.init_catalog_db()
     scan_existing_files()

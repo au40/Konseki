@@ -1964,6 +1964,39 @@ def db_get_title_detail(title):
     return core
 
 
+# Server-side cap on RAW TITLES per compare request. The client caps *selections*
+# at 8 (PORTAL_MAX in ui.js), but one selection can be a series that expands into
+# many member titles — so this ceiling is much higher than the selection cap.
+PORTAL_MAX_TITLES = 60
+
+
+def db_get_compare_data(titles):
+    """Trimmed multi-title payload for the Media stat portal. Reuses
+    _compute_title_core so attribution + manual shaves apply; per-day speed is
+    intentionally NOT included — the client derives it from chars/seconds."""
+    out = []
+    for t in list(titles)[:PORTAL_MAX_TITLES]:
+        core = _compute_title_core(t)
+        if core is None:
+            continue
+        out.append({
+            "title":         core["title"],
+            "display_title": core["display_title"],
+            "source":        core["source"],
+            "activity_type": core["activity_type"],
+            "total_chars":   core["total_chars"],
+            "total_secs":    core["total_secs"],
+            "avg_speed":     core["avg_speed"],
+            "session_count": core["session_count"],
+            "days_count":    core["days_count"],
+            "first_date":    core["first_date"],
+            "last_date":     core["last_date"],
+            "daily": [{"date": d["date"], "chars": d["chars"], "seconds": d["seconds"]}
+                      for d in core["daily"]],
+        })
+    return out
+
+
 # ── Milestones ────────────────────────────────────────────────────────────────
 # A milestone subdivides a single media item (e.g. trilogy parts within one
 # game). Bounds are stored in native unit ('hours' or 'chars'); empties resolve
