@@ -41,6 +41,9 @@
     <div class="nav-item" data-page="settings" onclick="navigate('settings')">
       <span class="nav-icon">⚙</span>Settings
     </div>
+    <div class="nav-item" data-page="dev" onclick="navigate('dev')">
+      <span class="nav-icon">⌗</span>Dev
+    </div>
     <div class="sidebar-actions">
       <button class="sidebar-action-btn" id="pull-btn" onclick="doPullGSM()">↻ Pull GSM</button>
       <button class="sidebar-action-btn" id="ttsu-btn"
@@ -880,6 +883,37 @@
         </div>
       </div>
       ──────────────────────────────────────────────────────────────────── -->
+    </div>
+
+    <!-- ── Dev ─────────────────────────────────────────────────────────────── -->
+    <div id="page-dev" class="page">
+      <div class="page-header"><h1>Dev</h1></div>
+
+      <div class="settings-section" style="margin-top:20px">
+        <div class="card">
+          <h3>Console</h3>
+          <p class="muted" style="margin-bottom:10px">Log output from this run. [py] = backend, [js] = UI.</p>
+          <div class="settings-row" style="margin:0 0 10px">
+            <button class="btn btn-outline btn-sm" onclick="refreshDevLogs()">↻ Refresh</button>
+            <button class="btn btn-outline btn-sm" onclick="clearDevLogs()">Clear</button>
+            <span class="muted" id="dev-log-count" style="font-size:11px"></span>
+          </div>
+          <div id="dev-log-output" class="dev-log-box"></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Notes</h3>
+          <p class="muted" style="margin-bottom:10px">Quick scratchpad for bugs and ideas.</p>
+          <div class="settings-row" style="margin:0 0 12px">
+            <input type="text" id="dev-note-input" placeholder="Jot a bug or idea…" style="flex:1"
+                   onkeydown="if(event.key==='Enter') addDevNote()">
+            <button class="btn btn-outline btn-sm" onclick="addDevNote()">Add</button>
+          </div>
+          <div id="dev-notes-list"></div>
+        </div>
+      </div>
     </div>
 
   </main>

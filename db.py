@@ -264,6 +264,18 @@ def init_db():
     """)
 
     con.execute("""
+        CREATE TABLE IF NOT EXISTS dev_notes (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            body       TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            importance INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+    dev_cols = [r[1] for r in con.execute("PRAGMA table_info(dev_notes)").fetchall()]
+    if "importance" not in dev_cols:
+        con.execute("ALTER TABLE dev_notes ADD COLUMN importance INTEGER NOT NULL DEFAULT 0")
+
+    con.execute("""
         CREATE TABLE IF NOT EXISTS series (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             name       TEXT,
@@ -1730,6 +1742,38 @@ def db_add_custom_category(name, color="#6B6B8A"):
 def db_delete_custom_category(name):
     con = sqlite3.connect(DB_PATH)
     con.execute("DELETE FROM custom_categories WHERE name=?", (name,))
+    con.commit()
+    con.close()
+
+
+# ── Dev notes ─────────────────────────────────────────────────────────────────
+# importance: 0 = none (grey), 1 = medium (yellow), 2 = high (red)
+def db_get_dev_notes():
+    rows = _q("SELECT id, body, created_at, importance FROM dev_notes ORDER BY id DESC")
+    return [{"id": r[0], "body": r[1], "created_at": r[2], "importance": r[3]} for r in rows]
+
+def db_add_dev_note(body):
+    body = (body or "").strip()
+    if not body:
+        return
+    con = sqlite3.connect(DB_PATH)
+    con.execute(
+        "INSERT INTO dev_notes (body, created_at) VALUES (?,?)",
+        (body, datetime.now().isoformat())
+    )
+    con.commit()
+    con.close()
+
+def db_set_dev_note_importance(note_id, importance):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("UPDATE dev_notes SET importance=? WHERE id=?",
+                (max(0, min(2, int(importance))), int(note_id)))
+    con.commit()
+    con.close()
+
+def db_delete_dev_note(note_id):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DELETE FROM dev_notes WHERE id=?", (int(note_id),))
     con.commit()
     con.close()
 

@@ -1,3 +1,41 @@
+// ── Dev log capture ────────────────────────────────────────────────────────
+// Must run before anything else and must never throw — a top-level failure
+// here blanks every page. Console output and uncaught errors land in
+// window.__jsLogBuf for the Dev tab's merged [py]/[js] console view.
+(function () {
+  try {
+    window.__jsLogBuf = [];
+    const push = (level, text) => {
+      try {
+        window.__jsLogBuf.push({ ts: Date.now() / 1000, level, text: String(text) });
+        if (window.__jsLogBuf.length > 1000) window.__jsLogBuf.shift();
+      } catch (e) { /* capture must never break the app */ }
+    };
+    const fmt = (args) => args.map(a => {
+      if (a instanceof Error) return a.stack || a.message;
+      if (typeof a === 'object' && a !== null) {
+        try { return JSON.stringify(a); } catch (e) { return String(a); }
+      }
+      return String(a);
+    }).join(' ');
+    ['log', 'info', 'warn', 'error'].forEach(name => {
+      const orig = console[name].bind(console);
+      const level = name === 'log' ? 'info' : name;
+      console[name] = function (...args) {
+        try { push(level, fmt(args)); } catch (e) {}
+        orig(...args);
+      };
+    });
+    window.addEventListener('error', e => {
+      push('error', e.message + (e.filename ? ` (${String(e.filename).split('/').pop()}:${e.lineno})` : ''));
+    });
+    window.addEventListener('unhandledrejection', e => {
+      const r = e.reason;
+      push('error', 'Unhandled rejection: ' + ((r && (r.stack || r.message)) || String(r)));
+    });
+  } catch (e) { /* degrade to no capture, never a blank app */ }
+})();
+
 // ── Globals ────────────────────────────────────────────────────────────────
 let currentPage        = 'dashboard';
 let currentRange       = '30d';
@@ -133,6 +171,7 @@ function navigate(page) {
     if (main)  main.style.display  = '';
     clearSetupFeedback();
   }
+  if (currentPage === 'dev' && page !== 'dev') stopDevLogPoll();
   document.querySelectorAll('.nav-item').forEach(el =>
     el.classList.toggle('active', el.dataset.page === page));
   document.querySelectorAll('.page').forEach(el =>
@@ -150,6 +189,7 @@ async function loadPage(page) {
   else if (page === 'media')     await loadMedia();
   else if (page === 'catalog')   await loadCatalog();
   else if (page === 'settings')  await loadSettings();
+  else if (page === 'dev')       await loadDevPage();
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────
@@ -1519,6 +1559,30 @@ function destroyChart(id) {
   if (charts[id]) { charts[id].destroy(); delete charts[id]; }
 }
 
+// ── Legend room ────────────────────────────────────────────────────────────
+// Chart.js renders the legend/key INSIDE the canvas, so flipping a "split" or
+// "cumulative" toggle steals vertical space from the plot and squashes the bars
+// (the "checkbox shrinks the graph" reports). To keep the plot area constant we
+// grow the canvas — and with it its card ("blue box") — by one legend row's
+// worth (LEGEND_ROOM) whenever a legend is shown, so the key lands in an added
+// bottom strip instead of eating the chart. The canvas `height` attribute drives
+// render height here (the card parents are unconstrained + maintainAspectRatio:
+// false, which is why each canvas carries an explicit height=…), so we just
+// retag it. Measuring the laid-out legend and resize()-ing to fit was tried and
+// misbehaved in the webview (canvas collapsed), so we stick to retag + rebuild:
+// if a chart already owns the canvas we drop it first, because Chart.js caches
+// its render height from construction — the re-render then rebuilds at the new
+// size. Call this BEFORE (re)building the chart.
+const LEGEND_ROOM = 31;
+function reserveLegendRoom(canvasId, chartKey, base, legendOn) {
+  const cv = document.getElementById(canvasId);
+  if (!cv) return;
+  const want = String(legendOn ? base + LEGEND_ROOM : base);
+  if (cv.getAttribute('height') === want) return;
+  if (charts[chartKey]) { charts[chartKey].destroy(); delete charts[chartKey]; }
+  cv.setAttribute('height', want);
+}
+
 const CHART_ANIM = { duration: 400, easing: 'easeOutQuart' };
 const MORPH_MS   = 500;
 const morphState = {};
@@ -1714,6 +1778,7 @@ function renderDailyChart(daily) {
     });
   }
 
+  reserveLegendRoom('chart-daily', 'daily', 180, cum || splitByActivity);
   upsertChart('daily', 'chart-daily', {
     type: 'bar',
     data: { labels: shownLabels, datasets },
@@ -1722,7 +1787,7 @@ function renderDailyChart(daily) {
       onResize: () => positionDailyBrush(),
       interaction: splitByActivity ? { mode: 'index', intersect: false } : undefined,
       plugins: {
-        legend: { display: cum || splitByActivity,
+        legend: { display: cum || splitByActivity, position: 'bottom',
                   labels: { color:'#9090A8', boxWidth:12, boxHeight:12, usePointStyle:true } },
         tooltip: {
           callbacks: {
@@ -1783,6 +1848,7 @@ function renderDowChart(daily) {
     : [{ label: 'Time', data: values, backgroundColor: '#5B8CFF',
          borderRadius: 3, borderSkipped: false }];
 
+  reserveLegendRoom('chart-dow', 'dow', 180, splitByActivity);
   upsertChart('dow', 'chart-dow', {
     type: 'bar',
     data: { labels, datasets },
@@ -1790,7 +1856,7 @@ function renderDowChart(daily) {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
       interaction: splitByActivity ? { mode: 'index', intersect: false } : undefined,
       plugins: {
-        legend: { display: splitByActivity,
+        legend: { display: splitByActivity, position: 'bottom',
                   labels: { color:'#9090A8', boxWidth:12, boxHeight:12, usePointStyle:true } },
         tooltip: { callbacks: {
           title: c => labels[c[0].dataIndex],
@@ -3449,6 +3515,7 @@ function renderDetailChart(daily, isGSM) {
   const hasSpeed    = speedVals.some(s => s > 0);
 
   // Characters chart (bars only)
+  reserveLegendRoom('chart-detail', 'detail', 180, msSplit);
   const ctx = document.getElementById('chart-detail').getContext('2d');
   charts['detail'] = new Chart(ctx, {
     type: 'bar',
@@ -3463,7 +3530,7 @@ function renderDetailChart(daily, isGSM) {
       responsive: true, maintainAspectRatio: false, animation: false,
       interaction: msSplit ? { mode: 'index', intersect: false } : undefined,
       plugins: {
-        legend: { display: msSplit, labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
+        legend: { display: msSplit, position: 'bottom', labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
         tooltip: { callbacks: {
           title: c => labels[c[0].dataIndex],
           label: msSplit
@@ -3548,6 +3615,7 @@ function renderDetailChart(daily, isGSM) {
   // Time chart
   const hasTime = timeVals.some(v => v > 0);
   if (hasTime) {
+    reserveLegendRoom('chart-detail-time', 'detail-time', 180, msSplit);
     const timeCtx = document.getElementById('chart-detail-time').getContext('2d');
     charts['detail-time'] = new Chart(timeCtx, {
       type: 'bar',
@@ -3562,7 +3630,7 @@ function renderDetailChart(daily, isGSM) {
         responsive: true, maintainAspectRatio: false, animation: false,
         interaction: msSplit ? { mode: 'index', intersect: false } : undefined,
         plugins: {
-          legend: { display: msSplit, labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
+          legend: { display: msSplit, position: 'bottom', labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
           tooltip: { callbacks: {
             title: c => labels[c[0].dataIndex],
             label: msSplit
@@ -4099,6 +4167,110 @@ function scheduleRolloverRefresh() {
     loadPage(currentPage);
     scheduleRolloverRefresh();
   }, ms);
+}
+
+// ── Dev page ───────────────────────────────────────────────────────────────
+let devLogTimer   = null;
+let devPyLogs     = [];   // accumulated backend entries (src:'py')
+let devPySeq      = 0;    // highest seq fetched; never reset (survives Clear)
+let devLogLastSig = '';   // count + last-ts signature to skip no-op re-renders
+
+async function loadDevPage() {
+  await refreshDevLogs();
+  await loadDevNotes();
+  if (!devLogTimer) devLogTimer = setInterval(refreshDevLogs, 2000);
+}
+
+function stopDevLogPoll() {
+  if (devLogTimer) { clearInterval(devLogTimer); devLogTimer = null; }
+}
+
+async function refreshDevLogs() {
+  try {
+    const entries = await window.pywebview.api.get_dev_logs(devPySeq);
+    if (entries && entries.length) {
+      devPySeq = entries[entries.length - 1].seq;
+      entries.forEach(e => devPyLogs.push({ ts: e.ts, level: e.level, text: e.text, src: 'py' }));
+      if (devPyLogs.length > 2000) devPyLogs = devPyLogs.slice(-2000);
+    }
+  } catch (e) { /* bridge hiccup — next poll retries */ }
+  renderDevLogs();
+}
+
+function renderDevLogs() {
+  const box = document.getElementById('dev-log-output');
+  if (!box) return;
+  const all = devPyLogs
+    .concat(window.__jsLogBuf.map(e => ({ ...e, src: 'js' })))
+    .sort((a, b) => a.ts - b.ts);
+  const sig = `${all.length}:${all.length ? all[all.length - 1].ts : 0}`;
+  if (sig === devLogLastSig) return;
+  devLogLastSig = sig;
+  const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 4;
+  if (!all.length) {
+    box.innerHTML = '<p class="empty-msg">No log output yet.</p>';
+  } else {
+    box.innerHTML = all.map(e => {
+      const cls = (e.level === 'err' || e.level === 'error') ? ' err'
+                : (e.level === 'warn' ? ' warn' : '');
+      const t = new Date(e.ts * 1000).toTimeString().slice(0, 8);
+      return `<div class="dev-log-line${cls}"><span class="dev-log-time">${t}</span>` +
+             `<span class="dev-log-src">[${e.src}]</span>${escHtml(e.text)}</div>`;
+    }).join('');
+  }
+  const count = document.getElementById('dev-log-count');
+  if (count) count.textContent = all.length ? `${all.length} lines` : '';
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+async function clearDevLogs() {
+  try { await window.pywebview.api.clear_dev_logs(); } catch (e) {}
+  window.__jsLogBuf.length = 0;
+  devPyLogs = [];
+  devLogLastSig = '';   // devPySeq intentionally kept — new entries keep arriving
+  renderDevLogs();
+}
+
+async function loadDevNotes() {
+  const list = document.getElementById('dev-notes-list');
+  if (!list) return;
+  const notes = await window.pywebview.api.get_dev_notes();
+  if (!notes.length) {
+    list.innerHTML = '<p class="empty-msg">No notes yet.</p>';
+    return;
+  }
+  // Float important notes to the top (red, then yellow, then grey), newest-first within each.
+  notes.sort((a, b) => (b.importance || 0) - (a.importance || 0) || b.id - a.id);
+  const dots = (n) => ['grey', 'yellow', 'red'].map((color, level) =>
+    `<span class="dev-dot ${color}${(n.importance || 0) === level ? ' on' : ''}" ` +
+    `title="${['Not important', 'Medium', 'High'][level]}" ` +
+    `onclick="setDevNoteImportance(${n.id}, ${level})"></span>`).join('');
+  list.innerHTML = notes.map(n => `
+    <div class="dev-note-row">
+      <span class="dev-note-dots">${dots(n)}</span>
+      <span class="dev-note-date">${escHtml((n.created_at || '').slice(0, 16).replace('T', ' '))}</span>
+      <span class="dev-note-body">${escHtml(n.body)}</span>
+      <button class="btn btn-outline btn-sm" onclick="deleteDevNote(${n.id})">✕</button>
+    </div>`).join('');
+}
+
+async function setDevNoteImportance(id, level) {
+  const r = await window.pywebview.api.set_dev_note_importance(id, level);
+  if (r.ok) await loadDevNotes();
+}
+
+async function addDevNote() {
+  const input = document.getElementById('dev-note-input');
+  const body = (input.value || '').trim();
+  if (!body) return;
+  const r = await window.pywebview.api.add_dev_note(body);
+  if (r.ok) { input.value = ''; await loadDevNotes(); }
+}
+
+async function deleteDevNote(id) {
+  if (!await showConfirm('Delete this note?')) return;
+  const r = await window.pywebview.api.delete_dev_note(id);
+  if (r.ok) await loadDevNotes();
 }
 
 // ── Data changed (file watcher) ────────────────────────────────────────────

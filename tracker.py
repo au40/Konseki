@@ -30,6 +30,7 @@ import db
 import imports
 import backup
 import catalog
+import devlog
 from db import (
     APP_NAME, DB_PATH, SESSIONS_DIR,
     init_db, scan_existing_files,
@@ -43,6 +44,7 @@ from db import (
     get_media_stats, get_media_titles, get_series_data, get_extra_stats, get_range_extra_stats,
     db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
+    db_get_dev_notes, db_add_dev_note, db_delete_dev_note, db_set_dev_note_importance,
     _get_aliases, _q, _q1,
     insert_manual_session, create_manual_media, import_csv_file,
     get_total_log_baseline, set_total_log_baseline,
@@ -402,6 +404,38 @@ class Api:
     def delete_category(self, name):
         try:
             db_delete_custom_category(name)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── Dev tab ─────────────────────────────────────────────────────────────────
+    def get_dev_logs(self, after_seq=0):
+        return devlog.get_entries(after_seq)
+
+    def clear_dev_logs(self):
+        devlog.clear()
+        return {"ok": True}
+
+    def get_dev_notes(self):
+        return db_get_dev_notes()
+
+    def add_dev_note(self, body):
+        try:
+            db_add_dev_note(body)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def set_dev_note_importance(self, note_id, importance):
+        try:
+            db_set_dev_note_importance(note_id, importance)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_dev_note(self, note_id):
+        try:
+            db_delete_dev_note(note_id)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -894,6 +928,8 @@ gsm_wal_handler = None  # set in main(); read by Api.save_settings
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
     global gsm_wal_handler
+
+    devlog.install()  # before anything prints — captures stdout/stderr for the Dev tab
 
     # Give Windows an explicit AppUserModelID so the taskbar button is treated
     # as its own app (and uses the window's Konseki icon) instead of being
