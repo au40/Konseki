@@ -1114,6 +1114,40 @@ def get_daily_activity_series(days):
         out.append((d, {k: v for k, v in types.items() if v > 0}))
     return out
 
+def get_daily_reading_speed_basis(days):
+    """Per-day (chars, secs) for reading speed, on the *exact* basis the backend
+    cph uses (get_extra_stats / get_range_extra_stats): Reading sessions with a
+    tracked char count (`chars_read>0 AND time_seconds>0`), with the manual time
+    overlay folded into secs. The Stats-page brush recomputes cph client-side
+    over a sub-window; summing these per-day values and dividing makes it agree
+    with the preset ranges by construction (full span == 'All'), instead of
+    reconstructing it from the daily activity slice — which counts chars-less
+    reading and time_excluded rows on a different basis than the backend and so
+    drifts. Keyed by session_date over the same dense window as
+    get_daily_time_series; returns {date: (chars, secs)}."""
+    if days is None:
+        row = _q1("SELECT MIN(session_date) FROM sessions")
+        if not row or not row[0]:
+            return {}
+        earliest = datetime.strptime(row[0], "%Y-%m-%d").date()
+    else:
+        earliest = get_today_date() - timedelta(days=days - 1)
+    since = earliest.isoformat()
+    rows = _q(
+        "SELECT session_date, COALESCE(SUM(chars_read),0), COALESCE(SUM(time_seconds),0) "
+        "FROM sessions WHERE session_date>=? AND activity_type='Reading' "
+        "AND time_seconds>0 AND chars_read>0 GROUP BY session_date",
+        since
+    )
+    out = {d: [c, s] for d, c, s in rows}
+    # Fold the manual time overlay into secs — same as the backend cph denominator
+    # (_manual_secs_sum). Keyed by display date; over the full span it sums to the
+    # same total the preset uses, so the brush stays exact.
+    for d, secs in get_manual_time_adjusts_by_day().items():
+        if d >= since:
+            out.setdefault(d, [0, 0])[1] += secs
+    return {d: (c, s) for d, (c, s) in out.items()}
+
 def get_activity_breakdown(n=None):
     """Time per activity_type over the range, GSM-attribution-adjusted.
 

@@ -402,6 +402,21 @@ select:focus { border-color: var(--accent); }
   border-right: 4px solid transparent;
   border-bottom: 5px solid #5B8CFF;
 }
+/* Floating hover tooltip for milestone sections on the completion bar.
+   A body-level, position:fixed singleton (the track clips its own overflow,
+   and a native title can't center its text). Positioned in JS. */
+.progress-tip {
+  position: fixed; z-index: 1000; display: none;
+  pointer-events: none;
+  max-width: 240px;
+  padding: 6px 9px;
+  background: var(--card); border: 1px solid var(--grid); border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  text-align: center;
+}
+.progress-tip-name { font-size: 12px; font-weight: 700; color: var(--text); }
+.progress-tip-meta { font-size: 11px; color: var(--dim); margin-top: 2px; }
+.progress-seg { cursor: help; }
 .goal-meta { display: flex; justify-content: space-between; align-items: center; }
 .goal-numbers { font-size: 12px; color: var(--dim); }
 .goal-chars-companion { color: #5B8CFF; }
@@ -648,8 +663,9 @@ select:focus { border-color: var(--accent); }
 
 /* Milestones list (inside media detail hero) */
 .milestones-list {
-  margin-top: 10px; max-height: 130px; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 8px;
+  margin-top: 10px; max-height: 160px; overflow-y: auto;
+  display: grid; grid-auto-flow: column;
+  column-gap: 14px; row-gap: 8px;
   padding: 10px 12px 4px 4px;
 }
 .milestones-list::-webkit-scrollbar { width: 4px; }

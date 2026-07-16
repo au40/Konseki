@@ -199,8 +199,12 @@ async function loadDashboard() {
 
   const todaySec = d.today.reduce((a,r) => a + r.seconds, 0);
   const todayChars = d.today.reduce((a,r) => a+r.chars, 0);
-  const readingSec = d.today.filter(r => r.activity_type === 'Reading').reduce((a,r) => a + r.seconds, 0);
-  const readingChars = d.today.filter(r => r.activity_type === 'Reading').reduce((a,r) => a + r.chars, 0);
+  // Only reading with a tracked char count feeds the day's speed: a chars-less
+  // Reading session (e.g. time-only manual entry) would add time to the
+  // denominator with no chars, dragging cph down. Exclude it from both sides.
+  const readingRows = d.today.filter(r => r.activity_type === 'Reading' && r.chars > 0);
+  const readingSec = readingRows.reduce((a,r) => a + r.seconds, 0);
+  const readingChars = readingRows.reduce((a,r) => a + r.chars, 0);
   const cph = (readingSec > 0 && readingChars > 0) ? Math.round(readingChars / (readingSec / 3600)) : 0;
   document.getElementById('d-time').textContent  = fmtTime(todaySec);
   document.getElementById('d-chars').textContent = fmtChars(todayChars);
@@ -1933,7 +1937,9 @@ function activeDaily() {
     let secs = 0;
     const fbt = {};
     for (const t in bt) if (!excludedTypes.has(t)) { secs += bt[t]; fbt[t] = bt[t]; }
-    return { date: r.date, seconds: secs, chars: readingOut ? 0 : r.chars, by_type: fbt };
+    return { date: r.date, seconds: secs, chars: readingOut ? 0 : r.chars, by_type: fbt,
+             spd_chars: readingOut ? 0 : (r.spd_chars || 0),
+             spd_secs:  readingOut ? 0 : (r.spd_secs  || 0) };
   });
 }
 
@@ -1983,12 +1989,17 @@ function computeBrushView() {
   const { startDay, endDay } = effectiveDayRange();
   const sub = daily.slice(startDay, endDay + 1);
 
-  let secs = 0, chars = 0, readSecs = 0, active = 0, bestDay = null;
+  let secs = 0, chars = 0, spdChars = 0, spdSecs = 0, active = 0, bestDay = null;
   const byTypeTotals = {};
   sub.forEach(r => {
     secs += r.seconds; chars += r.chars;
     const bt = r.by_type || {};
-    readSecs += (bt['Reading'] || 0);
+    // cph comes from the backend's own per-day speed basis (chars-bearing reading
+    // + manual overlay, from get_daily_reading_speed_basis), not reconstructed
+    // from the activity slice — so a full-span brush equals the 'All' preset and
+    // chars-less / time_excluded rows can't skew it.
+    spdChars += (r.spd_chars || 0);
+    spdSecs  += (r.spd_secs  || 0);
     for (const t in bt) byTypeTotals[t] = (byTypeTotals[t] || 0) + bt[t];
     if (r.seconds > 0) active++;
     if (!bestDay || r.seconds > bestDay.secs) bestDay = { secs: r.seconds, date: r.date };
@@ -2019,8 +2030,10 @@ function computeBrushView() {
   }
 
   const windowDays = sub.length;
-  const denomSecs  = readSecs > 0 ? readSecs : secs;       // Reading time, like the backend cph
-  const cph = (chars > 0 && denomSecs > 0) ? Math.round(chars / (denomSecs / 3600)) : 0;
+  const denomSecs  = Math.max(0, spdSecs);                 // clamp like the backend (raw + manual)
+  // floor, not round — matches the backend's int() truncation so a full-span
+  // brush shows the identical number as the 'All' preset (no off-by-one).
+  const cph = (spdChars > 0 && denomSecs > 0) ? Math.floor(spdChars / (denomSecs / 3600)) : 0;
   const activity = Object.keys(byTypeTotals)
     .map(t => ({ type: t, seconds: byTypeTotals[t] }))
     .filter(a => a.seconds > 0)
@@ -3331,6 +3344,7 @@ function renderMediaDetail(d) {
   const track  = document.getElementById('detail-progress-track');
   // Clear any segments/ticks injected on a previous render.
   track.querySelectorAll('.progress-seg, .progress-tick').forEach(n => n.remove());
+  hideProgressTip();   // a segment could be removed mid-hover
   if (d.game_char_count > 0) {
     const gcc = d.game_char_count;
     const pct = Math.min(100, d.total_chars / gcc * 100);
@@ -3374,7 +3388,14 @@ function renderMediaDetail(d) {
         seg.style.left = `${l}%`;
         seg.style.width = `${r - l}%`;
         seg.style.background = m.color || color;
-        seg.title = m.name;
+        // Custom hover: milestone name (centered) above the same compact
+        // "time · chars · speed · %" summary the milestone list rows show
+        // (fmtMilestoneTotals). Native `title` can't center its text, so we
+        // drive a small floating tooltip instead.
+        const segName = m.name;
+        const segMeta = fmtMilestoneTotals(m, gcc);
+        seg.addEventListener('mouseenter', () => showProgressTip(seg, segName, segMeta));
+        seg.addEventListener('mouseleave', hideProgressTip);
         track.appendChild(seg);
       }
       [l, r].forEach(p => { if (p > 0.05 && p < 99.95) ticks.add(p.toFixed(3)); });
@@ -3403,8 +3424,8 @@ function renderMediaDetail(d) {
   const milesEl    = document.getElementById('detail-milestones');
   if (currentMilestones.length > 0) {
     descEl.style.display  = 'none';
-    milesEl.style.display = 'flex';
-    renderMilestonesList(milesEl, currentMilestones);
+    milesEl.style.display = 'grid';   // must match .milestones-list; inline wins over CSS
+    renderMilestonesList(milesEl, currentMilestones, d.game_char_count);
   } else if (d.description) {
     descEl.textContent    = d.description;
     descEl.style.display  = 'block';
@@ -4331,15 +4352,61 @@ async function init() {
   maybeShowFirstRunModal();
 }
 
+// Floating hover tooltip for milestone sections on the completion progress bar.
+// One body-level position:fixed element reused across segments — the track
+// clips its own overflow and a native `title` can't center its text. Content
+// is the milestone name (centered) over its fmtMilestoneTotals summary.
+function _progressTipEl() {
+  let tip = document.getElementById('progress-tip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'progress-tip';
+    tip.className = 'progress-tip';
+    tip.setAttribute('role', 'tooltip');
+    document.body.appendChild(tip);
+  }
+  return tip;
+}
+
+function showProgressTip(seg, name, meta) {
+  const tip = _progressTipEl();
+  tip.innerHTML =
+    `<div class="progress-tip-name">${escHtml(name)}</div>` +
+    (meta ? `<div class="progress-tip-meta">${escHtml(meta)}</div>` : '');
+  tip.style.display = 'block';
+  // Measure once visible, then center over the segment and sit just above it,
+  // flipping below and clamping to the viewport when there's no room.
+  const r  = seg.getBoundingClientRect();
+  const tr = tip.getBoundingClientRect();
+  let left = r.left + r.width / 2 - tr.width / 2;
+  left = Math.max(4, Math.min(left, window.innerWidth - tr.width - 4));
+  let top = r.top - tr.height - 6;
+  if (top < 4) top = r.bottom + 6;
+  tip.style.left = `${left}px`;
+  tip.style.top  = `${top}px`;
+}
+
+function hideProgressTip() {
+  const tip = document.getElementById('progress-tip');
+  if (tip) tip.style.display = 'none';
+}
+
 // ── Milestones ─────────────────────────────────────────────────────────────
-function fmtMilestoneTotals(m) {
-  // Compact "1h 30m · 1,200 chars · 800/h" summary for the row meta line.
+function fmtMilestoneTotals(m, gcc) {
+  // Compact "1h 30m · 1,200 chars · 800/h · 33%" summary for the row meta line.
   const parts = [];
   if (m.total_secs > 0) parts.push(fmtTime(m.total_secs));
   if (m.total_chars > 0) parts.push(`${fmtChars(m.total_chars)} chars`);
   if (m.total_secs > 60 && m.total_chars > 0) {
     const speed = Math.round(m.total_chars / (m.total_secs / 3600));
     if (speed > 0) parts.push(`${fmtChars(speed)}/h`);
+  }
+  // When a completion progress bar exists (GSM titles with a known game length),
+  // append the share of that bar this milestone spans — same start_chars→end_chars
+  // range that draws its tinted section on the bar.
+  if (gcc > 0 && m.start_chars != null && m.end_chars != null) {
+    const span = Math.max(0, (m.end_chars - m.start_chars) / gcc * 100);
+    if (span > 0) parts.push(`${span.toFixed(1).replace(/\.0$/, '')}%`);
   }
   return parts.join(' · ') || '—';
 }
@@ -4356,8 +4423,15 @@ function fmtMediaMemberMeta(d) {
   return parts.join(' · ');
 }
 
-function renderMilestonesList(el, milestones) {
+function renderMilestonesList(el, milestones, gcc) {
   el.innerHTML = '';
+  // Fill a 2-column grid column-major (down then across): 1 3 / 2 4. Rows are
+  // fixed at ceil(n/2) so grid-auto-flow:column wraps after the first column.
+  // A single milestone stays full-width rather than sitting in a half column.
+  const n = milestones.length;
+  const cols = n > 1 ? 2 : 1;
+  el.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
+  el.style.gridTemplateRows    = `repeat(${Math.ceil(n / cols) || 1}, auto)`;
   milestones.forEach((m, idx) => {
     const row = document.createElement('div');
     row.className = 'milestone-row';
@@ -4369,7 +4443,7 @@ function renderMilestonesList(el, milestones) {
       <span class="milestone-swatch" style="background:${m.color || '#6E92E0'}"></span>
       <div class="milestone-main">
         <span class="milestone-name">${escHtml(m.name)}</span>
-        <span class="milestone-meta">${escHtml(fmtMilestoneTotals(m))}</span>
+        <span class="milestone-meta">${escHtml(fmtMilestoneTotals(m, gcc))}</span>
       </div>
       <button class="btn btn-xs btn-danger" title="Delete milestone">✕</button>
     `;
@@ -4881,12 +4955,15 @@ function portalAttachZoom(chartKey, canvasId) {
 
 async function openStatPortal() {
   showMediaView('portal');                        // visibility FIRST
-  if (!mediaAllData.length) {
-    [mediaAllData, seriesData] = await Promise.all([
-      window.pywebview.api.get_media(), window.pywebview.api.get_series(),
-    ]);
-  }
+  // Always pull fresh media/series and drop the per-title compare cache so the
+  // portal reflects reading done since it was last opened. It used to reuse
+  // whatever landed in portalDataCache on first open (and only fetched media
+  // when empty), so it appeared frozen in time until the app restarted.
+  [mediaAllData, seriesData] = await Promise.all([
+    window.pywebview.api.get_media(), window.pywebview.api.get_series(),
+  ]);
   seriesData = seriesData || [];
+  portalDataCache = {};
   const entries = portalEntries();
   if (!portalSelected.size) {                      // first open: preselect top 5 by time
     entries.slice(0, 5).forEach(e => { portalSelected.add(e.key); portalColorFor(e.key); });
