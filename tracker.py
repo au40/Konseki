@@ -366,16 +366,16 @@ class Api:
     def get_goals(self):
         return db_get_goal_progress()
 
-    def add_goal(self, label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False):
+    def add_goal(self, label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False, start_date=None):
         try:
-            db_add_goal(label, metric, float(target), deadline, chunk_period, activity_type, track_chars)
+            db_add_goal(label, metric, float(target), deadline, chunk_period, activity_type, track_chars, start_date)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def update_goal(self, goal_id, label, target, deadline, activity_type=None, track_chars=False):
+    def update_goal(self, goal_id, label, target, deadline, activity_type=None, track_chars=False, start_date=None):
         try:
-            db_update_goal(goal_id, label, float(target), deadline, activity_type, track_chars)
+            db_update_goal(goal_id, label, float(target), deadline, activity_type, track_chars, start_date)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}

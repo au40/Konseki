@@ -350,7 +350,7 @@
             </select>
           </div>
           <div class="form-group" style="margin-bottom:0">
-            <label id="goal-target-label">Target (hours)</label>
+            <label id="goal-target-label">Target (hours/day)</label>
             <input type="number" id="goal-target" min="0.1" step="0.5">
           </div>
           <div class="form-group" style="margin-bottom:0">
@@ -358,7 +358,7 @@
             <input type="text" id="goal-deadline">
           </div>
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px">
           <div class="form-group" style="margin-bottom:0">
             <label>Pace</label>
             <select id="goal-chunk" onchange="updateGoalUnit()">
@@ -371,6 +371,10 @@
           <div class="form-group" style="margin-bottom:0">
             <label>Activity filter (optional)</label>
             <select id="goal-activity"><option value="">All activities</option></select>
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>Start date (optional)</label>
+            <input type="text" id="goal-start" placeholder="today">
           </div>
         </div>
         <div class="feedback" id="goal-feedback"></div>

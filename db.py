@@ -6,6 +6,7 @@ All schema setup, settings helpers, ingestion, and query functions.
 import sqlite3
 import json
 import csv
+import math
 import os
 import re
 from datetime import datetime, date, timedelta
@@ -1575,28 +1576,42 @@ def db_get_goals():
         for r in rows
     ]
 
-def db_add_goal(label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False):
+def _valid_goal_start(start_date, deadline):
+    """Normalize an optional backdated start: empty → today, else validate
+    YYYY-MM-DD and require it not after the deadline (ISO strings compare)."""
+    start = (start_date or "").strip()
+    if not start:
+        return get_today()
+    datetime.strptime(start, "%Y-%m-%d")
+    if start > deadline:
+        raise ValueError("Start date must be on or before the deadline")
+    return start
+
+def db_add_goal(label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False, start_date=None):
     if metric not in SAFE_METRICS:
         raise ValueError(f"Invalid metric: {metric}")
+    start = _valid_goal_start(start_date, deadline)
     con = sqlite3.connect(DB_PATH)
     con.execute(
         "INSERT INTO goals "
         "(label,metric,target_value,deadline,chunk_period,activity_type,start_date,created_at,track_chars) "
         "VALUES (?,?,?,?,?,?,?,?,?)",
         (label, metric, float(target), deadline, chunk_period,
-         activity_type or None, get_today(), datetime.now().isoformat(),
+         activity_type or None, start, datetime.now().isoformat(),
          1 if track_chars else 0)
     )
     con.commit()
     con.close()
 
-def db_update_goal(goal_id, label, target, deadline, activity_type, track_chars=False):
+def db_update_goal(goal_id, label, target, deadline, activity_type, track_chars=False, start_date=None):
+    sets   = "label=?, target_value=?, deadline=?, activity_type=?, track_chars=?"
+    params = [label, float(target), deadline, activity_type or None, 1 if track_chars else 0]
+    if start_date:
+        sets += ", start_date=?"
+        params.append(_valid_goal_start(start_date, deadline))
+    params.append(int(goal_id))
     con = sqlite3.connect(DB_PATH)
-    con.execute(
-        "UPDATE goals SET label=?, target_value=?, deadline=?, activity_type=?, track_chars=? WHERE id=?",
-        (label, float(target), deadline, activity_type or None,
-         1 if track_chars else 0, int(goal_id))
-    )
+    con.execute(f"UPDATE goals SET {sets} WHERE id=?", params)
     con.commit()
     con.close()
 
@@ -1757,6 +1772,21 @@ def db_get_goal_progress():
             original_chunk = g["target"] / total_months
             chunk_needed   = remaining / months_left if months_left > 0 else 0.0
 
+        # Projected finish date at the observed average pace (completed ÷ days
+        # elapsed since start, today inclusive). ceil(target/pace) is the
+        # 1-based day index on which the cumulative total reaches the target,
+        # so start + (that − 1) days is the projected date. Only meaningful
+        # while the goal is live (past-deadline goals stop counting) and has
+        # any progress to extrapolate from.
+        projected_end        = None
+        projected_days_delta = None
+        if remaining > 0 and completed > 0 and start_d <= today_d <= deadline_d:
+            pace = completed / max(1, (today_d - start_d).days + 1)
+            if pace > 0:
+                proj_d = start_d + timedelta(days=math.ceil(g["target"] / pace) - 1)
+                projected_end        = proj_d.strftime("%Y-%m-%d")
+                projected_days_delta = (proj_d - deadline_d).days
+
         results.append({
             **g,
             "completed":       completed,
@@ -1777,6 +1807,8 @@ def db_get_goal_progress():
             "chars_today":       chars_today,
             "chars_week":        chars_week,
             "chars_month":       chars_month,
+            "projected_end":        projected_end,
+            "projected_days_delta": projected_days_delta,
             "is_complete":     completed >= g["target"],
             "is_overdue":      days_left == 0 and completed < g["target"],
         })

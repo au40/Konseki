@@ -2359,6 +2359,7 @@ async function loadGoals() {
   document.getElementById('goal-label').value    = '';
   document.getElementById('goal-target').value   = '';
   document.getElementById('goal-deadline').value = '';
+  document.getElementById('goal-start').value    = '';
   await populateGoalActivitySelect();
   const goals = await window.pywebview.api.get_goals();
   goals.forEach(g => { goalDataCache[g.id] = g; });
@@ -2529,6 +2530,15 @@ function makeGoalCard(g) {
     chunkHtml = `<div class="goal-chunk" style="color:#FF6B6B">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
   }
 
+  let projHtml = '';
+  if (g.projected_end && !g.is_complete && !g.is_overdue) {
+    const delta = g.projected_days_delta || 0;
+    const late  = delta > 0;
+    const color = late ? '#FF9F5B' : delta < 0 ? '#4ECBA0' : 'var(--dim)';
+    const deltaTxt = delta === 0 ? 'on time' : `${Math.abs(delta)}d ${late ? 'late' : 'early'}`;
+    projHtml = `<span style="font-size:10px;color:${color}" title="Finish date extrapolated from your average pace since the goal started">projected finish: ${g.projected_end} (${deltaTxt})</span>`;
+  }
+
   const actLabel = g.activity_type ? ` · ${g.activity_type}` : '';
   const charsLabel = g.track_chars
     ? ` · <span class="goal-chars-companion">${fmtChars(Math.round(g.chars_completed || 0))} chars</span>`
@@ -2573,7 +2583,10 @@ function makeGoalCard(g) {
     ${chunkHtml}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
       <div style="font-size:10px;color:var(--muted)">deadline: ${g.deadline} · started: ${g.start_date}</div>
-      <button class="btn btn-xs" style="background:none;border:none;color:var(--dim);font-size:11px;padding:0 2px;cursor:pointer;opacity:0.55" title="Edit goal" onclick="openGoalEdit(${g.id})">✎</button>
+      <div style="display:flex;align-items:center;gap:8px">
+        ${projHtml}
+        <button class="btn btn-xs" style="background:none;border:none;color:var(--dim);font-size:11px;padding:0 2px;cursor:pointer;opacity:0.55" title="Edit goal" onclick="openGoalEdit(${g.id})">✎</button>
+      </div>
     </div>`;
   return el;
 }
@@ -2593,6 +2606,9 @@ function _resetGoalFormMode() {
   document.getElementById('goal-chunk').disabled   = false;
   document.getElementById('goal-add-btn').textContent = 'Add goal';
   document.getElementById('goal-feedback').textContent = '';
+  // Re-derive the target label: it's otherwise only updated onchange, so a
+  // freshly opened form kept the static HTML label (or a stale edit-mode one).
+  updateGoalUnit();
 }
 
 async function openGoalEdit(id) {
@@ -2609,6 +2625,7 @@ async function openGoalEdit(id) {
   document.getElementById('goal-chunk').value    = g.chunk_period || 'none';
   document.getElementById('goal-chunk').disabled  = true;
   document.getElementById('goal-activity').value  = g.activity_type || '';
+  document.getElementById('goal-start').value     = g.start_date || '';
   document.getElementById('goal-feedback').textContent = '';
   document.getElementById('goal-add-btn').textContent  = 'Save changes';
   updateGoalUnit();
@@ -2627,6 +2644,7 @@ async function doAddGoal() {
   const deadline    = document.getElementById('goal-deadline').value.trim();
   const chunkPeriod = document.getElementById('goal-chunk').value;
   const atype       = document.getElementById('goal-activity').value || null;
+  const startVal    = document.getElementById('goal-start').value.trim();
   const fb          = document.getElementById('goal-feedback');
 
   if (!label) {
@@ -2641,28 +2659,41 @@ async function doAddGoal() {
   if (editingGoalId === null && deadline <= today()) {
     fb.className = 'feedback err'; fb.textContent = 'Deadline must be a future date.'; return;
   }
+  if (startVal && !/^\d{4}-\d{2}-\d{2}$/.test(startVal)) {
+    fb.className = 'feedback err'; fb.textContent = 'Start date must be YYYY-MM-DD.'; return;
+  }
+  if (startVal && startVal > today()) {
+    fb.className = 'feedback err'; fb.textContent = 'Start date cannot be in the future.'; return;
+  }
+  if (startVal && startVal >= deadline) {
+    fb.className = 'feedback err'; fb.textContent = 'Start date must be before the deadline.'; return;
+  }
 
   let target = metric === 'time_seconds' ? rawTarget * 3600 : rawTarget;
 
   let r;
   if (editingGoalId !== null) {
-    r = await window.pywebview.api.update_goal(editingGoalId, label, target, deadline, atype, trackChars);
+    r = await window.pywebview.api.update_goal(editingGoalId, label, target, deadline, atype, trackChars, startVal || null);
   } else {
     if (chunkPeriod !== 'none') {
-      const daysUntil = Math.round((new Date(deadline) - new Date(today())) / 86400000);
+      // Pace targets cover the whole goal window, so a backdated start
+      // multiplies the per-period amount over the extra elapsed days too
+      // (matches total_days = deadline − start in db_get_goal_progress).
+      const daysUntil = Math.round((new Date(deadline) - new Date(startVal || today())) / 86400000);
       const periods   = chunkPeriod === 'weekly' ? Math.ceil(daysUntil / 7) : chunkPeriod === 'monthly' ? Math.ceil(daysUntil / 30.44) : daysUntil;
       if (periods < 1) {
         fb.className = 'feedback err'; fb.textContent = 'Deadline is too soon for that pace.'; return;
       }
       target *= periods;
     }
-    r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype, trackChars);
+    r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype, trackChars, startVal || null);
   }
 
   if (r.ok) {
     document.getElementById('goal-label').value    = '';
     document.getElementById('goal-target').value   = '';
     document.getElementById('goal-deadline').value = '';
+    document.getElementById('goal-start').value    = '';
     setGoalPanelMode('default');
     statsCache = {};
     await loadGoals();
@@ -4398,6 +4429,11 @@ async function init() {
   flatpickr('#goal-deadline', {
     dateFormat:    'Y-m-d',
     minDate:       'today',
+    disableMobile: true,
+  });
+  flatpickr('#goal-start', {
+    dateFormat:    'Y-m-d',
+    maxDate:       'today',
     disableMobile: true,
   });
 
