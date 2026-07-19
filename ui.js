@@ -131,6 +131,13 @@ function srcLabel(s) {
   return {gsm:'Game',anki:'Anki',ttu:'Book',ttsureader:'Book',manual:'Manual',manual_media:'Manual',csv:'Import'}[s?.toLowerCase()] || (s||'').toUpperCase();
 }
 function acolor(t) { return ACOLORS[t] || '#6B6B8A'; }
+function mediaNoun(d) {
+  // What kind of media a detail entry is, for the completion controls
+  // ("Complete game" vs "Complete book" ...).
+  if (d.source === 'gsm') return 'game';
+  if (d.source === 'ttu' || d.source === 'ttsureader' || d.activity_type === 'Reading') return 'book';
+  return 'media';
+}
 function setStatus(msg) { document.getElementById('status').textContent = msg; }
 
 function today() {
@@ -2876,6 +2883,9 @@ function makeMediaCard(m) {
         <div class="media-placeholder-initial">${initial}</div>
       </div>`;
   }
+  if (m.completed) {
+    innerHTML += `<div class="media-card-complete" title="Completed">✓</div>`;
+  }
   innerHTML += `
     <div class="media-card-footer">
       <div class="media-card-title">${escHtml(m.display_title || m.title || m.activity_type || 'Untitled')}</div>
@@ -3337,22 +3347,40 @@ function renderMediaDetail(d) {
     genresEl.innerHTML = `<span class="genre-badge" style="color:${color};border-color:${color}44">${d.activity_type}</span>`;
   }
 
-  // Completion progress bar: chars read / total game length. GSM titles only —
-  // game_char_count is 0 for non-GSM titles and for games GSM hasn't fetched a
-  // length for yet, in which case we hide the bar.
+  // Completion progress bar: chars read / total length. The denominator is
+  // GSM's game length or, for media GSM has no length for (books, manual
+  // media), a user-entered total from the "Add progress bar" modal — the
+  // user's value wins when both exist. Hidden when neither is known.
+  // A user-marked completion ("Complete game/book") pins the bar at 100%: the
+  // effective length becomes the chars actually read, so the fill, milestone
+  // section positions, and milestone list percentages all re-derive against
+  // the finished total instead of the length estimate.
+  const completed = !!d.completed;
+  const baseLen = d.user_char_count > 0 ? d.user_char_count : d.game_char_count;
+  const gcc = completed && d.total_chars > 0 ? d.total_chars : baseLen;
   const progEl = document.getElementById('detail-progress');
   const track  = document.getElementById('detail-progress-track');
   // Clear any segments/ticks injected on a previous render.
   track.querySelectorAll('.progress-seg, .progress-tick').forEach(n => n.remove());
   hideProgressTip();   // a segment could be removed mid-hover
-  if (d.game_char_count > 0) {
-    const gcc = d.game_char_count;
+  if (gcc > 0) {
     const pct = Math.min(100, d.total_chars / gcc * 100);
     // 1-decimal, trailing zero dropped (matches goal-card % formatting).
     const pctDisp = pct.toFixed(1).replace(/\.0$/, '');
     document.getElementById('detail-progress-pct').textContent = `${pctDisp}%`;
     document.getElementById('detail-progress-counts').textContent =
-      `${fmtChars(d.total_chars)} / ${fmtChars(d.game_char_count)} chars`;
+      `${fmtChars(d.total_chars)} / ${fmtChars(gcc)} chars`;
+    // ✎ next to the counts: edit/remove a user-entered length. GSM-provided
+    // lengths aren't editable, and while completed the denominator is the
+    // chars read, so editing would have no visible effect — hide it there too.
+    const lenEditBtn = document.getElementById('detail-progress-edit');
+    if (d.user_char_count > 0 && !completed) {
+      lenEditBtn.style.display = 'inline';
+      lenEditBtn.onclick = () => openMediaLengthModal(d);
+    } else {
+      lenEditBtn.style.display = 'none';
+      lenEditBtn.onclick = null;
+    }
     const fill = document.getElementById('detail-progress-fill');
     fill.style.width = `${pct}%`;
     fill.style.background = color;
@@ -3362,7 +3390,11 @@ function renderMediaDetail(d) {
     const etaEl     = document.getElementById('detail-progress-eta');
     const remaining = gcc - d.total_chars;
     const spd       = recentSpeed(d.daily, 7);
-    if (remaining <= 0) {
+    etaEl.classList.toggle('completed', completed);
+    if (completed) {
+      etaEl.textContent = 'Completed ✓';
+      etaEl.title = d.completed_at ? `Marked complete on ${d.completed_at.slice(0, 10)}` : '';
+    } else if (remaining <= 0) {
       etaEl.textContent = 'Complete';
       etaEl.title = '';
     } else if (spd > 0) {
@@ -3412,6 +3444,30 @@ function renderMediaDetail(d) {
     progEl.style.display = 'none';
   }
 
+  // Top-right action (back-nav row): "Complete <noun>" toggle when a bar
+  // exists, or "Add progress bar" (enter a total char count) when it doesn't.
+  // Completing asks for confirmation (it repins the bar); un-completing is
+  // the one-click undo of that same display flag. Chars-less media (anime,
+  // listening) gets neither — a chars-denominated bar is meaningless there.
+  const compBtn = document.getElementById('detail-complete-btn');
+  const noun = mediaNoun(d);
+  if (gcc > 0) {
+    compBtn.style.display = 'inline-flex';
+    compBtn.textContent = completed ? '↺ Mark incomplete' : `✓ Complete ${noun}`;
+    compBtn.title = completed
+      ? `Clear the completed mark and go back to the ${noun}'s full length`
+      : `Mark this ${noun} finished: the bar fills to 100%`;
+    compBtn.onclick = () => onCompleteMediaToggle(d, !completed);
+  } else if (d.total_chars > 0) {
+    compBtn.style.display = 'inline-flex';
+    compBtn.textContent = '+ Add progress bar';
+    compBtn.title = `Enter the ${noun}'s total character count to track completion`;
+    compBtn.onclick = () => openMediaLengthModal(d);
+  } else {
+    compBtn.style.display = 'none';
+    compBtn.onclick = null;
+  }
+
   // Milestones replace the description when present; otherwise description shows.
   currentMilestones = d.milestones || [];
 
@@ -3425,7 +3481,7 @@ function renderMediaDetail(d) {
   if (currentMilestones.length > 0) {
     descEl.style.display  = 'none';
     milesEl.style.display = 'grid';   // must match .milestones-list; inline wins over CSS
-    renderMilestonesList(milesEl, currentMilestones, d.game_char_count);
+    renderMilestonesList(milesEl, currentMilestones, gcc);
   } else if (d.description) {
     descEl.textContent    = d.description;
     descEl.style.display  = 'block';
@@ -4492,6 +4548,73 @@ function renderMilestonesList(el, milestones, gcc) {
 
     el.appendChild(row);
   });
+}
+
+async function onCompleteMediaToggle(d, complete) {
+  if (complete) {
+    const disp = d.display_title || d.title;
+    const ok = await showConfirm(
+      `Mark this ${mediaNoun(d)} ("${disp}") as complete? The progress bar will fill to 100% and milestone percentages will be recalculated against the chars you actually read.`,
+      'Complete', '#4ECBA0'
+    );
+    if (!ok) return;
+  }
+  const r = await window.pywebview.api.set_media_complete(d.title, complete);
+  if (!r || !r.ok) { alert((r && r.error) || 'Failed to update completion'); return; }
+  // Keep the cached grid data (and its ✓ badge) in sync without a full reload.
+  if (Array.isArray(mediaAllData)) {
+    const m = mediaAllData.find(x => x.title === d.title);
+    if (m) m.completed = complete;
+    renderMediaGrid();
+  }
+  await refreshCurrentMediaDetail();
+}
+
+// ── Media length (custom progress bar) modal ────────────────────────────────
+// Lets the user punch in a total character count for media GSM has no length
+// for, creating the same completion bar games get. Saving 0 (the Remove-bar
+// button) clears it.
+let _mediaLengthTitle = null;
+
+function openMediaLengthModal(d) {
+  _mediaLengthTitle = d.title;
+  const editing = d.user_char_count > 0;
+  document.getElementById('media-length-title').textContent =
+    editing ? 'Edit progress bar' : 'Add progress bar';
+  document.getElementById('media-length-sub').textContent =
+    `Total character count of this ${mediaNoun(d)}. Progress = chars you've read ÷ this total.`;
+  const input = document.getElementById('media-length-input');
+  input.value = editing ? d.user_char_count : '';
+  document.getElementById('media-length-remove-btn').style.display = editing ? 'inline-flex' : 'none';
+  document.getElementById('media-length-error').style.display = 'none';
+  document.getElementById('media-length-overlay').style.display = 'flex';
+  input.focus();
+}
+
+function closeMediaLengthModal() {
+  document.getElementById('media-length-overlay').style.display = 'none';
+  _mediaLengthTitle = null;
+}
+
+async function submitMediaLength(forceValue) {
+  if (_mediaLengthTitle == null) return;
+  const err = document.getElementById('media-length-error');
+  const n = forceValue !== undefined
+    ? forceValue
+    : Math.round(Number(document.getElementById('media-length-input').value));
+  if (forceValue === undefined && (!Number.isFinite(n) || n <= 0)) {
+    err.textContent = 'Enter a total character count above zero.';
+    err.style.display = 'block';
+    return;
+  }
+  const r = await window.pywebview.api.set_media_char_count(_mediaLengthTitle, n);
+  if (!r || !r.ok) {
+    err.textContent = (r && r.error) || 'Failed to save';
+    err.style.display = 'block';
+    return;
+  }
+  closeMediaLengthModal();
+  await refreshCurrentMediaDetail();
 }
 
 let _pendingDetail = null;

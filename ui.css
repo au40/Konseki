@@ -370,6 +370,14 @@ select:focus { border-color: var(--accent); }
 .detail-progress-counts { font-size: 12px; color: var(--dim); }
 .detail-progress-foot { display: flex; justify-content: flex-end; margin-top: 5px; min-height: 14px; }
 .detail-progress-eta { font-size: 11px; color: var(--dim); cursor: default; }
+.detail-progress-eta.completed { color: var(--success); font-weight: 600; }
+.detail-progress-counts-wrap { display: inline-flex; align-items: baseline; gap: 6px; }
+/* ✎ on the counts line — only shown for user-entered (non-GSM) bar lengths */
+.progress-edit-btn {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--dim); font-size: 11px; line-height: 1; font-family: inherit;
+}
+.progress-edit-btn:hover { color: var(--text); }
 .progress-track {
   position: relative;
   height: 8px; background: var(--inset); border-radius: 4px; overflow: hidden;
@@ -575,6 +583,17 @@ select:focus { border-color: var(--accent); }
   opacity: 0.3; cursor: default;
 }
 
+/* Completed-media checkmark badge (top-right corner of the card) */
+.media-card-complete {
+  position: absolute; top: 6px; right: 6px; z-index: 1;
+  width: 20px; height: 20px; border-radius: 50%;
+  background: var(--success); color: rgba(0,0,0,0.75);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 800; line-height: 1;
+  box-shadow: 0 1px 5px rgba(0,0,0,0.45);
+  pointer-events: none;
+}
+
 /* ── Drag-to-series ──────────────────────────────────────────────────────── */
 .media-card.dragging      { opacity: 0.4; }
 .media-card.series-target { box-shadow: 0 0 0 2px var(--accent), 0 0 18px rgba(91,140,255,0.35); transform: scale(1.04); z-index: 4; }
@@ -725,23 +744,23 @@ select:focus { border-color: var(--accent); }
 }
 .milestone-row:hover .btn-danger { opacity: 1; }
 
-/* Milestone add/edit modal */
-#milestone-overlay {
+/* Milestone add/edit modal (shared with the media-length modal) */
+#milestone-overlay, #media-length-overlay {
   position: fixed; inset: 0; z-index: 1000;
   background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
   display: flex; align-items: center; justify-content: center;
 }
-#milestone-dialog {
+#milestone-dialog, #media-length-dialog {
   width: 380px; max-width: calc(100vw - 40px);
   padding: 24px 24px 20px;
   box-shadow: 0 20px 60px rgba(0,0,0,0.5);
 }
-#milestone-dialog label { display: flex; flex-direction: column; gap: 4px; }
-#milestone-dialog input, #milestone-dialog select {
+#milestone-dialog label, #media-length-dialog label { display: flex; flex-direction: column; gap: 4px; }
+#milestone-dialog input, #milestone-dialog select, #media-length-dialog input {
   background: #141422; border: 1px solid var(--grid); border-radius: 6px;
   padding: 6px 10px; font-size: 13px; color: var(--text); outline: none;
 }
-#milestone-dialog input:focus, #milestone-dialog select:focus {
+#milestone-dialog input:focus, #milestone-dialog select:focus, #media-length-dialog input:focus {
   border-color: var(--accent);
 }
 .series-member-card {

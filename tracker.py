@@ -852,6 +852,22 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    # ── Media completion ──────────────────────────────────────────────────────
+    def set_media_complete(self, title, complete):
+        """Mark a media entry finished (or clear the mark). Display-only flag."""
+        try:
+            return db.db_set_media_complete(title, bool(complete))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def set_media_char_count(self, title, char_count):
+        """Set (or clear, with 0) the user-entered total length in characters
+        that powers a media entry's completion bar."""
+        try:
+            return db.db_set_media_char_count(title, char_count)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # ── Title aliases ──────────────────────────────────────────────────────────
     def set_title_alias(self, original, display):
         """Set or clear a display alias for a title. Pass display='' to clear."""

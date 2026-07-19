@@ -327,6 +327,30 @@ def init_db():
         )
     """)
 
+    # Media entries the user has declared finished ("Complete game"): presence
+    # of a row = complete. Keyed by title like title_aliases/book_covers so it
+    # survives GSM re-ingests (which churn session rows but keep titles). It is
+    # a display-only flag — the completion bar's denominator becomes the chars
+    # actually read instead of GSM's game length, pinning the bar at 100%.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS media_completions (
+            title        TEXT PRIMARY KEY,
+            completed_at TEXT NOT NULL
+        )
+    """)
+
+    # User-entered total length in characters, for media GSM has no length for
+    # (books, manual media) — powers the same completion bar as gsm_games
+    # .char_count. When both exist the user's value wins (it's their
+    # correction). Same title-keyed, display-only pattern as media_completions.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS media_char_counts (
+            title      TEXT PRIMARY KEY,
+            char_count INTEGER NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+
     # Enforce the GSM invariant at the DB level: exactly one GSM session row per
     # (game_id, session_date). The pull path is delete-then-insert and assumes
     # this, but pull_gsm_now() has callers outside the WAL handler's _pull_lock
@@ -1289,10 +1313,12 @@ def get_media_stats():
             COUNT(*)                         AS session_count,
             MAX(s.session_date)              AS last_date,
             MIN(s.session_date)              AS first_date,
-            COALESCE(MAX(b.image_data), MAX(g.image_data)) AS image_data
+            COALESCE(MAX(b.image_data), MAX(g.image_data)) AS image_data,
+            MAX(mc.completed_at)             AS completed_at
         FROM sessions s
         LEFT JOIN gsm_games   g ON s.title = g.game_name
         LEFT JOIN book_covers b ON s.title = b.title
+        LEFT JOIN media_completions mc ON s.title = mc.title
         WHERE s.title IS NOT NULL AND s.title != ''
         GROUP BY s.title
         ORDER BY total_secs DESC
@@ -1311,6 +1337,7 @@ def get_media_stats():
             "last_date":     r[6],
             "first_date":    r[7],
             "image":         r[8] or "",
+            "completed":     bool(r[9]),
         }
         for r in rows
     ]
@@ -1812,6 +1839,43 @@ def db_delete_dev_note(note_id):
     con.close()
 
 
+# ── Media completion ──────────────────────────────────────────────────────────
+def db_set_media_complete(title, complete):
+    """Mark a media entry finished, or clear the mark. Display-only flag: the
+    completion bar pins at 100% (its denominator becomes the chars actually
+    read, so milestone percentages re-derive against the finished total). No
+    session data is touched, so toggling is always safe to undo."""
+    con = sqlite3.connect(DB_PATH)
+    if complete:
+        con.execute(
+            "INSERT OR REPLACE INTO media_completions (title, completed_at) VALUES (?, ?)",
+            (title, datetime.now().isoformat()),
+        )
+    else:
+        con.execute("DELETE FROM media_completions WHERE title=?", (title,))
+    con.commit()
+    con.close()
+    return {"ok": True, "completed": bool(complete)}
+
+
+def db_set_media_char_count(title, char_count):
+    """Set the user-entered total length (chars) powering a media entry's
+    completion bar; <= 0 clears it (removing the bar for non-GSM media).
+    Display-only, like the completion flag — no session data involved."""
+    n = int(char_count or 0)
+    con = sqlite3.connect(DB_PATH)
+    if n > 0:
+        con.execute(
+            "INSERT OR REPLACE INTO media_char_counts (title, char_count, updated_at) VALUES (?, ?, ?)",
+            (title, n, datetime.now().isoformat()),
+        )
+    else:
+        con.execute("DELETE FROM media_char_counts WHERE title=?", (title,))
+    con.commit()
+    con.close()
+    return {"ok": True, "char_count": n}
+
+
 # ── Title detail ──────────────────────────────────────────────────────────────
 def _compute_title_core(title):
     """Inner helper: compute the effective daily history + metadata for a title,
@@ -1946,6 +2010,9 @@ def _compute_title_core(title):
             "sentences": int(v["sentences"]),
         })
 
+    completion = _q1("SELECT completed_at FROM media_completions WHERE title=?", title)
+    user_cc    = _q1("SELECT char_count FROM media_char_counts WHERE title=?", title)
+
     total_chars = sum(d["chars"]   for d in daily)
     total_secs  = sum(d["seconds"] for d in daily)
     avg_speed   = (total_chars / (total_secs / 3600)) if total_secs > 0 and total_chars > 0 else 0
@@ -1972,6 +2039,9 @@ def _compute_title_core(title):
         "genres":        game_meta["genres"] if game_meta else [],
         "game_id":       game_meta["game_id"] if game_meta else None,
         "game_char_count": game_meta.get("char_count", 0) if game_meta else 0,
+        "user_char_count": int(user_cc[0]) if user_cc else 0,
+        "completed":     bool(completion),
+        "completed_at":  completion[0] if completion else "",
     }
 
 
