@@ -100,6 +100,13 @@ function fmtTime(s) {
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
+// Axis-tick formatter for the cumulative-hours axis: whole hours read as
+// "60h"; sub-hour ticks (only reachable on tiny ranges) as "30m" / "1h 30m".
+function fmtHourTick(h) {
+  const m = Math.round(h * 60);
+  if (m % 60 === 0) return `${m / 60}h`;
+  return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${m % 60}m`;
+}
 function fmtChars(n) {
   if (n >= 1_000_000) return `${(n/1_000_000).toFixed(2)} mil`;
   if (n >= 1000)      return `${(n/1000).toFixed(1)}k`;
@@ -1778,9 +1785,16 @@ function renderDailyChart(daily) {
     : [{ label: 'Time', data: values, backgroundColor: '#5B8CFF',
          borderRadius: 3, borderSkipped: false }];
 
+  let cumStepH = 1;
   if (cum) {
     let run = 0;
     const cumVals = values.map(v => (run += v, run));
+    // The cumulative axis ticks at whole hours: pick a "nice" hour step sized
+    // to the running total (~5 ticks). Sub-hour steps exist only so a range
+    // totalling under ~2h doesn't collapse to a single 0h/1h pair of ticks.
+    const maxH = (cumVals[cumVals.length - 1] || 0) * (isHours ? 1 : 1 / 60);
+    cumStepH = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
+      .find(s => s >= maxH / 5) || Math.ceil(maxH / 5 / 1000) * 1000;
     datasets.push({
       label: 'Cumulative', data: cumVals, type: 'line',
       borderColor: '#4ECBA0', backgroundColor: 'rgba(78,203,160,0.08)',
@@ -1813,7 +1827,9 @@ function renderDailyChart(daily) {
       scales: {
         x: { stacked: splitByActivity, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
         y: { stacked: splitByActivity, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
-        ...(cum ? {y2:{position:'right',grid:{display:false},ticks:{color:'#4ECBA0',callback:v=>fmt(v)}}} : {})
+        ...(cum ? {y2:{position:'right',grid:{display:false},
+          ticks:{color:'#4ECBA0', stepSize: cumStepH * (isHours ? 1 : 60),
+                 callback: v => fmtHourTick(isHours ? v : v / 60)}}} : {})
       }
     }
   });
