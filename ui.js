@@ -921,6 +921,21 @@ async function submitLogEdit() {
 // whose dropdown picks up the new title automatically.
 let selectedAddMediaAtype = 'Reading';
 let addMediaCoverFile     = null;
+let selectedAddEpubAtype  = 'Reading';
+let addEpubMeta           = null;   // extract_epub_meta result for the pending import
+
+function switchAddMediaTab(name) {
+  document.querySelectorAll('#add-media-seg .seg-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === name));
+  document.getElementById('add-media-pane-manual').style.display = name === 'manual' ? '' : 'none';
+  document.getElementById('add-media-pane-epub').style.display   = name === 'epub'   ? '' : 'none';
+}
+
+// "Characters read" only makes sense for a Reading initial session (mirrors the
+// Manual tab). Hidden for other activity types.
+function toggleAddEpubReadingFields(isReading) {
+  document.getElementById('add-epub-chars-read-group').style.display = isReading ? '' : 'none';
+}
 
 function toggleAddMediaReadingFields(isReading) {
   document.getElementById('add-media-chars-group').style.display = isReading ? '' : 'none';
@@ -971,6 +986,11 @@ async function openAddMediaModal() {
     document.getElementById('add-media-atype-pills'), allTypes, allColors,
     () => selectedAddMediaAtype,
     t => { selectedAddMediaAtype = t; toggleAddMediaReadingFields(t === 'Reading'); });
+  selectedAddEpubAtype = 'Reading';
+  renderAtypePills(
+    document.getElementById('add-epub-atype-pills'), allTypes, allColors,
+    () => selectedAddEpubAtype,
+    t => { selectedAddEpubAtype = t; toggleAddEpubReadingFields(t === 'Reading'); });
 
   document.getElementById('add-media-title').value   = '';
   document.getElementById('add-media-minutes').value = '';
@@ -981,10 +1001,26 @@ async function openAddMediaModal() {
   document.getElementById('add-media-feedback').className      = 'feedback';
   toggleAddMediaReadingFields(true);
 
-  const dp = document.getElementById('add-media-date')._flatpickr;
-  if (dp) dp.setDate(today(), false);
-  else    document.getElementById('add-media-date').value = today();
+  // Reset the Epub-import tab to its pre-selection state.
+  addEpubMeta = null;
+  document.getElementById('add-epub-file-name').textContent = '';
+  document.getElementById('add-epub-details').style.display  = 'none';
+  document.getElementById('add-epub-submit').disabled        = true;
+  document.getElementById('add-epub-title').value      = '';
+  document.getElementById('add-epub-chars').value      = '';
+  document.getElementById('add-epub-minutes').value    = '';
+  document.getElementById('add-epub-chars-read').value = '';
+  document.getElementById('add-epub-feedback').textContent = '';
+  document.getElementById('add-epub-feedback').className   = 'feedback';
+  toggleAddEpubReadingFields(true);
 
+  for (const id of ['add-media-date', 'add-epub-date']) {
+    const dp = document.getElementById(id)._flatpickr;
+    if (dp) dp.setDate(today(), false);
+    else    document.getElementById(id).value = today();
+  }
+
+  switchAddMediaTab('manual');
   document.getElementById('add-media-overlay').style.display = 'flex';
 }
 
@@ -1026,6 +1062,99 @@ async function submitAddMedia() {
   closeAddMediaModal();
   statsCache = {};
   setStatus('Media added');
+  loadMedia();
+}
+
+// ── Add media via EPUB ───────────────────────────────────────────────────────
+// The "Epub import" tab of the Add-media modal. Reuses the same EPUB extraction
+// that the cover-box drop uses (imports.extract_epub), but here it creates a
+// *new* media entry: it prefills the title, cover and length for the user to
+// adjust, then on confirm writes a seed session + the progress-bar length + the
+// cover. See add_media_epub in tracker.py.
+function pickEpubImportFile() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.epub,application/epub+zip';
+  input.onchange = () => { if (input.files[0]) loadEpubForImport(input.files[0]); };
+  input.click();
+}
+
+async function loadEpubForImport(file) {
+  const fb   = document.getElementById('add-epub-feedback');
+  document.getElementById('add-epub-file-name').textContent = file.name;
+  fb.className = 'feedback'; fb.textContent = 'Reading EPUB…';
+  let b64;
+  try { b64 = await fileToBase64(file); }
+  catch (err) { fb.className = 'feedback err'; fb.textContent = 'Could not read EPUB file.'; return; }
+
+  const r = await window.pywebview.api.extract_epub_meta(b64);
+  if (!r || !r.ok) {
+    addEpubMeta = null;
+    document.getElementById('add-epub-details').style.display = 'none';
+    document.getElementById('add-epub-submit').disabled = true;
+    fb.className = 'feedback err'; fb.textContent = (r && r.error) || 'Could not read EPUB.';
+    return;
+  }
+  addEpubMeta = r;
+
+  // Prefill everything (all fields stay editable). Fall back to the filename if
+  // the EPUB carries no title in its metadata.
+  document.getElementById('add-epub-title').value = r.title || file.name.replace(/\.epub$/i, '');
+  document.getElementById('add-epub-chars').value = r.char_count > 0 ? r.char_count : '';
+
+  const img  = document.getElementById('add-epub-cover-img');
+  const none = document.getElementById('add-epub-cover-none');
+  if (r.cover_found && r.cover_b64) {
+    img.src = `data:${r.cover_mime || 'image/jpeg'};base64,${r.cover_b64}`;
+    img.style.display = ''; none.style.display = 'none';
+  } else {
+    img.removeAttribute('src'); img.style.display = 'none'; none.style.display = '';
+  }
+
+  document.getElementById('add-epub-details').style.display = '';
+  document.getElementById('add-epub-submit').disabled = false;
+  fb.className = 'feedback'; fb.textContent = '';
+}
+
+async function submitAddMediaEpub() {
+  const fb = document.getElementById('add-epub-feedback');
+  if (!addEpubMeta) {
+    fb.className = 'feedback err'; fb.textContent = 'Choose an .epub file first.'; return;
+  }
+  const title     = document.getElementById('add-epub-title').value.trim();
+  const chars     = document.getElementById('add-epub-chars').value.trim();       // book length
+  const mins      = document.getElementById('add-epub-minutes').value.trim();
+  const charsRead = document.getElementById('add-epub-chars-read').value.trim();  // initial session
+  const dt        = document.getElementById('add-epub-date').value.trim();
+
+  if (!title) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a title.'; return;
+  }
+  if (mins && (isNaN(mins) || Number(mins) < 0)) {
+    fb.className = 'feedback err'; fb.textContent = 'Minutes must be 0 or more.'; return;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dt)) {
+    fb.className = 'feedback err'; fb.textContent = 'Date must be YYYY-MM-DD.'; return;
+  }
+  // Chars read only belong to a real initial session (time > 0); the backend
+  // ignores them otherwise, but flag it here so the user isn't silently dropped.
+  if (charsRead && Number(charsRead) > 0 && !(mins && Number(mins) > 0)) {
+    fb.className = 'feedback err';
+    fb.textContent = 'Enter the time read to log those characters, or clear the characters-read field.';
+    return;
+  }
+
+  const r = await window.pywebview.api.add_media_epub(
+    title, selectedAddEpubAtype, Number(mins || 0), dt,
+    Number(chars || 0), addEpubMeta.cover_b64 || null,
+    selectedAddEpubAtype === 'Reading' ? Number(charsRead || 0) : 0);
+  if (!r || !r.ok) {
+    fb.className = 'feedback err'; fb.textContent = (r && r.error) || 'Something went wrong.'; return;
+  }
+
+  closeAddMediaModal();
+  statsCache = {};
+  setStatus('Media added from EPUB');
   loadMedia();
 }
 
@@ -4501,6 +4630,11 @@ async function init() {
     disableMobile: true,
   });
   flatpickr('#add-media-date', {
+    dateFormat:    'Y-m-d',
+    defaultDate:   today(),
+    disableMobile: true,
+  });
+  flatpickr('#add-epub-date', {
     dateFormat:    'Y-m-d',
     defaultDate:   today(),
     disableMobile: true,

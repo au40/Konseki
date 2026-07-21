@@ -833,6 +833,65 @@ class Api:
         return {"ok": True, "char_count": new_count, "count_set": new_count > 0,
                 "cover_found": cover_found}
 
+    def extract_epub_meta(self, b64_str):
+        """Preview an EPUB for the Add-media 'Epub import' tab: pull its title,
+        length (chars) and cover WITHOUT touching the DB, so the UI can show the
+        values for the user to adjust before committing. Returns
+        {ok, title, char_count, cover_b64, cover_mime, cover_found}."""
+        try:
+            zip_bytes = base64.b64decode(b64_str)
+        except Exception as e:
+            return {"ok": False, "error": f"Could not decode file: {e}"}
+        res = imports.extract_epub(zip_bytes)
+        if not res.get("ok"):
+            return {"ok": False, "error": res.get("error", "Could not read EPUB.")}
+        return {
+            "ok":          True,
+            "title":       res.get("title") or "",
+            "char_count":  int(res.get("char_count") or 0),
+            "cover_b64":   res.get("cover_b64"),
+            "cover_mime":  res.get("cover_mime"),
+            "cover_found": bool(res.get("cover_found")),
+        }
+
+    def add_media_epub(self, title, atype, minutes, session_date, book_chars,
+                       cover_b64=None, chars_read=0):
+        """Create a brand-new media entry from the Add-media 'Epub import' tab,
+        using the (possibly user-edited) title/length/cover taken from an EPUB.
+        Writes a seed session (source='manual_media', so the card surfaces on the
+        grid), the progress-bar length (media_char_counts) and the cover
+        (book_covers). `minutes` may be 0 — the card then appears as a
+        not-yet-started ('to read') entry, in which case `chars_read` is ignored
+        (a chars-without-time session is meaningless). Note `book_chars` (the
+        EPUB's total LENGTH -> the bar's target) is distinct from `chars_read`
+        (what the user has already read -> the seed session's chars)."""
+        try:
+            title = (title or "").strip()
+            if not title:
+                return {"ok": False, "error": "Enter a title."}
+            datetime.strptime(session_date, "%Y-%m-%d")
+            mins = float(minutes or 0)
+            if mins < 0:
+                return {"ok": False, "error": "Minutes can't be negative."}
+            if _q1("SELECT 1 FROM sessions WHERE title=?", title):
+                return {"ok": False,
+                        "error": f"“{title}” is already tracked — edit the title, "
+                                 "or drop the EPUB on its cover box instead."}
+            seed_chars = int(chars_read or 0) if mins > 0 else 0
+            create_manual_media(title, atype or "Reading", mins, session_date, seed_chars)
+            n = int(book_chars or 0)
+            if n > 0:
+                db.db_set_media_char_count(title, n)
+            cover_found = False
+            if cover_b64:
+                r = self.set_book_cover(title, cover_b64)
+                if not r.get("ok"):
+                    return {"ok": False, "error": r.get("error", "Cover write failed.")}
+                cover_found = True
+            return {"ok": True, "char_count": n, "cover_found": cover_found}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     # ── Series ────────────────────────────────────────────────────────────────
     def get_series(self):
         return get_series_data()

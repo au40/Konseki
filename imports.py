@@ -933,6 +933,23 @@ def _epub_attr(tag, name):
     return m.group(1) if m else None
 
 
+def _epub_title(opf):
+    """The book's title from the OPF metadata (first <dc:title>), entity-decoded
+    and tag-stripped; None if absent. Used to prefill the Add-media form on an
+    EPUB import — the user can edit it before committing."""
+    m = re.search(r'<dc:title\b[^>]*>(.*?)</dc:title>', opf, re.IGNORECASE | re.DOTALL)
+    if not m:
+        # Rare: default-namespace <title> inside <metadata>.
+        meta = re.search(r'<metadata\b[^>]*>(.*?)</metadata>', opf, re.IGNORECASE | re.DOTALL)
+        scope = meta.group(1) if meta else ""
+        m = re.search(r'<title\b[^>]*>(.*?)</title>', scope, re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    text = html.unescape(re.sub(r'<[^>]+>', '', m.group(1)))
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text or None
+
+
 def _epub_resolve(base_dir, href):
     """Zip path of `href` (relative to `base_dir`), fragment stripped + %xx-decoded."""
     href = unquote(href.split("#")[0])
@@ -997,11 +1014,11 @@ def _find_epub_cover(zf, names, opf, manifest, spine, opf_dir):
 
 
 def extract_epub(zip_bytes):
-    """Pull a cover image + total Japanese char count out of an EPUB.
+    """Pull a title + cover image + total Japanese char count out of an EPUB.
 
-    Returns {ok, char_count, cover_b64, cover_mime, cover_found} on success or
-    {ok: False, error}. Performs NO DB writes — the caller decides what to
-    persist and whether to overwrite existing values."""
+    Returns {ok, char_count, title, cover_b64, cover_mime, cover_found} on
+    success or {ok: False, error}. Performs NO DB writes — the caller decides
+    what to persist and whether to overwrite existing values."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
     except zipfile.BadZipFile as e:
@@ -1064,7 +1081,7 @@ def extract_epub(zip_bytes):
             except Exception:
                 cover_b64 = cover_mime = None
 
-        return {"ok": True, "char_count": total,
+        return {"ok": True, "char_count": total, "title": _epub_title(opf),
                 "cover_b64": cover_b64, "cover_mime": cover_mime,
                 "cover_found": cover_b64 is not None}
 
