@@ -5,6 +5,7 @@ delegating to db.py (data layer) and imports.py (external integrations).
 """
 
 import base64
+import io
 import os
 import subprocess
 import sys
@@ -25,6 +26,14 @@ try:
     _TRAY_AVAILABLE = True
 except ImportError:
     _TRAY_AVAILABLE = False
+
+# PIL for cover downscaling — imported independently of the tray (which is gated
+# on pystray above), so book-cover resizing works even in a no-tray build.
+try:
+    from PIL import Image as _CoverImage
+    _COVER_PIL_OK = True
+except ImportError:
+    _COVER_PIL_OK = False
 
 import db
 import imports
@@ -185,6 +194,59 @@ class GsmWalHandler(FileSystemEventHandler):
     def on_created(self, e):
         if not e.is_directory and os.path.basename(e.src_path) in self._WATCHED:
             self._schedule()
+
+
+# ── Book-cover downscaling ────────────────────────────────────────────────────
+# Covers are never displayed larger than ~250px anywhere in the UI (the media
+# grid cards and the 160px detail box). A dropped book cover, though, is stored
+# at the file's full resolution — routinely 1500–2560px on the long edge, vs the
+# ~400px GSM game covers. The webview then live-downscales that ~10x in a single
+# cheap pass, which aliases badly: soft, "low-res"/artifacty covers on the grid,
+# while the already-small game covers stay crisp through the identical CSS. We
+# fix it at the source: resample big covers down to COVER_MAX_EDGE with a proper
+# Lanczos filter before storing, so the browser only has to scale a modest
+# amount. Small images pass through untouched (no needless recompression).
+COVER_MAX_EDGE = 600  # long-edge cap; 2x+ HiDPI headroom over the largest card
+
+def _shrink_cover_b64(b64_str):
+    """Return (mime, b64) ready for a data URL. Downscales oversized covers with
+    Lanczos and re-encodes; passes small/animated images through unchanged. Any
+    decode/encode failure (or missing PIL) falls back to the original bytes, so a
+    cover upload never breaks over this."""
+    raw = base64.b64decode(b64_str)
+
+    def _sniff(b):
+        if b[:4] == b'\x89PNG':                       return 'image/png'
+        if b[:2] == b'\xff\xd8':                      return 'image/jpeg'
+        if b[:6] in (b'GIF87a', b'GIF89a'):           return 'image/gif'
+        if b[:4] == b'RIFF' and b[8:12] == b'WEBP':   return 'image/webp'
+        return 'image/jpeg'
+
+    if not _COVER_PIL_OK:
+        return _sniff(raw), b64_str
+    try:
+        im = _CoverImage.open(io.BytesIO(raw))
+        im.load()
+        if getattr(im, 'is_animated', False):
+            return _sniff(raw), b64_str               # don't flatten animations
+        w, h = im.size
+        if max(w, h) <= COVER_MAX_EDGE:
+            return _sniff(raw), b64_str               # already display-sized
+        scale = COVER_MAX_EDGE / max(w, h)
+        im = im.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                       _CoverImage.LANCZOS)
+        has_alpha = im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info)
+        buf = io.BytesIO()
+        if has_alpha:
+            im.convert('RGBA').save(buf, format='PNG', optimize=True)
+            mime = 'image/png'
+        else:
+            im.convert('RGB').save(buf, format='JPEG', quality=88,
+                                   optimize=True, progressive=True)
+            mime = 'image/jpeg'
+        return mime, base64.b64encode(buf.getvalue()).decode('ascii')
+    except Exception:
+        return _sniff(raw), b64_str
 
 
 # ── JS-callable API ───────────────────────────────────────────────────────────
@@ -708,18 +770,8 @@ class Api:
     # ── Book covers ───────────────────────────────────────────────────────────
     def set_book_cover(self, title, b64_str):
         try:
-            raw = base64.b64decode(b64_str[:16])
-            if raw[:4] == b'\x89PNG':
-                mime = 'image/png'
-            elif raw[:6] in (b'\xff\xd8\xff\xe0', b'\xff\xd8\xff\xe1') or raw[:2] == b'\xff\xd8':
-                mime = 'image/jpeg'
-            elif raw[:6] in (b'GIF87a', b'GIF89a'):
-                mime = 'image/gif'
-            elif raw[:4] == b'RIFF' or raw[8:12] == b'WEBP':
-                mime = 'image/webp'
-            else:
-                mime = 'image/jpeg'
-            data_url = f"data:{mime};base64,{b64_str}"
+            mime, b64_out = _shrink_cover_b64(b64_str)
+            data_url = f"data:{mime};base64,{b64_out}"
             con = sqlite3.connect(DB_PATH)
             con.execute("""
                 INSERT OR REPLACE INTO book_covers (title, image_data, updated_at)
