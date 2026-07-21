@@ -9,7 +9,11 @@ import sqlite3
 import json
 import zipfile
 import io
+import base64
+import html
+import posixpath
 import requests
+from urllib.parse import unquote
 from pathlib import Path
 from datetime import datetime, date, timedelta
 from db import (DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1,
@@ -868,6 +872,201 @@ def import_ttsu_zip_data(zip_bytes):
                 all_entries.append(entry)
 
     return import_ttsu_entries(all_entries)
+
+
+# ── EPUB extraction ────────────────────────────────────────────────────────────
+# Dropping an EPUB on a media entry's cover box fills two display-only fields in
+# one go: the cover image (book_covers) and the progress-bar length
+# (media_char_counts). Neither touches session/reading data — this only sets how
+# long the bar thinks the book is, plus its picture.
+#
+# The char count mirrors ッツ Reader's counting so it lines up with the
+# chars_read numerator the same bar divides against: keep only Japanese-script
+# code points (ttu-ebook-reader get-character-count.ts), with two deliberate
+# departures —
+#   * furigana (<rt>/<rp>) is dropped, not counted as extra reading;
+#   * gaiji image-glyphs (ttsu counts each as 1) are invisible to a text scan.
+# Both make our total a hair LOWER than ttsu's; immaterial for a progress bar.
+
+# ッツ keeps only this set, stripping everything else before counting. Python's
+# re has no \p{...}; Unified_Ideograph / Radical are spelled out as explicit
+# ranges (U+F900-FAFF compatibility ideographs omitted — a dozen glyphs that
+# never occur in prose).
+_TTSU_KEEP = (
+    "0-9A-Za-z"                                    # ASCII alnum (source /i keeps a-z)
+    "○◯"                                 # ○ ◯
+    "々-〇〻"                          # 々 〆 〇 〻
+    "ぁ-ゖゝ-ゞ"                   # hiragana ぁ-ゖ, ゝ ゞ
+    "ァ-ヺー"                          # katakana ァ-ヺ, ー
+    "０-９Ａ-Ｚａ-ｚ"      # fullwidth ０-９ Ａ-Ｚ ａ-ｚ
+    "ｦ-ﾝ"                                # halfwidth katakana ｦ-ﾝ
+    "⺀-⻳⼀-⿕"                   # CJK radicals   (\p{Radical})
+    "㐀-䶿一-鿿"                   # Ext A + URO    (\p{Unified_Ideograph})
+    "\U00020000-\U0002EBEF\U00030000-\U000323AF"  # SIP ideograph extensions
+)
+_TTSU_STRIP_RE = re.compile("[^" + _TTSU_KEEP + "]+")
+_HEAD_RE  = re.compile(r"<head\b[^>]*>.*?</head\s*>", re.IGNORECASE | re.DOTALL)
+_RUBY_RE  = re.compile(r"<(rt|rp)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
+_TAG_RE   = re.compile(r"<[^>]+>")
+_IMG_MIME = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+             "jpe": "image/jpeg", "gif": "image/gif", "webp": "image/webp",
+             "svg": "image/svg+xml"}
+
+
+def _ttsu_char_count(xhtml):
+    """Japanese-script code points in an XHTML document, ruby + markup removed."""
+    t = _HEAD_RE.sub("", xhtml)  # <title>/meta aren't rendered text; ttsu ignores them
+    t = _STYLE_RE.sub("", t)     # inline <style>/<script> left in the body
+    t = _RUBY_RE.sub("", t)      # drop furigana before it collapses into bare text
+    t = _TAG_RE.sub("", t)
+    t = html.unescape(t)
+    return len(_TTSU_STRIP_RE.sub("", t))
+
+
+def _epub_attr(tag, name):
+    """Value of attribute `name` in an OPF/XHTML start-tag (quote-agnostic)."""
+    m = re.search(r'\b' + re.escape(name) + r'\s*=\s*"([^"]*)"', tag, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b" + re.escape(name) + r"\s*=\s*'([^']*)'", tag, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _epub_resolve(base_dir, href):
+    """Zip path of `href` (relative to `base_dir`), fragment stripped + %xx-decoded."""
+    href = unquote(href.split("#")[0])
+    if not href:
+        return ""
+    joined = posixpath.join(base_dir, href) if base_dir else href
+    return posixpath.normpath(joined).lstrip("/")
+
+
+def _first_img_src(doc):
+    """src/href of the first <img> or <svg><image> in an XHTML document."""
+    m = re.search(r'<img\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']', doc, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    m = re.search(r'<image\b[^>]*?(?:xlink:href|href)\s*=\s*["\']([^"\']+)["\']',
+                  doc, re.IGNORECASE)
+    return m.group(1) if m else None
+
+
+def _find_epub_cover(zf, names, opf, manifest, spine, opf_dir):
+    """Zip path of the cover image, or None. Priority: the image on the first
+    spine page ("first page every time"), then EPUB cover metadata, then any
+    manifest image."""
+    # (a) first image referenced by the first spine document
+    if spine:
+        href, mtype = manifest[spine[0]]
+        if "html" in mtype or href.lower().endswith((".xhtml", ".html", ".htm")):
+            path = _epub_resolve(opf_dir, href)
+            if path in names:
+                try:
+                    src = _first_img_src(zf.read(path).decode("utf-8", "replace"))
+                except Exception:
+                    src = None
+                if src:
+                    p = _epub_resolve(posixpath.dirname(path), src)
+                    if p in names:
+                        return p
+    # (b) <meta name="cover" content="ITEM_ID">
+    for meta in re.finditer(r'<meta\b[^>]*>', opf, re.IGNORECASE):
+        if (_epub_attr(meta.group(0), "name") or "").lower() == "cover":
+            cid = _epub_attr(meta.group(0), "content")
+            if cid and cid in manifest:
+                p = _epub_resolve(opf_dir, manifest[cid][0])
+                if p in names:
+                    return p
+            break
+    # (c) EPUB3 manifest item flagged properties="cover-image"
+    for item in re.finditer(r'<item\b[^>]*>', opf, re.IGNORECASE):
+        if "cover-image" in (_epub_attr(item.group(0), "properties") or ""):
+            href = _epub_attr(item.group(0), "href")
+            p = _epub_resolve(opf_dir, href) if href else ""
+            if p in names:
+                return p
+    # (d) first image in the manifest
+    for href, mtype in manifest.values():
+        if mtype.startswith("image/") or href.lower().endswith(
+                (".jpg", ".jpeg", ".png", ".gif", ".webp")):
+            p = _epub_resolve(opf_dir, href)
+            if p in names:
+                return p
+    return None
+
+
+def extract_epub(zip_bytes):
+    """Pull a cover image + total Japanese char count out of an EPUB.
+
+    Returns {ok, char_count, cover_b64, cover_mime, cover_found} on success or
+    {ok: False, error}. Performs NO DB writes — the caller decides what to
+    persist and whether to overwrite existing values."""
+    try:
+        zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    except zipfile.BadZipFile as e:
+        return {"ok": False, "error": f"Not a valid EPUB (bad zip): {e}"}
+
+    with zf:
+        names = set(zf.namelist())
+        try:
+            container = zf.read("META-INF/container.xml").decode("utf-8", "replace")
+        except KeyError:
+            return {"ok": False, "error": "Not an EPUB (no META-INF/container.xml)."}
+        m = re.search(r'<rootfile\b[^>]*\bfull-path\s*=\s*["\']([^"\']+)["\']',
+                      container, re.IGNORECASE)
+        if not m:
+            return {"ok": False, "error": "EPUB container names no OPF rootfile."}
+        opf_path = _epub_resolve("", m.group(1))
+        opf_dir = posixpath.dirname(opf_path)
+        try:
+            opf = zf.read(opf_path).decode("utf-8", "replace")
+        except KeyError:
+            return {"ok": False, "error": f"EPUB OPF missing: {opf_path}"}
+
+        # manifest: id -> (href, media-type)
+        manifest = {}
+        for item in re.finditer(r'<item\b[^>]*>', opf, re.IGNORECASE):
+            tag = item.group(0)
+            iid, href = _epub_attr(tag, "id"), _epub_attr(tag, "href")
+            if iid and href:
+                manifest[iid] = (href, (_epub_attr(tag, "media-type") or "").lower())
+
+        # spine: reading order, restricted to real manifest items
+        spine = [_epub_attr(t.group(0), "idref")
+                 for t in re.finditer(r'<itemref\b[^>]*>', opf, re.IGNORECASE)]
+        spine = [s for s in spine if s in manifest]
+
+        # char count over the spine's content documents
+        total = 0
+        for sid in spine:
+            href, mtype = manifest[sid]
+            is_doc = ("html" in mtype or "xml" in mtype
+                      or href.lower().endswith((".xhtml", ".html", ".htm")))
+            if not is_doc:
+                continue
+            path = _epub_resolve(opf_dir, href)
+            if path not in names:
+                continue
+            try:
+                total += _ttsu_char_count(zf.read(path).decode("utf-8", "replace"))
+            except Exception:
+                continue
+
+        cover_b64 = cover_mime = None
+        cover_path = _find_epub_cover(zf, names, opf, manifest, spine, opf_dir)
+        if cover_path and cover_path in names:
+            try:
+                raw = zf.read(cover_path)
+                ext = cover_path.rsplit(".", 1)[-1].lower() if "." in cover_path else ""
+                cover_mime = _IMG_MIME.get(ext, "image/jpeg")
+                cover_b64 = base64.b64encode(raw).decode("ascii")
+            except Exception:
+                cover_b64 = cover_mime = None
+
+        return {"ok": True, "char_count": total,
+                "cover_b64": cover_b64, "cover_mime": cover_mime,
+                "cover_found": cover_b64 is not None}
 
 
 # ── GSM aggregate import — INACTIVE ──────────────────────────────────────────

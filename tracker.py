@@ -731,6 +731,56 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def import_epub(self, title, b64_str, overwrite=False):
+        """Extract an EPUB's cover + total character count and apply them to a
+        media entry: cover -> book_covers, char count -> media_char_counts (the
+        progress-bar length). Touches NO session/reading data — only how long the
+        bar thinks the book is, plus its cover.
+
+        When the title already has a cover and/or a length and overwrite is
+        False, returns {needs_confirm: True, ...} with old/new values WITHOUT
+        writing, so the UI can confirm the replacement first."""
+        try:
+            zip_bytes = base64.b64decode(b64_str)
+        except Exception as e:
+            return {"ok": False, "error": f"Could not decode file: {e}"}
+        res = imports.extract_epub(zip_bytes)
+        if not res.get("ok"):
+            return {"ok": False, "error": res.get("error", "Could not read EPUB.")}
+
+        new_count   = int(res.get("char_count") or 0)
+        cover_found = bool(res.get("cover_found"))
+        if new_count <= 0 and not cover_found:
+            return {"ok": False,
+                    "error": "No cover or Japanese text found in this EPUB."}
+
+        row = _q1("SELECT char_count FROM media_char_counts WHERE title=?", title)
+        old_count = int(row[0]) if row else 0
+        has_cover = bool(_q1("SELECT 1 FROM book_covers WHERE title=?", title))
+        would_replace_count = old_count > 0 and new_count > 0
+        would_replace_cover = has_cover and cover_found
+
+        if (would_replace_count or would_replace_cover) and not overwrite:
+            return {"ok": False, "needs_confirm": True, "title": title,
+                    "new_count": new_count, "old_count": old_count,
+                    "cover_found": cover_found,
+                    "would_replace_count": would_replace_count,
+                    "would_replace_cover": would_replace_cover}
+
+        try:
+            if cover_found:
+                r = self.set_book_cover(title, res["cover_b64"])
+                if not r.get("ok"):
+                    return {"ok": False,
+                            "error": r.get("error", "Cover write failed.")}
+            if new_count > 0:
+                db.db_set_media_char_count(title, new_count)
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+        return {"ok": True, "char_count": new_count, "count_set": new_count > 0,
+                "cover_found": cover_found}
+
     # ── Series ────────────────────────────────────────────────────────────────
     def get_series(self):
         return get_series_data()

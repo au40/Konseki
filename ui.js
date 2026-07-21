@@ -1233,8 +1233,71 @@ async function doImportCSV() {
 // ── Cover image ────────────────────────────────────────────────────────────
 async function dropCoverImage(e, title) {
   const file = e.dataTransfer.files[0];
-  if (!file || !file.type.startsWith('image/')) return;
+  if (!file) return;
+  // An EPUB dropped here auto-fills the cover + progress-bar length; an image
+  // is just the cover, as before.
+  if (/\.epub$/i.test(file.name) || file.type === 'application/epub+zip') {
+    await importEpubFile(file, title);
+    return;
+  }
+  if (!file.type.startsWith('image/')) return;
   await uploadCoverFile(file, title);
+}
+
+// Read a File as base64 (chunked so multi-MB EPUBs don't blow the arg limit).
+async function fileToBase64(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+// Drag an .epub onto the cover box to auto-fill its cover (first page's image)
+// and progress-bar length (its Japanese character count). Writes only those two
+// display fields — reading history is untouched. Replacing an existing cover or
+// length asks first: the initial call reports the conflict with old/new numbers,
+// and the confirmed call re-runs with overwrite=true to commit.
+async function importEpubFile(file, title, overwrite = false) {
+  setStatus('Reading EPUB…');
+  let b64;
+  try { b64 = await fileToBase64(file); }
+  catch (err) { setStatus('Could not read EPUB file.'); return; }
+  const r = await window.pywebview.api.import_epub(title, b64, overwrite);
+
+  if (r && r.needs_confirm) {
+    const disp = (currentDetailData && currentDetailData.display_title) || title;
+    const acts = [];
+    if (r.would_replace_count)
+      acts.push(`change its length from ${r.old_count.toLocaleString()} to ${r.new_count.toLocaleString()} chars`);
+    if (r.would_replace_cover) acts.push('replace its cover');
+    const has = (r.would_replace_count && r.would_replace_cover) ? 'a progress-bar length and a cover'
+              : r.would_replace_count ? 'a progress-bar length' : 'a cover';
+    const ok = await showConfirm(
+      `“${disp}” already has ${has}. This EPUB will ${acts.join(' and ')}. Continue?`,
+      'Replace', '#5B8CFF');
+    if (!ok) { setStatus(''); return; }
+    return importEpubFile(file, title, true);
+  }
+
+  if (!r || !r.ok) {
+    setStatus('EPUB import failed: ' + ((r && r.error) || 'unknown error'));
+    return;
+  }
+
+  [mediaAllData, seriesData] = await Promise.all([
+    window.pywebview.api.get_media(),
+    window.pywebview.api.get_series(),
+  ]);
+  const media = await window.pywebview.api.get_title_detail(title);
+  if (media) renderMediaDetail(media);
+
+  const bits = [];
+  if (r.count_set) bits.push(`${r.char_count.toLocaleString()} chars`);
+  bits.push(r.cover_found ? 'cover set' : 'no cover found');
+  setStatus('✓ EPUB imported — ' + bits.join(', '));
 }
 
 async function pickCoverImage(title) {
