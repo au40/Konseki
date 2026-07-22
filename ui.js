@@ -1188,10 +1188,13 @@ function tlogKey() {
 }
 
 // Populate the media <select> from the same source as the manual-log dropdown.
-async function populateTotalLogMedia() {
+// Restores `preferred` (the remembered selection on init) if given, else keeps
+// the current selection across a repopulation. An absent/stale value falls back
+// to "— none —".
+async function populateTotalLogMedia(preferred) {
   const sel = document.getElementById('tlog-media');
   if (!sel) return;
-  const prev = sel.value;
+  const want = preferred !== undefined ? preferred : sel.value;
   try {
     const titles = await window.pywebview.api.get_media_titles();
     sel.innerHTML = '<option value="">— none —</option>';
@@ -1202,7 +1205,7 @@ async function populateTotalLogMedia() {
       o.textContent = m.display_title || m.title;
       sel.appendChild(o);
     });
-    sel.value = prev;
+    sel.value = want;
   } catch (e) { /* leave the "none" option only */ }
 }
 
@@ -1211,7 +1214,7 @@ async function initTotalLog() {
   tlogMode = st.mode === 'per_media' ? 'per_media' : 'global';
   document.getElementById('tlog-mode-global').classList.toggle('active', tlogMode === 'global');
   document.getElementById('tlog-mode-permedia').classList.toggle('active', tlogMode === 'per_media');
-  await populateTotalLogMedia();
+  await populateTotalLogMedia(st.last_media || '');
   await refreshTotalLogBaseline();
 }
 
@@ -1225,6 +1228,8 @@ async function toggleTotalLogMode(mode) {
 }
 
 async function onTotalLogMediaChange() {
+  // Remember the pick so it's restored on the next reload (both modes).
+  await window.pywebview.api.set_total_log_last_media(document.getElementById('tlog-media').value || '');
   // In per-media mode a different media has a different baseline; reload it.
   if (tlogMode === 'per_media') await refreshTotalLogBaseline();
   else updateTotalLogPreview();
@@ -2236,15 +2241,23 @@ function computeBrushView() {
   // streak" (trailing active run); otherwise a past slice, so report the longest
   // run within it. Label swaps to match (set in applyBrushCards).
   const includesLatest = endDay === daily.length - 1;
+  // Grace for an unlogged "today": when the window reaches today and today has no
+  // activity yet, it's in-progress — don't break the streak or count it against
+  // consistency until it's logged. (Backend get_streak/get_range_extra_stats do
+  // the same for the non-brushed presets.)
+  const pendingToday = includesLatest && sub.length > 0 && sub[sub.length - 1].seconds <= 0;
   let streak = 0;
   if (includesLatest) {
-    for (let i = sub.length - 1; i >= 0 && sub[i].seconds > 0; i--) streak++;
+    let i = sub.length - 1;
+    if (pendingToday) i--;                                 // skip today; start at yesterday
+    for (; i >= 0 && sub[i].seconds > 0; i--) streak++;
   } else {
     let run = 0;
     sub.forEach(r => { if (r.seconds > 0) { run++; if (run > streak) streak = run; } else run = 0; });
   }
 
   const windowDays = sub.length;
+  const consistencyDays = Math.max(1, windowDays - (pendingToday ? 1 : 0));
   const denomSecs  = Math.max(0, spdSecs);                 // clamp like the backend (raw + manual)
   // floor, not round — matches the backend's int() truncation so a full-span
   // brush shows the identical number as the 'All' preset (no off-by-one).
@@ -2257,9 +2270,9 @@ function computeBrushView() {
   return {
     sub, secs, chars, cph,
     avg_secs:        windowDays ? secs / windowDays : 0,
-    window_days:     windowDays,
+    window_days:     consistencyDays,
     active_days:     active,
-    consistency_pct: windowDays ? Math.round(active / windowDays * 1000) / 10 : 0,
+    consistency_pct: Math.round(active / consistencyDays * 1000) / 10,
     best_day:        bestDay,
     best_week:       bestWeek,
     streak,

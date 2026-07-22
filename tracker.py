@@ -552,10 +552,16 @@ class Api:
             "has_baseline": b is not None,
             "base_secs":    b["base_secs"]  if b else 0,
             "base_chars":   b["base_chars"] if b else 0,
+            # Last media the user had selected in the box, so it survives reloads.
+            "last_media":   get_setting("total_log_last_media", ""),
         }
 
     def set_total_log_mode(self, mode):
         set_setting("total_log_mode", "per_media" if mode == "per_media" else "global")
+        return {"ok": True}
+
+    def set_total_log_last_media(self, media_key):
+        set_setting("total_log_last_media", media_key or "")
         return {"ok": True}
 
     def save_total_log_baseline(self, media_key, secs, chars=0):

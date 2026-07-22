@@ -1225,9 +1225,15 @@ def get_streak():
     active = [d for d, s in _adjusted_day_secs().items() if s > 0]
     if not active:
         return 0, 0
+    active_set = set(active)
     sd  = sorted(datetime.strptime(d, "%Y-%m-%d").date() for d in active)
     cur = 0
     chk = get_today_date()
+    # Grace for an unlogged "today": today isn't a broken day until it's over, so
+    # don't reset the streak just because nothing's been logged yet — start the
+    # trailing count from yesterday. (Once today is logged it extends normally.)
+    if chk.isoformat() not in active_set:
+        chk -= timedelta(days=1)
     for d in reversed(sd):
         if d == chk:
             cur += 1
@@ -1490,7 +1496,12 @@ def get_extra_stats():
     if first:
         total_tracked_days = (get_today_date() - datetime.strptime(first, "%Y-%m-%d").date()).days + 1
         active_days = sum(1 for s in secs.values() if s > 0)
-        consistency = round(active_days / total_tracked_days * 100, 1) if total_tracked_days > 0 else 0
+        # Don't count an unlogged "today" against consistency: it's an in-progress
+        # day, not a missed one, so drop it from the denominator until it's logged.
+        denom = total_tracked_days
+        if secs.get(get_today_date().isoformat(), 0) <= 0 and denom > 1:
+            denom -= 1
+        consistency = round(active_days / denom * 100, 1) if denom > 0 else 0
 
     longest_session = (_q1(
         "SELECT MAX(time_seconds) FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0)"
@@ -1543,6 +1554,11 @@ def get_range_extra_stats(n):
         r_secs = max(0, reading[1] + _manual_secs_sum(since))
         chars_per_hour = int((reading[0] or 0) / r_secs * 3600) if r_secs > 0 else 0
 
+    # The window always ends at logical today (window_bounds); an unlogged today is
+    # in-progress, not a missed day, so drop it from the consistency denominator
+    # until it's logged. window_days follows so the "N/Md active" sub-label matches.
+    if secs.get(today, 0) <= 0 and window > 1:
+        window -= 1
     consistency = round(active_days / window * 100, 1) if window > 0 else 0
 
     return {
