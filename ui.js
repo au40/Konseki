@@ -1212,7 +1212,8 @@ async function submitAddMediaEpub() {
   }
 
   // Brand-new entry, so no existing milestones to replace (pass 0).
-  const extra = await maybeImportEpubChapters(title, addEpubMeta.chapters, 0);
+  const extra = await maybeImportEpubChapters(
+    title, addEpubMeta.chapter_candidates, addEpubMeta.char_count, 0);
 
   closeAddMediaModal();
   statsCache = {};
@@ -1445,23 +1446,98 @@ async function fileToBase64(file) {
   return btoa(binary);
 }
 
-// After an EPUB import, offer to fill the book's milestones from its chapters.
-// `chapters` is the extractor's list ({name, start_chars, end_chars}); `existing`
-// is how many milestones the title already has (0 for a brand-new entry). When
-// the book already has milestones the prompt asks to REPLACE them (chapters can't
-// coexist with arbitrary user milestones — they'd overlap). Returns a short
-// status suffix on success, or '' if the user declined / nothing was done.
-async function maybeImportEpubChapters(title, chapters, existing) {
-  if (!chapters || !chapters.length) return '';
-  const n = chapters.length;
-  const replace = existing > 0;
-  const msg = replace
-    ? `“${title}” already has ${existing} milestone${existing === 1 ? '' : 's'}. `
-      + `Replace ${existing === 1 ? 'it' : 'them'} with this EPUB’s ${n} chapter${n === 1 ? '' : 's'}?`
-    : `Fill ${n} milestone${n === 1 ? '' : 's'} from this EPUB’s chapters?`;
-  const ok = await showConfirm(msg, replace ? 'Replace' : 'Import', '#5B8CFF');
-  if (!ok) return '';
-  const r = await window.pywebview.api.apply_epub_chapters(title, chapters, replace);
+// ── EPUB chapters → milestones checklist ─────────────────────────────────────
+// Size alone can't tell a short prologue from a same-size character-list, so the
+// import shows every candidate section (with its char count) pre-checked by the
+// heuristic and lets the user tick/untick before creating. See _epub_candidates
+// / _epub_finalize in imports.py.
+let epubChaptersResolve    = null;
+let epubChaptersCandidates = [];
+let epubChaptersTotal      = 0;
+let epubChaptersReplace    = false;
+
+// Show the checklist. Resolves to {selected, replace} on Create, or null on
+// cancel. `existing` = milestones the title already has (>0 ⇒ create replaces).
+function chooseEpubChapters(title, candidates, total, existing) {
+  return new Promise(resolve => {
+    epubChaptersResolve    = resolve;
+    epubChaptersCandidates = candidates;
+    epubChaptersTotal      = total;
+    epubChaptersReplace    = existing > 0;
+
+    document.getElementById('epub-chapters-sub').textContent = existing > 0
+      ? `“${title}” already has ${existing} milestone${existing === 1 ? '' : 's'} — creating these replaces them.`
+      : `Pick which sections of “${title}” become milestones.`;
+
+    const list = document.getElementById('epub-chapters-list');
+    list.innerHTML = '';
+    candidates.forEach((c, i) => {
+      const row = document.createElement('label');
+      row.className = 'epub-ch-row' + (c.suggested ? '' : ' off');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = !!c.suggested; cb.dataset.idx = i;
+      cb.onchange = () => { row.classList.toggle('off', !cb.checked); updateEpubChaptersCount(); };
+      const nm = document.createElement('span');
+      nm.className = 'epub-ch-name'; nm.textContent = c.name;
+      const ch = document.createElement('span');
+      ch.className = 'epub-ch-chars'; ch.textContent = Math.round(c.span).toLocaleString();
+      row.append(cb, nm, ch);
+      list.appendChild(row);
+    });
+    updateEpubChaptersCount();
+    document.getElementById('epub-chapters-overlay').style.display = 'flex';
+  });
+}
+
+function epubChapterBoxes() {
+  return Array.from(document.querySelectorAll('#epub-chapters-list input[type=checkbox]'));
+}
+
+function updateEpubChaptersCount() {
+  const boxes = epubChapterBoxes();
+  const n = boxes.filter(b => b.checked).length;
+  document.getElementById('epub-chapters-count').textContent =
+    `${n} of ${boxes.length} selected`;
+  const all = document.getElementById('epub-chapters-all');
+  all.checked = n === boxes.length && n > 0;
+  all.indeterminate = n > 0 && n < boxes.length;
+  document.getElementById('epub-chapters-ok').disabled = n === 0;
+}
+
+function toggleAllEpubChapters(checked) {
+  epubChapterBoxes().forEach(b => {
+    b.checked = checked;
+    b.closest('.epub-ch-row').classList.toggle('off', !checked);
+  });
+  updateEpubChaptersCount();
+}
+
+function resolveEpubChapters(value) {
+  document.getElementById('epub-chapters-overlay').style.display = 'none';
+  const fn = epubChaptersResolve;
+  epubChaptersResolve = null;
+  if (fn) fn(value);
+}
+
+function submitEpubChapters() {
+  const selected = epubChapterBoxes()
+    .filter(b => b.checked)
+    .map(b => epubChaptersCandidates[Number(b.dataset.idx)])
+    .map(c => ({ name: c.name, start_chars: c.start_chars }));
+  if (!selected.length) return;
+  resolveEpubChapters({ selected, replace: epubChaptersReplace });
+}
+
+// After an EPUB import, offer the chapter checklist. `candidates` is the
+// extractor's chapter_candidates; `total` the book's char count; `existing` the
+// title's current milestone count. Returns a short status suffix, or '' if
+// declined / nothing created.
+async function maybeImportEpubChapters(title, candidates, total, existing) {
+  if (!candidates || !candidates.length) return '';
+  const choice = await chooseEpubChapters(title, candidates, total, existing);
+  if (!choice || !choice.selected.length) return '';
+  const r = await window.pywebview.api.apply_epub_chapters(
+    title, choice.selected, total, choice.replace);
   if (!r || !r.ok) { setStatus('Chapter import failed: ' + ((r && r.error) || 'unknown error')); return ''; }
   return `${r.count} chapter${r.count === 1 ? '' : 's'} → milestones`;
 }
@@ -1506,7 +1582,7 @@ async function importEpubFile(file, title, overwrite = false) {
   let existing = 0;
   try { existing = (await window.pywebview.api.list_milestones(title) || []).length; }
   catch (e) { /* leave existing at 0 */ }
-  const extra = await maybeImportEpubChapters(title, r.chapters, existing);
+  const extra = await maybeImportEpubChapters(title, r.chapter_candidates, r.char_count, existing);
   if (extra) bits.push(extra);
 
   [mediaAllData, seriesData] = await Promise.all([

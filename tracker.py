@@ -857,7 +857,7 @@ class Api:
 
         return {"ok": True, "char_count": new_count, "count_set": new_count > 0,
                 "cover_found": cover_found,
-                "chapters": res.get("chapters") or [],
+                "chapter_candidates": res.get("chapter_candidates") or [],
                 "chapter_count": int(res.get("chapter_count") or 0)}
 
     def extract_epub_meta(self, b64_str):
@@ -879,7 +879,7 @@ class Api:
             "cover_b64":   res.get("cover_b64"),
             "cover_mime":  res.get("cover_mime"),
             "cover_found": bool(res.get("cover_found")),
-            "chapters":    res.get("chapters") or [],
+            "chapter_candidates": res.get("chapter_candidates") or [],
             "chapter_count": int(res.get("chapter_count") or 0),
         }
 
@@ -1005,25 +1005,23 @@ class Api:
             print(f"[milestones] list: {e}")
             return []
 
-    def apply_epub_chapters(self, title, chapters, replace=False):
-        """Turn an EPUB's chapters into chars-unit milestones for `title`.
-        `chapters` is the list surfaced by extract_epub_meta / import_epub
-        ({name, start_chars, end_chars}); `replace=True` clears the title's
-        existing milestones first (used when the book already has some)."""
+    def apply_epub_chapters(self, title, selected, total, replace=False):
+        """Turn the user's chosen EPUB sections into chars-unit milestones for
+        `title`. `selected` is the checked subset of the extractor's
+        chapter_candidates (each {name, start_chars}); `total` is the book's
+        char count. Ends are recomputed over the selection (imports._epub_finalize)
+        so unselected sections fold into the previous kept one. `replace=True`
+        clears the title's existing milestones first."""
         try:
             title = (title or "").strip()
             if not title:
                 return {"ok": False, "error": "Missing title."}
-            items = []
-            for c in (chapters or []):
-                name = (c.get("name") or "").strip()
-                if not name:
-                    continue
-                items.append({"name": name, "unit": "chars",
-                              "start_val": c.get("start_chars"),
-                              "end_val": c.get("end_chars")})
+            finalized = imports._epub_finalize(selected or [], float(total or 0))
+            items = [{"name": c["name"], "unit": "chars",
+                      "start_val": c["start_chars"], "end_val": c["end_chars"]}
+                     for c in finalized if (c.get("name") or "").strip()]
             if not items:
-                return {"ok": False, "error": "No chapters found in this EPUB."}
+                return {"ok": False, "error": "No chapters selected."}
             return db.db_add_milestones_bulk(title, items, replace=bool(replace))
         except Exception as e:
             print(f"[milestones] epub chapters: {e}")

@@ -1079,39 +1079,65 @@ def _epub_toc_entries(zf, names, manifest, opf, opf_dir):
     return entries
 
 
-# Front/back-matter trim: an end chapter is dropped when its char span is below
-# this fraction of the median chapter span (cover/TOC/colophon/character-list are
-# near-empty of prose next to a real chapter). Only the leading/trailing run is
-# trimmed — never a short chapter in the middle.
+# Junk trim: a chapter is dropped when its char span is below this fraction of
+# the REFERENCE span — a high percentile of chapter spans (not the median, which
+# gets dragged into the junk pile when a book has many tiny files). Applied to
+# every chapter, so junk between real chapters is caught too.
 _EPUB_TRIM_FRAC = 0.15
+_EPUB_REF_PCTL  = 0.75
 
 
-def _median(xs):
+def _percentile(xs, q):
+    """Linear-interpolated q-quantile (q in [0, 1]) of xs; 0.0 if empty."""
     s = sorted(xs)
     n = len(s)
-    if not n:
+    if n == 0:
         return 0.0
-    mid = n // 2
-    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+    if n == 1:
+        return float(s[0])
+    pos = q * (n - 1)
+    lo = int(pos)
+    hi = min(lo + 1, n - 1)
+    return float(s[lo] + (s[hi] - s[lo]) * (pos - lo))
 
 
-def _epub_chapters(toc_entries, cum_by_doc, total):
-    """Map TOC entries to media-cumulative char ranges (Tier-1: chapter bounds
-    land on spine-document breaks). Returns [{name, start_chars, end_chars}],
-    contiguous and non-overlapping, in reading order. `cum_by_doc` maps each
-    counted spine-doc path to the cumulative char count at its start; `total` is
-    the book's counted char total.
+# Name hints for the pre-check: size alone can't tell a short prologue from a
+# same-size character-list, so recognizable section names override the size vote.
+# KEEP forces a suggestion even when small; DROP forces off even when large. The
+# user's checklist can override either — these just aim the default.
+_EPUB_KEEP_RE = re.compile(
+    r'^\s*(?:プロローグ|エピローグ|序章|終章|序幕|終幕|幕間|間章|プレリュード|'
+    r'prologue|epilogue|interlude|prelude)', re.IGNORECASE)
+_EPUB_DROP_RE = re.compile(
+    r'^\s*(?:目次|表紙|奥付|挿絵|口絵|扉|カバー|著作権|版権|'
+    r'cover|contents|table of contents|copyright|colophon|index|acknowledg)',
+    re.IGNORECASE)
 
-    Chapters are keyed by the *document* a TOC entry targets (first label wins),
-    so a multi-chapter file collapses to one milestone and an empty cover/TOC
-    page — which shares its start offset with the next real chapter — can't steal
-    that chapter's name. A chapter spans from its start document to the next
-    chapter's; untitled interstitial documents fold into the preceding chapter.
 
-    Zero-span entries (empty pages) drop out, and tiny front/back-matter entries
-    are trimmed from the ends (see `_EPUB_TRIM_FRAC`). The surviving span is
-    snapped to cover [0, total] so the chapters tile the whole book."""
-    # First TOC label per targeted (counted) document, in reading order.
+def _epub_suggest(name, span, thr):
+    """Default keep/drop vote for a candidate: name hints win, else size >= thr."""
+    n = (name or "").strip()
+    if _EPUB_DROP_RE.match(n):
+        return False
+    if _EPUB_KEEP_RE.match(n):
+        return True
+    return span >= thr
+
+
+def _epub_candidates(toc_entries, cum_by_doc, total):
+    """Full ordered candidate list for the import checklist:
+    [{name, start_chars, span, suggested}]. `cum_by_doc` maps each counted
+    spine-doc path to the cumulative char count at its start; `total` is the
+    book's counted char total.
+
+    Candidates are keyed by the *document* a TOC entry targets (first label wins),
+    so a multi-chapter file collapses to one entry and an empty cover/TOC page —
+    which shares its start offset with the next real chapter — can't steal that
+    chapter's name. Each candidate spans from its document to the next candidate's
+    (the section it introduces); empty spans (cover images, dup fragments) are
+    dropped entirely. `suggested` is the default checkbox state: junk is removed
+    by size relative to a high percentile of spans (`_EPUB_REF_PCTL`/
+    `_EPUB_TRIM_FRAC`, robust to many tiny files), with name hints overriding."""
     first_label = {}
     for label, doc in toc_entries:
         if doc in cum_by_doc and doc not in first_label:
@@ -1119,31 +1145,48 @@ def _epub_chapters(toc_entries, cum_by_doc, total):
     if not first_label:
         return []
 
-    # Chapter-start docs by char offset; each spans to the next start (or total).
     starts = sorted(first_label, key=lambda d: cum_by_doc[d])
-    chapters = []
+    cand = []
     for i, doc in enumerate(starts):
         s = float(cum_by_doc[doc])
         e = float(cum_by_doc[starts[i + 1]]) if i + 1 < len(starts) else float(total)
-        if e > s:  # drop empty pages (cover, illustration-only, dup fragments)
-            chapters.append({"name": first_label[doc], "start": s, "end": e})
-    if not chapters:
+        if e > s:
+            cand.append({"name": first_label[doc], "start_chars": s, "span": e - s})
+    if not cand:
         return []
 
-    # Trim the tiny leading/trailing run (front/back matter) by relative span.
-    if len(chapters) >= 3:
-        thr = _EPUB_TRIM_FRAC * _median([c["end"] - c["start"] for c in chapters])
-        lo, hi = 0, len(chapters)
-        while hi - lo > 1 and chapters[lo]["end"] - chapters[lo]["start"] < thr:
-            lo += 1
-        while hi - lo > 1 and chapters[hi - 1]["end"] - chapters[hi - 1]["start"] < thr:
-            hi -= 1
-        chapters = chapters[lo:hi]
+    thr = (_EPUB_TRIM_FRAC * _percentile([c["span"] for c in cand], _EPUB_REF_PCTL)
+           if len(cand) >= 3 else 0.0)
+    for c in cand:
+        c["suggested"] = _epub_suggest(c["name"], c["span"], thr)
+    return cand
 
-    chapters[0]["start"] = 0.0
-    chapters[-1]["end"] = float(total)
-    return [{"name": c["name"], "start_chars": c["start"], "end_chars": c["end"]}
-            for c in chapters]
+
+def _epub_finalize(selected, total):
+    """Turn a chosen subset of candidates (each {name, start_chars}) into
+    contiguous milestones [{name, start_chars, end_chars}]. Ends are recomputed
+    over the selection (so unselected sections fold into the previous kept one)
+    and snapped to cover [0, total]. Order-independent: sorts by start."""
+    sel = sorted((s for s in (selected or []) if (s.get("name") or "").strip()),
+                 key=lambda s: float(s.get("start_chars") or 0))
+    if not sel:
+        return []
+    out = []
+    for i, c in enumerate(sel):
+        s = float(c.get("start_chars") or 0)
+        e = float(sel[i + 1]["start_chars"]) if i + 1 < len(sel) else float(total)
+        out.append({"name": c["name"].strip(), "start_chars": s, "end_chars": e})
+    out[0]["start_chars"] = 0.0
+    out[-1]["end_chars"] = float(total)
+    return out
+
+
+def _epub_chapters(toc_entries, cum_by_doc, total):
+    """Auto-suggested milestones (no user input): the candidates the size/name
+    heuristic pre-checks, finalized. Kept for callers that want the default
+    without the checklist."""
+    cand = _epub_candidates(toc_entries, cum_by_doc, total)
+    return _epub_finalize([c for c in cand if c["suggested"]], total)
 
 
 def extract_epub(zip_bytes):
@@ -1207,7 +1250,7 @@ def extract_epub(zip_bytes):
             except Exception:
                 continue
 
-        chapters = _epub_chapters(
+        candidates = _epub_candidates(
             _epub_toc_entries(zf, names, manifest, opf, opf_dir), cum_by_doc, total)
 
         cover_b64 = cover_mime = None
@@ -1224,7 +1267,8 @@ def extract_epub(zip_bytes):
         return {"ok": True, "char_count": total, "title": _epub_title(opf),
                 "cover_b64": cover_b64, "cover_mime": cover_mime,
                 "cover_found": cover_b64 is not None,
-                "chapters": chapters, "chapter_count": len(chapters)}
+                "chapter_candidates": candidates,
+                "chapter_count": sum(1 for c in candidates if c["suggested"])}
 
 
 # ── GSM aggregate import — INACTIVE ──────────────────────────────────────────

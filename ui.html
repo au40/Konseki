@@ -1193,6 +1193,25 @@
   </div>
 </div>
 
+<!-- ── EPUB chapters → milestones checklist ────────────────────────────── -->
+<div id="epub-chapters-overlay" style="display:none">
+  <div id="epub-chapters-dialog" class="card">
+    <h2 style="margin:0 0 4px">Import chapters as milestones</h2>
+    <p class="muted" id="epub-chapters-sub" style="font-size:12px;margin:0 0 12px"></p>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <label style="font-size:12px;display:flex;gap:6px;align-items:center;cursor:pointer;color:var(--dim)">
+        <input type="checkbox" id="epub-chapters-all" onchange="toggleAllEpubChapters(this.checked)"> Select all
+      </label>
+      <span class="muted" id="epub-chapters-count" style="font-size:12px"></span>
+    </div>
+    <div id="epub-chapters-list"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
+      <button class="btn btn-outline btn-sm" onclick="resolveEpubChapters(null)">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="epub-chapters-ok" onclick="submitEpubChapters()">Create</button>
+    </div>
+  </div>
+</div>
+
 <script src="ui.js"></script>
 </body>
 </html>

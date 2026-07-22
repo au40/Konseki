@@ -767,6 +767,27 @@ select:focus { border-color: var(--accent); }
 #milestone-dialog input:focus, #milestone-dialog select:focus, #media-length-dialog input:focus {
   border-color: var(--accent);
 }
+#epub-chapters-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.55); backdrop-filter: blur(2px);
+  display: flex; align-items: center; justify-content: center;
+}
+#epub-chapters-dialog { width: 460px; max-width: 92vw; padding: 24px; box-shadow: 0 20px 60px rgba(0,0,0,0.5); }
+#epub-chapters-list {
+  max-height: 46vh; overflow-y: auto;
+  border: 1px solid var(--grid); border-radius: 8px; padding: 4px;
+}
+.epub-ch-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.epub-ch-row:hover { background: var(--hover); }
+.epub-ch-row input { flex-shrink: 0; margin: 0; }
+.epub-ch-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.epub-ch-row.off .epub-ch-name { color: var(--dim); }
+.epub-ch-chars {
+  flex-shrink: 0; color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums;
+}
 .series-member-card {
   width: 120px; position: relative; cursor: pointer;
   transition: transform 0.15s;
