@@ -1013,6 +1013,139 @@ def _find_epub_cover(zf, names, opf, manifest, spine, opf_dir):
     return None
 
 
+def _epub_text(s):
+    """Entity-decode + tag-strip + whitespace-collapse a TOC label."""
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", "", s or ""))).strip()
+
+
+# EPUB2 NCX: each navPoint carries one navLabel/text + one content src, in
+# reading order. This pairs them directly, so nesting (parts→chapters) flattens
+# to document order without tracking navPoint boundaries.
+_NCX_ENTRY_RE = re.compile(
+    r'<navLabel\b[^>]*>\s*<text\b[^>]*>(.*?)</text>\s*</navLabel>\s*'
+    r'<content\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']',
+    re.IGNORECASE | re.DOTALL)
+
+
+def _epub_toc_entries(zf, names, manifest, opf, opf_dir):
+    """Return [(label, doc_path)] for the EPUB's table of contents, in reading
+    order. `doc_path` is the fragment-stripped zip path of each entry's target.
+    Prefers the NCX (EPUB2 — most robust to parse); falls back to the EPUB3 nav
+    document. Entries whose target isn't a real spine document are filtered by
+    the caller (via `cum_by_doc`)."""
+    # (a) EPUB2 NCX — manifest item with the dtbncx media-type.
+    ncx_href = next((href for href, mtype in manifest.values()
+                     if mtype == "application/x-dtbncx+xml"), None)
+    entries = []
+    if ncx_href:
+        ncx_path = _epub_resolve(opf_dir, ncx_href)
+        ncx_dir = posixpath.dirname(ncx_path)
+        if ncx_path in names:
+            try:
+                ncx = zf.read(ncx_path).decode("utf-8", "replace")
+            except Exception:
+                ncx = ""
+            for m in _NCX_ENTRY_RE.finditer(ncx):
+                label, doc = _epub_text(m.group(1)), _epub_resolve(ncx_dir, m.group(2))
+                if label and doc:
+                    entries.append((label, doc))
+    if entries:
+        return entries
+
+    # (b) EPUB3 nav document — manifest item flagged properties="nav".
+    nav_href = None
+    for item in re.finditer(r'<item\b[^>]*>', opf, re.IGNORECASE):
+        if "nav" in (_epub_attr(item.group(0), "properties") or "").lower().split():
+            nav_href = _epub_attr(item.group(0), "href")
+            break
+    if nav_href:
+        nav_path = _epub_resolve(opf_dir, nav_href)
+        nav_dir = posixpath.dirname(nav_path)
+        if nav_path in names:
+            try:
+                nav = zf.read(nav_path).decode("utf-8", "replace")
+            except Exception:
+                nav = ""
+            toc = re.search(
+                r'<nav\b[^>]*epub:type\s*=\s*["\'][^"\']*\btoc\b[^"\']*["\'][^>]*>(.*?)</nav>',
+                nav, re.IGNORECASE | re.DOTALL)
+            scope = toc.group(1) if toc else nav
+            for m in re.finditer(
+                    r'<a\b[^>]*\bhref\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+                    scope, re.IGNORECASE | re.DOTALL):
+                label, doc = _epub_text(m.group(2)), _epub_resolve(nav_dir, m.group(1))
+                if label and doc:
+                    entries.append((label, doc))
+    return entries
+
+
+# Front/back-matter trim: an end chapter is dropped when its char span is below
+# this fraction of the median chapter span (cover/TOC/colophon/character-list are
+# near-empty of prose next to a real chapter). Only the leading/trailing run is
+# trimmed — never a short chapter in the middle.
+_EPUB_TRIM_FRAC = 0.15
+
+
+def _median(xs):
+    s = sorted(xs)
+    n = len(s)
+    if not n:
+        return 0.0
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def _epub_chapters(toc_entries, cum_by_doc, total):
+    """Map TOC entries to media-cumulative char ranges (Tier-1: chapter bounds
+    land on spine-document breaks). Returns [{name, start_chars, end_chars}],
+    contiguous and non-overlapping, in reading order. `cum_by_doc` maps each
+    counted spine-doc path to the cumulative char count at its start; `total` is
+    the book's counted char total.
+
+    Chapters are keyed by the *document* a TOC entry targets (first label wins),
+    so a multi-chapter file collapses to one milestone and an empty cover/TOC
+    page — which shares its start offset with the next real chapter — can't steal
+    that chapter's name. A chapter spans from its start document to the next
+    chapter's; untitled interstitial documents fold into the preceding chapter.
+
+    Zero-span entries (empty pages) drop out, and tiny front/back-matter entries
+    are trimmed from the ends (see `_EPUB_TRIM_FRAC`). The surviving span is
+    snapped to cover [0, total] so the chapters tile the whole book."""
+    # First TOC label per targeted (counted) document, in reading order.
+    first_label = {}
+    for label, doc in toc_entries:
+        if doc in cum_by_doc and doc not in first_label:
+            first_label[doc] = label
+    if not first_label:
+        return []
+
+    # Chapter-start docs by char offset; each spans to the next start (or total).
+    starts = sorted(first_label, key=lambda d: cum_by_doc[d])
+    chapters = []
+    for i, doc in enumerate(starts):
+        s = float(cum_by_doc[doc])
+        e = float(cum_by_doc[starts[i + 1]]) if i + 1 < len(starts) else float(total)
+        if e > s:  # drop empty pages (cover, illustration-only, dup fragments)
+            chapters.append({"name": first_label[doc], "start": s, "end": e})
+    if not chapters:
+        return []
+
+    # Trim the tiny leading/trailing run (front/back matter) by relative span.
+    if len(chapters) >= 3:
+        thr = _EPUB_TRIM_FRAC * _median([c["end"] - c["start"] for c in chapters])
+        lo, hi = 0, len(chapters)
+        while hi - lo > 1 and chapters[lo]["end"] - chapters[lo]["start"] < thr:
+            lo += 1
+        while hi - lo > 1 and chapters[hi - 1]["end"] - chapters[hi - 1]["start"] < thr:
+            hi -= 1
+        chapters = chapters[lo:hi]
+
+    chapters[0]["start"] = 0.0
+    chapters[-1]["end"] = float(total)
+    return [{"name": c["name"], "start_chars": c["start"], "end_chars": c["end"]}
+            for c in chapters]
+
+
 def extract_epub(zip_bytes):
     """Pull a title + cover image + total Japanese char count out of an EPUB.
 
@@ -1054,8 +1187,11 @@ def extract_epub(zip_bytes):
                  for t in re.finditer(r'<itemref\b[^>]*>', opf, re.IGNORECASE)]
         spine = [s for s in spine if s in manifest]
 
-        # char count over the spine's content documents
+        # char count over the spine's content documents. cum_by_doc records the
+        # cumulative char total at each document's START, so the TOC can map a
+        # chapter's target document to a media-cumulative char position.
         total = 0
+        cum_by_doc = {}
         for sid in spine:
             href, mtype = manifest[sid]
             is_doc = ("html" in mtype or "xml" in mtype
@@ -1065,10 +1201,14 @@ def extract_epub(zip_bytes):
             path = _epub_resolve(opf_dir, href)
             if path not in names:
                 continue
+            cum_by_doc.setdefault(path, total)
             try:
                 total += _ttsu_char_count(zf.read(path).decode("utf-8", "replace"))
             except Exception:
                 continue
+
+        chapters = _epub_chapters(
+            _epub_toc_entries(zf, names, manifest, opf, opf_dir), cum_by_doc, total)
 
         cover_b64 = cover_mime = None
         cover_path = _find_epub_cover(zf, names, opf, manifest, spine, opf_dir)
@@ -1083,7 +1223,8 @@ def extract_epub(zip_bytes):
 
         return {"ok": True, "char_count": total, "title": _epub_title(opf),
                 "cover_b64": cover_b64, "cover_mime": cover_mime,
-                "cover_found": cover_b64 is not None}
+                "cover_found": cover_b64 is not None,
+                "chapters": chapters, "chapter_count": len(chapters)}
 
 
 # ── GSM aggregate import — INACTIVE ──────────────────────────────────────────

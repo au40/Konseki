@@ -821,9 +821,21 @@ class Api:
 
         row = _q1("SELECT char_count FROM media_char_counts WHERE title=?", title)
         old_count = int(row[0]) if row else 0
-        has_cover = bool(_q1("SELECT 1 FROM book_covers WHERE title=?", title))
-        would_replace_count = old_count > 0 and new_count > 0
-        would_replace_cover = has_cover and cover_found
+        # Only a *different* length counts as a replacement — re-dropping the same
+        # EPUB (identical count) shouldn't prompt.
+        would_replace_count = old_count > 0 and new_count > 0 and new_count != old_count
+
+        # Likewise for the cover: shrink the incoming image the same way stored
+        # covers are, and compare — an identical cover isn't a replacement.
+        would_replace_cover = False
+        if cover_found:
+            existing = _q1("SELECT image_data FROM book_covers WHERE title=?", title)
+            if existing:
+                try:
+                    mime, b64_out = _shrink_cover_b64(res["cover_b64"])
+                    would_replace_cover = f"data:{mime};base64,{b64_out}" != existing[0]
+                except Exception:
+                    would_replace_cover = True  # can't compare → treat as a change
 
         if (would_replace_count or would_replace_cover) and not overwrite:
             return {"ok": False, "needs_confirm": True, "title": title,
@@ -844,7 +856,9 @@ class Api:
             return {"ok": False, "error": str(e)}
 
         return {"ok": True, "char_count": new_count, "count_set": new_count > 0,
-                "cover_found": cover_found}
+                "cover_found": cover_found,
+                "chapters": res.get("chapters") or [],
+                "chapter_count": int(res.get("chapter_count") or 0)}
 
     def extract_epub_meta(self, b64_str):
         """Preview an EPUB for the Add-media 'Epub import' tab: pull its title,
@@ -865,6 +879,8 @@ class Api:
             "cover_b64":   res.get("cover_b64"),
             "cover_mime":  res.get("cover_mime"),
             "cover_found": bool(res.get("cover_found")),
+            "chapters":    res.get("chapters") or [],
+            "chapter_count": int(res.get("chapter_count") or 0),
         }
 
     def add_media_epub(self, title, atype, minutes, session_date, book_chars,
@@ -988,6 +1004,30 @@ class Api:
         except Exception as e:
             print(f"[milestones] list: {e}")
             return []
+
+    def apply_epub_chapters(self, title, chapters, replace=False):
+        """Turn an EPUB's chapters into chars-unit milestones for `title`.
+        `chapters` is the list surfaced by extract_epub_meta / import_epub
+        ({name, start_chars, end_chars}); `replace=True` clears the title's
+        existing milestones first (used when the book already has some)."""
+        try:
+            title = (title or "").strip()
+            if not title:
+                return {"ok": False, "error": "Missing title."}
+            items = []
+            for c in (chapters or []):
+                name = (c.get("name") or "").strip()
+                if not name:
+                    continue
+                items.append({"name": name, "unit": "chars",
+                              "start_val": c.get("start_chars"),
+                              "end_val": c.get("end_chars")})
+            if not items:
+                return {"ok": False, "error": "No chapters found in this EPUB."}
+            return db.db_add_milestones_bulk(title, items, replace=bool(replace))
+        except Exception as e:
+            print(f"[milestones] epub chapters: {e}")
+            return {"ok": False, "error": str(e)}
 
     def get_milestone_detail(self, milestone_id):
         try:

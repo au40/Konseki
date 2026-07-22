@@ -1211,9 +1211,12 @@ async function submitAddMediaEpub() {
     fb.className = 'feedback err'; fb.textContent = (r && r.error) || 'Something went wrong.'; return;
   }
 
+  // Brand-new entry, so no existing milestones to replace (pass 0).
+  const extra = await maybeImportEpubChapters(title, addEpubMeta.chapters, 0);
+
   closeAddMediaModal();
   statsCache = {};
-  setStatus('Media added from EPUB');
+  setStatus(extra ? `Media added from EPUB — ${extra}` : 'Media added from EPUB');
   loadMedia();
 }
 
@@ -1442,6 +1445,27 @@ async function fileToBase64(file) {
   return btoa(binary);
 }
 
+// After an EPUB import, offer to fill the book's milestones from its chapters.
+// `chapters` is the extractor's list ({name, start_chars, end_chars}); `existing`
+// is how many milestones the title already has (0 for a brand-new entry). When
+// the book already has milestones the prompt asks to REPLACE them (chapters can't
+// coexist with arbitrary user milestones — they'd overlap). Returns a short
+// status suffix on success, or '' if the user declined / nothing was done.
+async function maybeImportEpubChapters(title, chapters, existing) {
+  if (!chapters || !chapters.length) return '';
+  const n = chapters.length;
+  const replace = existing > 0;
+  const msg = replace
+    ? `“${title}” already has ${existing} milestone${existing === 1 ? '' : 's'}. `
+      + `Replace ${existing === 1 ? 'it' : 'them'} with this EPUB’s ${n} chapter${n === 1 ? '' : 's'}?`
+    : `Fill ${n} milestone${n === 1 ? '' : 's'} from this EPUB’s chapters?`;
+  const ok = await showConfirm(msg, replace ? 'Replace' : 'Import', '#5B8CFF');
+  if (!ok) return '';
+  const r = await window.pywebview.api.apply_epub_chapters(title, chapters, replace);
+  if (!r || !r.ok) { setStatus('Chapter import failed: ' + ((r && r.error) || 'unknown error')); return ''; }
+  return `${r.count} chapter${r.count === 1 ? '' : 's'} → milestones`;
+}
+
 // Drag an .epub onto the cover box to auto-fill its cover (first page's image)
 // and progress-bar length (its Japanese character count). Writes only those two
 // display fields — reading history is untouched. Replacing an existing cover or
@@ -1474,6 +1498,17 @@ async function importEpubFile(file, title, overwrite = false) {
     return;
   }
 
+  const bits = [];
+  if (r.count_set) bits.push(`${r.char_count.toLocaleString()} chars`);
+  bits.push(r.cover_found ? 'cover set' : 'no cover found');
+
+  // Offer chapters → milestones (existing media may already have some).
+  let existing = 0;
+  try { existing = (await window.pywebview.api.list_milestones(title) || []).length; }
+  catch (e) { /* leave existing at 0 */ }
+  const extra = await maybeImportEpubChapters(title, r.chapters, existing);
+  if (extra) bits.push(extra);
+
   [mediaAllData, seriesData] = await Promise.all([
     window.pywebview.api.get_media(),
     window.pywebview.api.get_series(),
@@ -1481,9 +1516,6 @@ async function importEpubFile(file, title, overwrite = false) {
   const media = await window.pywebview.api.get_title_detail(title);
   if (media) renderMediaDetail(media);
 
-  const bits = [];
-  if (r.count_set) bits.push(`${r.char_count.toLocaleString()} chars`);
-  bits.push(r.cover_found ? 'cover set' : 'no cover found');
   setStatus('✓ EPUB imported — ' + bits.join(', '));
 }
 

@@ -2602,6 +2602,47 @@ def db_add_milestone(title, name, unit, start_val, end_val, color=None):
     return {"ok": True, "id": new_id}
 
 
+def db_add_milestones_bulk(title, items, replace=False):
+    """Insert many milestones for `title` in one pass (EPUB chapter import).
+    `items`: [{name, unit?, start_val, end_val, color?}] — unit defaults to
+    'chars'. `replace=True` clears the title's existing milestones first.
+    Position and default color are assigned by list order. No per-insert
+    overlap check: chapters arrive contiguous and disjoint by construction, and
+    the two call modes (replace-all, or add-to-empty) both preserve that."""
+    items = items or []
+    con = sqlite3.connect(DB_PATH)
+    try:
+        if replace:
+            con.execute("DELETE FROM milestones WHERE title=?", (title,))
+        row = con.execute(
+            "SELECT COALESCE(MAX(position),-1) FROM milestones WHERE title=?", (title,)
+        ).fetchone()
+        pos = row[0] if row and row[0] is not None else -1
+        now = datetime.now().isoformat()
+        inserted = 0
+        for it in items:
+            name = (it.get("name") or "").strip()
+            if not name:
+                continue
+            unit = it.get("unit") or "chars"
+            if unit not in ("hours", "chars"):
+                unit = "chars"
+            sv, ev = it.get("start_val"), it.get("end_val")
+            sv = float(sv) if sv not in (None, "", "null") else None
+            ev = float(ev) if ev not in (None, "", "null") else None
+            pos += 1
+            col = _norm_milestone_color(it.get("color"), pos)
+            con.execute(
+                "INSERT INTO milestones (title, name, unit, start_val, end_val, position, color, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (title, name, unit, sv, ev, pos, col, now))
+            inserted += 1
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "count": inserted}
+
+
 def db_update_milestone(milestone_id, name, unit, start_val, end_val, color=None):
     mid = int(milestone_id)
     existing = _q1("SELECT title, position FROM milestones WHERE id=?", mid)
