@@ -377,6 +377,11 @@ class Api:
     def get_media_titles(self):
         return get_media_titles()
 
+    def get_recent_log_media(self, method):
+        """Titles logged in the last 7 days via a hand-log method ('manual' | 'total'),
+        for the quick-relog chips under the Log-entry cards."""
+        return db.get_recent_log_titles("total" if method == "total" else "manual")
+
     def get_title_detail(self, title):
         return db.db_get_title_detail(title)
 
@@ -511,6 +516,7 @@ class Api:
         try:
             datetime.strptime(session_date, "%Y-%m-%d")
             insert_manual_session(atype, float(minutes), title, session_date, chars)
+            db.record_recent_log_title("manual", title)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -595,6 +601,7 @@ class Api:
                 delta_chars = 0
 
             insert_manual_session("Reading", delta_secs / 60.0, title or "", session_date, delta_chars)
+            db.record_recent_log_title("total", title or "")
 
             # Advance the baseline: time always, chars only if a new total was given.
             new_base_chars = int(float(new_chars)) if has_chars else base_chars

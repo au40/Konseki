@@ -179,6 +179,10 @@ select:focus { border-color: var(--accent); }
 }
 .pill-del .x:hover { background: #FF6B6B; color: #fff; }
 
+/* ── Recent quick-relog chips (Log-entry cards) ──────────────────────────── */
+.recent-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 0 14px; }
+.recent-chips .rc-label { font-size: 12px; color: var(--dim); margin-right: 2px; }
+
 /* ── Feedback ────────────────────────────────────────────────────────────── */
 .feedback { font-size: 12px; min-height: 18px; margin-top: 8px; }
 .feedback.ok  { color: var(--success); }

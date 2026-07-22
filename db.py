@@ -1305,6 +1305,51 @@ def get_media_titles():
     aliases = _get_aliases()
     return [{"title": r[0], "display_title": aliases.get(r[0], r[0])} for r in rows]
 
+# ── Recent hand-log targets (quick-relog chips) ───────────────────────────────
+# Powers the "Recent:" chips under the two Log-entry cards. Kept in `settings`
+# rather than derived from `sessions` because both hand-log methods — the manual
+# "Add entry" form and the "Total time log" box — write plain source='manual' rows
+# with no method marker, so the sessions table can't tell them apart. We instead
+# record {title -> last-used ISO timestamp} per method here.
+def _recent_log_key(method):
+    return "recent_log_titles_" + ("total" if method == "total" else "manual")
+
+def _load_recent_log(method):
+    try:
+        data = json.loads(get_setting(_recent_log_key(method), "") or "{}")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+def record_recent_log_title(method, title):
+    """Mark `title` as just logged via `method` ('manual' | 'total'). Empty titles
+    (optional/untitled logs) are ignored."""
+    title = (title or "").strip()
+    if not title:
+        return
+    data = _load_recent_log(method)
+    data[title] = datetime.now().isoformat()
+    # Keep the blob bounded: drop the oldest beyond the 40 most-recent.
+    if len(data) > 40:
+        for t in sorted(data, key=data.get)[:len(data) - 40]:
+            data.pop(t, None)
+    set_setting(_recent_log_key(method), json.dumps(data))
+
+def get_recent_log_titles(method, days=7, limit=12):
+    """Titles logged via `method` within the last `days`, most-recent first,
+    filtered to titles that still exist as media."""
+    data = _load_recent_log(method)
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    recent = sorted(((t, ts) for t, ts in data.items() if ts >= cutoff),
+                    key=lambda x: x[1], reverse=True)[:limit]
+    if not recent:
+        return []
+    existing = {r[0] for r in _q(
+        "SELECT DISTINCT title FROM sessions WHERE title IS NOT NULL AND title != ''")}
+    aliases = _get_aliases()
+    return [{"title": t, "display_title": aliases.get(t, t)}
+            for t, _ in recent if t in existing]
+
 def get_media_stats():
     rows = _q("""
         SELECT

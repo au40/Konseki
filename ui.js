@@ -673,14 +673,34 @@ function updateCharsHint() {
   }
 }
 
-// Populate the media dropdown. Option value is the original title so a manual entry
-// merges into the existing media card (GSM titles included — purely additive, never
-// touches the GSM rollover-attribution path, which only reconciles source='gsm' rows).
+// Fill a media <select> from the title list. Option value is the original title so
+// a manual entry merges into the existing media card (GSM titles included — purely
+// additive, never touches the GSM rollover-attribution path, which only reconciles
+// source='gsm' rows). Keeps the current selection if it still exists, else falls
+// back to the leading "— none —" option; `preferred` overrides the retained value.
+function fillMediaSelect(sel, titles, preferred) {
+  if (!sel) return;
+  const want = preferred !== undefined ? preferred : sel.value;
+  sel.innerHTML = '<option value="">— none —</option>';
+  (titles || []).forEach(m => {
+    if (!m.title) return;
+    const o = document.createElement('option');
+    o.value = m.title;
+    o.textContent = m.display_title || m.title;
+    sel.appendChild(o);
+  });
+  sel.value = want;
+}
+
+// Refresh the media pickers/lists. The manual-log picker is now a <select> (same
+// model as the total-time-log box); the #media-titles datalist is kept only for the
+// free-text title field in the edit-log modal. Also repaints the manual recent chips.
 async function populateMediaTitles() {
+  let titles = [];
+  try { titles = await window.pywebview.api.get_media_titles(); }
+  catch (e) { /* pickers are optional */ }
   const dl = document.getElementById('media-titles');
-  if (!dl) return;
-  try {
-    const titles = await window.pywebview.api.get_media_titles();
+  if (dl) {
     dl.innerHTML = '';
     titles.forEach(m => {
       if (!m.title) return;
@@ -689,7 +709,46 @@ async function populateMediaTitles() {
       if (m.display_title && m.display_title !== m.title) o.label = m.display_title;
       dl.appendChild(o);
     });
-  } catch (e) { /* dropdown is optional; free-text entry still works */ }
+  }
+  fillMediaSelect(document.getElementById('log-title'), titles);
+  await renderRecentLogChips('manual');
+}
+
+// Quick re-log chips: titles logged via `method` ('manual' | 'total') in the last
+// 7 days. Clicking one selects it in that card's media <select> so the user can log
+// to it again without opening the dropdown. The two hand-log methods write
+// indistinguishable source='manual' rows, so the recent lists are tracked per method
+// in settings (see db.record_recent_log_title), not derived from the sessions table.
+async function renderRecentLogChips(method) {
+  const cfg = method === 'total'
+    ? { box: 'tlog-recent', sel: 'tlog-media', onPick: onTotalLogMediaChange }
+    : { box: 'log-recent',  sel: 'log-title',  onPick: null };
+  const box = document.getElementById(cfg.box);
+  if (!box) return;
+  let items = [];
+  try { items = await window.pywebview.api.get_recent_log_media(method); }
+  catch (e) { /* chips are optional */ }
+  box.innerHTML = '';
+  if (!items || !items.length) { box.style.display = 'none'; return; }
+  const lbl = document.createElement('span');
+  lbl.className = 'rc-label';
+  lbl.textContent = 'Recent:';
+  box.appendChild(lbl);
+  const sel = document.getElementById(cfg.sel);
+  items.forEach(m => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pill';
+    b.textContent = m.display_title || m.title;
+    b.title = 'Log to ' + (m.display_title || m.title);
+    b.onclick = () => {
+      if (!sel) return;
+      sel.value = m.title;
+      if (sel.value === m.title && cfg.onPick) cfg.onPick();
+    };
+    box.appendChild(b);
+  });
+  box.style.display = '';
 }
 
 function buildColorSwatches() {
@@ -1197,15 +1256,7 @@ async function populateTotalLogMedia(preferred) {
   const want = preferred !== undefined ? preferred : sel.value;
   try {
     const titles = await window.pywebview.api.get_media_titles();
-    sel.innerHTML = '<option value="">— none —</option>';
-    titles.forEach(m => {
-      if (!m.title) return;
-      const o = document.createElement('option');
-      o.value = m.title;
-      o.textContent = m.display_title || m.title;
-      sel.appendChild(o);
-    });
-    sel.value = want;
+    fillMediaSelect(sel, titles, want);
   } catch (e) { /* leave the "none" option only */ }
 }
 
@@ -1216,6 +1267,7 @@ async function initTotalLog() {
   document.getElementById('tlog-mode-permedia').classList.toggle('active', tlogMode === 'per_media');
   await populateTotalLogMedia(st.last_media || '');
   await refreshTotalLogBaseline();
+  await renderRecentLogChips('total');
 }
 
 async function toggleTotalLogMode(mode) {
@@ -1344,6 +1396,7 @@ async function doTotalLog() {
     document.getElementById('tlog-date')._flatpickr?.setDate(today(), false);
     await refreshTotalLogBaseline();
     await populateMediaTitles();
+    await renderRecentLogChips('total');
     statsCache = {};
     setStatus('Session logged');
     if (currentPage === 'dashboard') await loadDashboard();

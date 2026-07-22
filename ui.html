@@ -116,11 +116,12 @@
           </div>
           <div class="form-group" style="flex:1;min-width:200px">
             <label>Title / media (optional)</label>
-            <input type="text" id="log-title" list="media-titles" placeholder="Type, or pick existing media">
+            <select id="log-title"></select>
             <datalist id="media-titles"></datalist>
           </div>
         </div>
         <div id="log-chars-hint" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
+        <div id="log-recent" class="recent-chips" style="display:none"></div>
         <div class="form-group" style="max-width:180px">
           <label>Date</label>
           <input type="text" id="log-date">
@@ -159,6 +160,7 @@
             <select id="tlog-media" onchange="onTotalLogMediaChange()"></select>
           </div>
         </div>
+        <div id="tlog-recent" class="recent-chips" style="display:none"></div>
         <div class="form-group" style="max-width:180px">
           <label>Date</label>
           <input type="text" id="tlog-date">
