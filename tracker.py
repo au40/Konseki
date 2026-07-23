@@ -55,6 +55,7 @@ from db import (
     db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     db_get_dev_notes, db_add_dev_note, db_delete_dev_note, db_set_dev_note_importance,
+    db_set_dev_note_tab, db_get_dev_tabs, db_add_dev_tab, db_rename_dev_tab, db_delete_dev_tab,
     _get_aliases, _q, _q1,
     insert_manual_session, create_manual_media, import_csv_file,
     get_total_log_baseline, set_total_log_baseline,
@@ -490,9 +491,9 @@ class Api:
     def get_dev_notes(self):
         return db_get_dev_notes()
 
-    def add_dev_note(self, body):
+    def add_dev_note(self, body, tab_id=None):
         try:
-            db_add_dev_note(body)
+            db_add_dev_note(body, tab_id)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -504,10 +505,43 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def set_dev_note_tab(self, note_id, tab_id):
+        try:
+            db_set_dev_note_tab(note_id, tab_id)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def delete_dev_note(self, note_id):
         try:
             db_delete_dev_note(note_id)
             return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def get_dev_tabs(self):
+        return db_get_dev_tabs()
+
+    def add_dev_tab(self, name):
+        try:
+            new_id = db_add_dev_tab(name)
+            return {"ok": True, "id": new_id}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def rename_dev_tab(self, tab_id, name):
+        try:
+            db_rename_dev_tab(tab_id, name)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_dev_tab(self, tab_id):
+        try:
+            dest = db_delete_dev_tab(tab_id)
+            if dest is None:
+                return {"ok": False, "error": "Can't delete the last tab."}
+            return {"ok": True, "moved_to": dest}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

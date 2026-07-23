@@ -931,7 +931,13 @@
         <div class="card">
           <h3>Notes</h3>
           <p class="muted" style="margin-bottom:10px">Quick scratchpad for bugs and ideas.</p>
-          <div class="settings-row" style="margin:0 0 12px">
+          <div class="dev-tabs-bar">
+            <div class="seg" id="dev-note-tabs"></div>
+            <button class="btn btn-outline btn-sm dev-tab-op" onclick="addDevTab()" title="Add a tab">＋</button>
+            <button class="btn btn-outline btn-sm dev-tab-op" id="dev-tab-rename" onclick="renameDevTab()" title="Rename this tab" style="display:none">✎</button>
+            <button class="btn btn-outline btn-sm dev-tab-op" id="dev-tab-delete" onclick="deleteDevTab()" title="Delete this tab" style="display:none">🗑</button>
+          </div>
+          <div class="settings-row" style="margin:10px 0 12px">
             <input type="text" id="dev-note-input" placeholder="Jot a bug or idea…" style="flex:1"
                    onkeydown="if(event.key==='Enter') addDevNote()">
             <button class="btn btn-outline btn-sm" onclick="addDevNote()">Add</button>

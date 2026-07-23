@@ -269,12 +269,24 @@ def init_db():
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             body       TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            importance INTEGER NOT NULL DEFAULT 0
+            importance INTEGER NOT NULL DEFAULT 0,
+            tab_id     INTEGER
         )
     """)
     dev_cols = [r[1] for r in con.execute("PRAGMA table_info(dev_notes)").fetchall()]
     if "importance" not in dev_cols:
         con.execute("ALTER TABLE dev_notes ADD COLUMN importance INTEGER NOT NULL DEFAULT 0")
+    if "tab_id" not in dev_cols:
+        con.execute("ALTER TABLE dev_notes ADD COLUMN tab_id INTEGER")
+    # User-defined note tabs (bugs / ideas / whatever the user names them).
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS dev_tabs (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            position   INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
 
     con.execute("""
         CREATE TABLE IF NOT EXISTS series (
@@ -1902,18 +1914,47 @@ def db_delete_custom_category(name):
 
 # ── Dev notes ─────────────────────────────────────────────────────────────────
 # importance: 0 = none (grey), 1 = medium (yellow), 2 = high (red)
-def db_get_dev_notes():
-    rows = _q("SELECT id, body, created_at, importance FROM dev_notes ORDER BY id DESC")
-    return [{"id": r[0], "body": r[1], "created_at": r[2], "importance": r[3]} for r in rows]
+def _norm_tab_id(tab_id):
+    """None / '' → None; anything else → int (or None if unparseable)."""
+    if tab_id in (None, ""):
+        return None
+    try:
+        return int(tab_id)
+    except (TypeError, ValueError):
+        return None
 
-def db_add_dev_note(body):
+def _ensure_default_dev_tab(con):
+    """Guarantee at least one tab exists and no note is left tab-less.
+
+    Every note belongs to exactly one tab — there is no aggregate view — so a
+    fresh install (or a DB from before tabs existed) needs a home tab. Returns
+    the id of the first tab.
+    """
+    n = con.execute("SELECT COUNT(*) FROM dev_tabs").fetchone()[0]
+    if n == 0:
+        con.execute("INSERT INTO dev_tabs (name, position, created_at) VALUES (?,?,?)",
+                    ("Tab 1", 1, datetime.now().isoformat()))
+    first_id = con.execute("SELECT id FROM dev_tabs ORDER BY position, id LIMIT 1").fetchone()[0]
+    con.execute("UPDATE dev_notes SET tab_id=? WHERE tab_id IS NULL", (first_id,))
+    return first_id
+
+def db_get_dev_notes():
+    rows = _q("SELECT id, body, created_at, importance, tab_id FROM dev_notes ORDER BY id DESC")
+    return [{"id": r[0], "body": r[1], "created_at": r[2],
+             "importance": r[3], "tab_id": r[4]} for r in rows]
+
+def db_add_dev_note(body, tab_id=None):
     body = (body or "").strip()
     if not body:
         return
     con = sqlite3.connect(DB_PATH)
+    first_id = _ensure_default_dev_tab(con)
+    tid = _norm_tab_id(tab_id)
+    if tid is None:
+        tid = first_id
     con.execute(
-        "INSERT INTO dev_notes (body, created_at) VALUES (?,?)",
-        (body, datetime.now().isoformat())
+        "INSERT INTO dev_notes (body, created_at, tab_id) VALUES (?,?,?)",
+        (body, datetime.now().isoformat(), tid)
     )
     con.commit()
     con.close()
@@ -1925,11 +1966,69 @@ def db_set_dev_note_importance(note_id, importance):
     con.commit()
     con.close()
 
+def db_set_dev_note_tab(note_id, tab_id):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("UPDATE dev_notes SET tab_id=? WHERE id=?",
+                (_norm_tab_id(tab_id), int(note_id)))
+    con.commit()
+    con.close()
+
 def db_delete_dev_note(note_id):
     con = sqlite3.connect(DB_PATH)
     con.execute("DELETE FROM dev_notes WHERE id=?", (int(note_id),))
     con.commit()
     con.close()
+
+# ── Dev-note tabs ───────────────────────────────────────────────────────────
+def db_get_dev_tabs():
+    con = sqlite3.connect(DB_PATH)
+    _ensure_default_dev_tab(con)
+    con.commit()
+    rows = con.execute("SELECT id, name FROM dev_tabs ORDER BY position, id").fetchall()
+    con.close()
+    return [{"id": r[0], "name": r[1]} for r in rows]
+
+def db_add_dev_tab(name):
+    name = (name or "").strip() or "Untitled"
+    con = sqlite3.connect(DB_PATH)
+    pos = con.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM dev_tabs").fetchone()[0]
+    cur = con.execute("INSERT INTO dev_tabs (name, position, created_at) VALUES (?,?,?)",
+                      (name, pos, datetime.now().isoformat()))
+    new_id = cur.lastrowid
+    con.commit()
+    con.close()
+    return new_id
+
+def db_rename_dev_tab(tab_id, name):
+    name = (name or "").strip()
+    if not name:
+        return
+    con = sqlite3.connect(DB_PATH)
+    con.execute("UPDATE dev_tabs SET name=? WHERE id=?", (name, int(tab_id)))
+    con.commit()
+    con.close()
+
+def db_delete_dev_tab(tab_id):
+    """Delete a tab, moving its notes to the first remaining tab.
+
+    Returns the destination tab id, or None if refused (can't delete the last
+    tab — there must always be one, since notes have nowhere else to live).
+    """
+    con = sqlite3.connect(DB_PATH)
+    total = con.execute("SELECT COUNT(*) FROM dev_tabs").fetchone()[0]
+    if total <= 1:
+        con.close()
+        return None
+    tab_id = int(tab_id)
+    dest = con.execute("SELECT id FROM dev_tabs WHERE id<>? ORDER BY position, id LIMIT 1",
+                       (tab_id,)).fetchone()
+    dest_id = dest[0] if dest else None
+    if dest_id is not None:
+        con.execute("UPDATE dev_notes SET tab_id=? WHERE tab_id=?", (dest_id, tab_id))
+    con.execute("DELETE FROM dev_tabs WHERE id=?", (tab_id,))
+    con.commit()
+    con.close()
+    return dest_id
 
 
 # ── Media completion ──────────────────────────────────────────────────────────

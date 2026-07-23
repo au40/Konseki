@@ -4770,6 +4770,11 @@ let devPyLogs     = [];   // accumulated backend entries (src:'py')
 let devPySeq      = 0;    // highest seq fetched; never reset (survives Clear)
 let devLogLastSig = '';   // count + last-ts signature to skip no-op re-renders
 
+let devNotes      = [];    // last fetched notes, cached for tab switches
+let devTabs       = [];    // user-defined tabs: [{id, name}]; always ≥1
+let devActiveTab  = null;  // numeric tab id; resolved to the first tab on load
+let draggedNoteId = null;  // id of the note being dragged onto a tab, or null
+
 async function loadDevPage() {
   await refreshDevLogs();
   await loadDevNotes();
@@ -4827,26 +4832,127 @@ async function clearDevLogs() {
 }
 
 async function loadDevNotes() {
+  [devTabs, devNotes] = await Promise.all([
+    window.pywebview.api.get_dev_tabs(),
+    window.pywebview.api.get_dev_notes(),
+  ]);
+  // Resolve the active tab: keep it if still present, else fall back to the first.
+  if (!devTabs.some(t => t.id === devActiveTab)) devActiveTab = devTabs.length ? devTabs[0].id : null;
+  renderDevNotes();
+}
+
+function renderDevNotes() {
   const list = document.getElementById('dev-notes-list');
+  const tabs = document.getElementById('dev-note-tabs');
   if (!list) return;
-  const notes = await window.pywebview.api.get_dev_notes();
-  if (!notes.length) {
+
+  // Tab bar: one button per tab, all equal. Double-click a tab to rename it;
+  // drop a dragged note onto a tab to move it there.
+  if (tabs) {
+    tabs.innerHTML = devTabs.map(t =>
+      `<button class="seg-btn${devActiveTab === t.id ? ' active' : ''}" ` +
+      `onclick="setDevNoteFilter(${t.id})" ondblclick="renameDevTab()" ` +
+      `ondragover="onDevTabDragOver(event)" ondragenter="onDevTabDragEnter(event)" ` +
+      `ondragleave="onDevTabDragLeave(event)" ondrop="onDevTabDrop(event, ${t.id})">${escHtml(t.name)}</button>`
+    ).join('');
+  }
+  // Rename always applies to the active tab; delete only when there's a spare
+  // (the last tab can't be deleted — notes need somewhere to live).
+  const rn = document.getElementById('dev-tab-rename');
+  const dl = document.getElementById('dev-tab-delete');
+  if (rn) rn.style.display = devActiveTab !== null ? '' : 'none';
+  if (dl) dl.style.display = (devActiveTab !== null && devTabs.length > 1) ? '' : 'none';
+
+  const shown = devNotes.filter(n => n.tab_id === devActiveTab);
+
+  if (!shown.length) {
     list.innerHTML = '<p class="empty-msg">No notes yet.</p>';
     return;
   }
   // Float important notes to the top (red, then yellow, then grey), newest-first within each.
-  notes.sort((a, b) => (b.importance || 0) - (a.importance || 0) || b.id - a.id);
+  shown.sort((a, b) => (b.importance || 0) - (a.importance || 0) || b.id - a.id);
   const dots = (n) => ['grey', 'yellow', 'red'].map((color, level) =>
     `<span class="dev-dot ${color}${(n.importance || 0) === level ? ' on' : ''}" ` +
     `title="${['Not important', 'Medium', 'High'][level]}" ` +
     `onclick="setDevNoteImportance(${n.id}, ${level})"></span>`).join('');
-  list.innerHTML = notes.map(n => `
-    <div class="dev-note-row">
+  list.innerHTML = shown.map(n => `
+    <div class="dev-note-row" draggable="true" title="Drag onto a tab to move it there"
+         ondragstart="onDevNoteDragStart(event, ${n.id})" ondragend="onDevNoteDragEnd(event)">
+      <span class="dev-note-grip">⠿</span>
       <span class="dev-note-dots">${dots(n)}</span>
       <span class="dev-note-date">${escHtml((n.created_at || '').slice(0, 16).replace('T', ' '))}</span>
       <span class="dev-note-body">${escHtml(n.body)}</span>
       <button class="btn btn-outline btn-sm" onclick="deleteDevNote(${n.id})">✕</button>
     </div>`).join('');
+}
+
+// ── Drag a note onto a tab to move it ──────────────────────────────────────
+function onDevNoteDragStart(ev, id) {
+  draggedNoteId = id;
+  ev.dataTransfer.effectAllowed = 'move';
+  ev.dataTransfer.setData('text/plain', String(id));   // Firefox needs some payload
+  ev.currentTarget.classList.add('dragging');
+}
+
+function onDevNoteDragEnd(ev) {
+  ev.currentTarget.classList.remove('dragging');
+  draggedNoteId = null;
+  document.querySelectorAll('#dev-note-tabs .seg-btn.drop-target')
+    .forEach(b => b.classList.remove('drop-target'));
+}
+
+function onDevTabDragOver(ev) {
+  if (draggedNoteId === null) return;
+  ev.preventDefault();                    // allow the drop
+  ev.dataTransfer.dropEffect = 'move';
+}
+
+function onDevTabDragEnter(ev) {
+  if (draggedNoteId !== null) ev.currentTarget.classList.add('drop-target');
+}
+
+function onDevTabDragLeave(ev) {
+  ev.currentTarget.classList.remove('drop-target');
+}
+
+async function onDevTabDrop(ev, tabId) {
+  ev.preventDefault();
+  ev.currentTarget.classList.remove('drop-target');
+  const id = draggedNoteId;
+  draggedNoteId = null;
+  if (id === null || tabId === devActiveTab) return;   // dropped on the tab it's already in
+  const r = await window.pywebview.api.set_dev_note_tab(id, tabId);
+  if (r.ok) await loadDevNotes();          // note leaves the current tab's view
+}
+
+function setDevNoteFilter(tabId) {
+  devActiveTab = tabId;   // null or a numeric id; filters the cached list, no re-fetch
+  renderDevNotes();
+}
+
+async function addDevTab() {
+  const name = (prompt('New tab name:') || '').trim();
+  if (!name) return;
+  const r = await window.pywebview.api.add_dev_tab(name);
+  if (r.ok) { devActiveTab = r.id; await loadDevNotes(); }   // jump to the new tab
+}
+
+async function renameDevTab() {
+  if (devActiveTab === null) return;
+  const cur = devTabs.find(t => t.id === devActiveTab);
+  const name = (prompt('Rename tab:', cur ? cur.name : '') || '').trim();
+  if (!name) return;
+  const r = await window.pywebview.api.rename_dev_tab(devActiveTab, name);
+  if (r.ok) await loadDevNotes();
+}
+
+async function deleteDevTab() {
+  if (devActiveTab === null || devTabs.length <= 1) return;
+  const cur = devTabs.find(t => t.id === devActiveTab);
+  if (!await showConfirm(`Delete tab “${cur ? cur.name : ''}”? Its notes move to the next tab.`)) return;
+  const r = await window.pywebview.api.delete_dev_tab(devActiveTab);
+  if (r.ok) { devActiveTab = r.moved_to; await loadDevNotes(); }
+  else setStatus(r.error || 'Could not delete tab');
 }
 
 async function setDevNoteImportance(id, level) {
@@ -4858,7 +4964,7 @@ async function addDevNote() {
   const input = document.getElementById('dev-note-input');
   const body = (input.value || '').trim();
   if (!body) return;
-  const r = await window.pywebview.api.add_dev_note(body);
+  const r = await window.pywebview.api.add_dev_note(body, devActiveTab);   // files under the active tab
   if (r.ok) { input.value = ''; await loadDevNotes(); }
 }
 
@@ -5009,13 +5115,12 @@ function fmtMediaMemberMeta(d) {
 
 function renderMilestonesList(el, milestones, gcc) {
   el.innerHTML = '';
-  // Fill a 2-column grid column-major (down then across): 1 3 / 2 4. Rows are
-  // fixed at ceil(n/2) so grid-auto-flow:column wraps after the first column.
-  // A single milestone stays full-width rather than sitting in a half column.
-  const n = milestones.length;
-  const cols = n > 1 ? 2 : 1;
-  el.style.gridTemplateColumns = `repeat(${cols}, minmax(0, 1fr))`;
-  el.style.gridTemplateRows    = `repeat(${Math.ceil(n / cols) || 1}, auto)`;
+  // Fill a 2-column grid row-major (across then down): 1 2 / 3 4. Always 2
+  // columns, even for a single milestone — a lone milestone sits in a half
+  // column so its size matches the two-up layout and never reflows when a
+  // second one is added.
+  el.style.gridTemplateColumns = `repeat(2, minmax(0, 1fr))`;
+  el.style.gridTemplateRows    = '';
   milestones.forEach((m, idx) => {
     const row = document.createElement('div');
     row.className = 'milestone-row';

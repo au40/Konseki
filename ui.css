@@ -687,7 +687,7 @@ select:focus { border-color: var(--accent); }
 /* Milestones list (inside media detail hero) */
 .milestones-list {
   margin-top: 10px; max-height: 160px; overflow-y: auto;
-  display: grid; grid-auto-flow: column;
+  display: grid; grid-auto-flow: row;
   column-gap: 14px; row-gap: 8px;
   padding: 10px 12px 4px 4px;
 }
@@ -1176,3 +1176,13 @@ span.flatpickr-weekday { color: var(--dim) !important; background: #2a2a42 !impo
 .dev-dot.grey   { background: #9090A8; }
 .dev-dot.yellow { background: #FFD15B; }
 .dev-dot.red    { background: #FF6B6B; }
+.dev-tabs-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dev-tabs-bar .seg { flex-wrap: wrap; }
+.dev-tab-op { flex: none; padding: 5px 10px; line-height: 1; }
+.dev-note-grip {
+  align-self: center; flex: none; cursor: grab; user-select: none;
+  color: var(--dim); font-size: 13px; letter-spacing: -1px;
+}
+.dev-note-grip:active { cursor: grabbing; }
+.dev-note-row.dragging { opacity: 0.4; }
+#dev-note-tabs .seg-btn.drop-target { outline: 2px dashed var(--accent); outline-offset: 2px; }
