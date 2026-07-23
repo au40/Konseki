@@ -446,6 +446,21 @@
         <!-- Stat cards -->
         <div class="stat-grid" id="series-detail-stats"></div>
 
+        <!-- Series completion bar: same component as the media completion bar
+             (.detail-progress / .progress-track / .progress-seg), one colored
+             segment per book, packed in series order against the summed length. -->
+        <div id="series-progress" class="detail-progress" style="display:none">
+          <div class="detail-progress-head">
+            <span id="series-progress-pct" class="detail-progress-pct"></span>
+            <span id="series-progress-counts" class="detail-progress-counts"></span>
+          </div>
+          <div class="progress-track" id="series-progress-track"></div>
+          <div class="detail-progress-foot">
+            <span id="series-progress-eta" class="detail-progress-eta"></span>
+          </div>
+          <div id="series-progress-nolen" class="muted" style="font-size:11px"></div>
+        </div>
+
         <!-- Charts -->
         <h2 style="margin-top:16px">Daily time</h2>
         <div class="chart-wrap"><canvas id="chart-series-time" height="180"></canvas></div>

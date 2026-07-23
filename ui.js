@@ -3332,10 +3332,10 @@ function makeSeriesCard(s) {
   const members = s.members;
   const front  = members[0];
   const mid    = members[1];
-  const back   = members[2];
 
+  // Grid icon stacks at most two covers (front + one peek), even for longer
+  // series; the badge still shows the true member count.
   let html = '';
-  if (back)  html += `<div class="series-layer series-layer-back">${cardLayerHTML(back)}</div>`;
   if (mid)   html += `<div class="series-layer series-layer-mid">${cardLayerHTML(mid)}</div>`;
   html += `<div class="series-layer series-layer-front">${cardLayerHTML(front)}</div>`;
 
@@ -3391,15 +3391,115 @@ async function openSeriesDetail(seriesId) {
   renderSeriesDetail(s, memberDetails.filter(Boolean));
 }
 
+// Series completion bar. Uses the SAME component as the media completion bar
+// (.detail-progress head + .progress-track + .progress-seg tints + .progress-tick
+// dividers + the shared progress-tip hover). Each book is one colored segment
+// sized by the chars READ of it, packed in series order (no reserved-empty gaps),
+// against the summed LENGTH of all length-known books — so the fill = series
+// completion, the empty track = what's left. Books without a length sit out and
+// are listed beneath. Reads member details already loaded for the page.
+function renderSeriesProgress(s, detailByTitle, daily = []) {
+  const section = document.getElementById('series-progress');
+  const track   = document.getElementById('series-progress-track');
+  const pctEl   = document.getElementById('series-progress-pct');
+  const cntEl   = document.getElementById('series-progress-counts');
+  const etaEl   = document.getElementById('series-progress-eta');
+  const nolen   = document.getElementById('series-progress-nolen');
+  track.innerHTML = ''; nolen.innerHTML = '';
+  hideProgressTip();   // a segment could be removed mid-hover
+
+  const books = [], missing = [];
+  let haveDetail = false;
+  s.members.forEach((m, i) => {
+    const md = detailByTitle[m.title];
+    if (md) haveDetail = true;
+    const color  = MILESTONE_PALETTE[i % MILESTONE_PALETTE.length];
+    const length = md ? (md.user_char_count > 0 ? md.user_char_count
+                        : (md.game_char_count > 0 ? md.game_char_count : 0)) : 0;
+    const display = m.display_title || m.title;
+    if (length > 0) {
+      const completed = !!(md && md.completed);
+      const read = completed ? length : Math.min(md ? (md.total_chars || 0) : 0, length);
+      books.push({ title: m.title, display, color, length, read, completed,
+                   pct: read / length * 100 });
+    } else if (md) {
+      missing.push({ title: m.title, display });
+    }
+  });
+
+  if (!haveDetail || !books.length) { section.style.display = 'none'; return; }
+
+  const L = books.reduce((a, b) => a + b.length, 0);
+  const R = books.reduce((a, b) => a + b.read, 0);
+  const pct = L > 0 ? R / L * 100 : 0;
+  pctEl.textContent = `${pct.toFixed(1).replace(/\.0$/, '')}%`;
+  cntEl.textContent = `${fmtChars(R)} / ${fmtChars(L)} chars`;
+
+  // ETA bottom-right, same as the media completion bar: remaining chars over the
+  // series ÷ trailing 7-reading-day speed of the combined daily.
+  const remaining = L - R;
+  const spd = recentSpeed(daily, 7);
+  etaEl.classList.toggle('completed', remaining <= 0);
+  if (remaining <= 0) {
+    etaEl.textContent = 'Completed ✓'; etaEl.title = '';
+  } else if (spd > 0) {
+    etaEl.textContent = `Est. hours to complete: ${(remaining / spd).toFixed(1)}h`;
+    etaEl.title = `${fmtChars(remaining)} chars left at ${fmtChars(Math.round(spd))} chars/h (7-day avg)`;
+  } else {
+    etaEl.textContent = ''; etaEl.title = '';
+  }
+
+  // Packed colored segments (width = each book's read share of the total length),
+  // with a boundary tick between consecutive books — same as milestone sections.
+  let acc = 0, drawn = 0;
+  books.forEach(b => {
+    const w = L > 0 ? b.read / L * 100 : 0;
+    if (w <= 0) return;
+    if (drawn > 0 && acc > 0.05 && acc < 99.95) {
+      const tick = document.createElement('div');
+      tick.className = 'progress-tick';
+      tick.style.left = `${acc}%`;
+      track.appendChild(tick);
+    }
+    const seg = document.createElement('div');
+    seg.className = 'progress-seg';
+    seg.style.left = `${acc}%`;
+    seg.style.width = `${w}%`;
+    seg.style.background = b.color;
+    const meta = b.completed
+      ? `Complete · ${fmtChars(b.length)} chars`
+      : `${b.pct.toFixed(1).replace(/\.0$/, '')}% · ${fmtChars(b.read)} / ${fmtChars(b.length)} chars`;
+    seg.addEventListener('mouseenter', () => showProgressTip(seg, b.display, meta));
+    seg.addEventListener('mouseleave', hideProgressTip);
+    seg.addEventListener('click', () => { hideProgressTip(); openMediaDetail(b.title); });
+    track.appendChild(seg);
+    acc += w; drawn++;
+  });
+
+  if (missing.length) {
+    const links = missing.map(m =>
+      `<a style="color:var(--accent);cursor:pointer" data-title="${escHtml(m.title)}">${escHtml(m.display)}</a>`).join(', ');
+    nolen.innerHTML = `No length set: ${links} — open to add a progress bar and include `
+      + `${missing.length === 1 ? 'it' : 'them'}.`;
+    nolen.style.marginTop = '6px';
+    nolen.querySelectorAll('a').forEach(a =>
+      a.addEventListener('click', () => openMediaDetail(a.dataset.title)));
+  } else {
+    nolen.style.marginTop = '';
+  }
+
+  section.style.display = 'block';
+}
+
 function renderSeriesDetail(s, memberDetails = []) {
   document.getElementById('series-detail-name').textContent = s.name;
 
-  // Stacked cover art in hero
+  // Stacked cover art in hero — at most two covers (front + one peek), matching
+  // the grid card; the badge still shows the true member count.
   const coverEl = document.getElementById('series-detail-cover');
   const members = s.members;
-  const front = members[0], mid = members[1], back = members[2];
+  const front = members[0], mid = members[1];
   let coverHtml = '';
-  if (back)  coverHtml += `<div class="series-layer series-layer-back">${cardLayerHTML(back)}</div>`;
   if (mid)   coverHtml += `<div class="series-layer series-layer-mid">${cardLayerHTML(mid)}</div>`;
   if (front) coverHtml += `<div class="series-layer series-layer-front">${cardLayerHTML(front)}</div>`;
   if (members.length > 1) coverHtml += `<div class="series-badge">${members.length}</div>`;
@@ -3475,6 +3575,7 @@ function renderSeriesDetail(s, memberDetails = []) {
   if (!memberDetails.length) totalSecs = s.total_secs || 0;
 
   const daily     = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+  renderSeriesProgress(s, detailByTitle, daily);
   const daysCount = allDates.size;
   const dates     = [...allDates].sort();
   const firstDate = dates[0] || '—';
@@ -3660,7 +3761,11 @@ async function doRenameSeriesPrompt() {
   if (r.ok) {
     seriesData = await window.pywebview.api.get_series();
     const updated = seriesData.find(x => x.id === currentSeriesId);
-    if (updated) renderSeriesDetail(updated);
+    if (updated) {
+      const md = await Promise.all(
+        updated.members.map(m => window.pywebview.api.get_title_detail(m.title)));
+      renderSeriesDetail(updated, md.filter(Boolean));
+    }
   }
 }
 
