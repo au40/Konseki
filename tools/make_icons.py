@@ -5,7 +5,9 @@ Run after changing the wordmark: `py make_icons.py`.
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
-ROOT   = Path(__file__).parent
+REPO   = Path(__file__).resolve().parent.parent   # tools/ -> repo root
+ASSETS = REPO / "src" / "assets"
+EXT    = REPO / "ext"
 ACCENT = (91, 140, 255, 255)   # --accent #5B8CFF
 TEXT   = (255, 255, 255, 255)
 FONT   = r"C:\Windows\Fonts\YuGothB.ttc"
@@ -42,17 +44,17 @@ def main() -> None:
     # App / Windows taskbar icon — multi-resolution .ico
     ico_sizes = [16, 24, 32, 48, 64, 128, 256]
     base = _render("跡", 256)
-    base.save(ROOT / "assets" / "icon.ico",
+    base.save(ASSETS / "icon.ico",
               sizes=[(s, s) for s in ico_sizes])
-    print("wrote assets/icon.ico (跡)")
+    print("wrote src/assets/icon.ico (跡)")
 
     # Tray icon — single kanji
-    _render("跡", 256).save(ROOT / "assets" / "tray.png")
-    print("wrote assets/tray.png (跡)")
+    _render("跡", 256).save(ASSETS / "tray.png")
+    print("wrote src/assets/tray.png (跡)")
 
     # Browser extension icons — single kanji
     for s in (16, 48, 128):
-        _render("跡", s).save(ROOT / "ext" / f"icon{s}.png")
+        _render("跡", s).save(EXT / f"icon{s}.png")
         print(f"wrote ext/icon{s}.png (跡)")
 
 

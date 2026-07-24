@@ -61,7 +61,7 @@ def main():
     # db.py computes DATA_DIR at import time — env var must be set BEFORE the
     # import, and the assert catches any regression of that ordering.
     os.environ["IMMERSION_TRACKER_DATA_DIR"] = str(resolved)
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
     import db
     db_path = Path(db.DB_PATH).resolve()
     assert db_path == resolved / "tracker.db", \

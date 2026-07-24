@@ -462,7 +462,12 @@
         </div>
 
         <!-- Charts -->
-        <h2 style="margin-top:16px">Daily time</h2>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px">
+          <h2 style="margin:0">Daily time</h2>
+          <label class="toggle-label" id="series-split-label" style="display:none">
+            <input type="checkbox" id="series-split-toggle" onchange="onSeriesSplitToggle()"> Split by book
+          </label>
+        </div>
         <div class="chart-wrap"><canvas id="chart-series-time" height="180"></canvas></div>
 
         <h2 style="margin-top:20px">Daily characters</h2>
@@ -541,7 +546,7 @@
         </div>
 
         <!-- Session list -->
-        <h2 style="margin-top:20px">Sessions <span id="detail-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
+        <h2 style="margin-top:20px">Days read <span id="detail-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
         <div class="detail-sessions" id="detail-session-list"></div>
         <div style="height:24px"></div>
       </div>

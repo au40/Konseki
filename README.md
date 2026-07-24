@@ -31,7 +31,7 @@ To run from source:
 
 ```
 pip install -r requirements.txt
-python tracker.py
+python src/tracker.py
 ```
 
 Konseki is meant to stay open in your tray, monitoring GSM for changes and updating

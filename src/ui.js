@@ -66,6 +66,8 @@ let currentMilestoneId  = null;        // when a milestone detail view is open
 let currentMilestones   = [];          // milestones for the current media detail
 let currentDetailData   = null;        // full payload for the open media detail
 let splitByMilestone    = false;       // stack media-detail bars by milestone color
+let splitBySeriesBook   = false;       // stack series-detail bars by book color
+let currentSeriesChart  = null;        // {daily, byBook, books} for the open series detail
 let _milestoneEditingId = null;        // null = adding, number = editing
 let _milestoneDragId    = null;        // dragged milestone id for reorder
 
@@ -3557,10 +3559,23 @@ function renderSeriesDetail(s, memberDetails = []) {
     membersEl.appendChild(row);
   });
 
+  // Per-book color + label, keyed by title in series order. Same MILESTONE_PALETTE
+  // pool (and same index basis) the series progress bar uses, so a book's chart
+  // color matches its progress-bar segment.
+  const bookInfo = {};
+  s.members.forEach((m, i) => {
+    bookInfo[m.title] = {
+      key: m.title,
+      color: MILESTONE_PALETTE[i % MILESTONE_PALETTE.length],
+      label: m.display_title || m.title,
+    };
+  });
+
   // Aggregate stats from member details
   let totalSecs = 0, totalChars = 0;
   const allDates = new Set();
   const dailyMap = {};
+  const byBookMap = {};   // date -> { title -> {chars, secs} }, for the split-by-book toggle
   memberDetails.forEach(d => {
     totalSecs  += d.total_secs  || 0;
     totalChars += d.total_chars || 0;
@@ -3570,11 +3585,22 @@ function renderSeriesDetail(s, memberDetails = []) {
       dailyMap[row.date].chars   += row.chars;
       dailyMap[row.date].seconds += row.seconds;
       // speed is recomputed per-day from aggregated chars/seconds
+      const bb = byBookMap[row.date] || (byBookMap[row.date] = {});
+      const slot = bb[d.title] || (bb[d.title] = { chars: 0, secs: 0 });
+      slot.chars += row.chars;
+      slot.secs  += row.seconds;
     });
   });
   if (!memberDetails.length) totalSecs = s.total_secs || 0;
 
   const daily     = Object.values(dailyMap).sort((a, b) => a.date.localeCompare(b.date));
+  const byBook    = daily.map(r => byBookMap[r.date] || {});
+  // Books that actually contributed daily data, in series order — the split
+  // datasets. Only members with a known color/label (present in bookInfo).
+  const books = s.members
+    .map(m => bookInfo[m.title])
+    .filter(b => b && byBook.some(bb => bb[b.key]));
+  currentSeriesChart = { daily, byBook, books };
   renderSeriesProgress(s, detailByTitle, daily);
   const daysCount = allDates.size;
   const dates     = [...allDates].sort();
@@ -3611,15 +3637,49 @@ function renderSeriesDetail(s, memberDetails = []) {
     </div>
   `;
 
-  renderSeriesCharts(daily);
+  // Show the "Split by book" toggle only when >1 book contributed data (a
+  // single book has nothing to split against).
+  const splitLabel = document.getElementById('series-split-label');
+  if (splitLabel) splitLabel.style.display = books.length > 1 ? 'flex' : 'none';
+  const splitToggle = document.getElementById('series-split-toggle');
+  if (splitToggle) splitToggle.checked = splitBySeriesBook;
+
+  renderSeriesCharts();
 }
 
-function renderSeriesCharts(daily) {
+// Build stacked datasets for a series chart, one per book (in series order),
+// colored from MILESTONE_PALETTE — mirror of milestoneDatasets, keyed by book.
+// `field` is 'chars' or 'secs'; `scale` converts to the chart's display unit.
+function seriesBookDatasets(byBook, books, field, scale) {
+  return books
+    .filter(o => byBook.some(b => b[o.key] && b[o.key][field] > 0))
+    .map(o => ({
+      label: o.label,
+      data: byBook.map(b => ((b[o.key] && b[o.key][field]) || 0) * scale),
+      backgroundColor: o.color,
+      stack: 'book',
+      borderRadius: 3,
+      borderSkipped: false,
+    }));
+}
+
+function onSeriesSplitToggle() {
+  splitBySeriesBook = document.getElementById('series-split-toggle').checked;
+  renderSeriesCharts();
+}
+
+function renderSeriesCharts() {
   destroyChart('series-chars');
   destroyChart('series-time');
   destroyChart('series-speed');
   destroyChart('series-speed-rolling');
-  if (!daily.length) return;
+  const cs = currentSeriesChart;
+  if (!cs || !cs.daily.length) return;
+  const { daily, byBook, books } = cs;
+
+  // Stack bars by book color when the toggle is on and there's data to split.
+  const bookSplit = splitBySeriesBook && books.length > 1
+                    && byBook.some(b => Object.keys(b).length);
 
   const labels      = daily.map(r => r.date.slice(5));
   const charVals    = daily.map(r => r.chars);
@@ -3630,40 +3690,66 @@ function renderSeriesCharts(daily) {
   const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
 
   if (charVals.some(v => v > 0)) {
+    reserveLegendRoom('chart-series-chars', 'series-chars', 180, bookSplit);
     const ctx = document.getElementById('chart-series-chars').getContext('2d');
     charts['series-chars'] = new Chart(ctx, {
       type: 'bar',
-      data: { labels: shownLabels, datasets: [{
-        label: 'Characters', data: charVals, backgroundColor: '#4ECBA0',
-        borderRadius: 3, borderSkipped: false,
-      }]},
+      data: {
+        labels: shownLabels,
+        datasets: bookSplit
+          ? seriesBookDatasets(byBook, books, 'chars', 1)
+          : [{ label: 'Characters', data: charVals, backgroundColor: '#4ECBA0',
+               borderRadius: 3, borderSkipped: false }]
+      },
       options: {
         responsive: true, maintainAspectRatio: false, animation: false,
-        plugins: { legend: { display: false },
-          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => `${fmtChars(c.raw)} chars` } } },
+        interaction: bookSplit ? { mode: 'index', intersect: false } : undefined,
+        plugins: {
+          legend: { display: bookSplit, position: 'bottom', labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
+          tooltip: { callbacks: {
+            title: c => labels[c[0].dataIndex],
+            label: bookSplit
+              ? c => `${c.dataset.label}: ${fmtChars(Math.round(c.raw))}`
+              : c => `${fmtChars(c.raw)} chars`,
+            footer: bookSplit ? c => `Total: ${fmtChars(Math.round(c.reduce((a, x) => a + x.raw, 0)))}` : undefined,
+          } }
+        },
         scales: {
-          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
+          x: { stacked: bookSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+          y: { stacked: bookSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
         }
       }
     });
   }
 
   if (timeVals.some(v => v > 0)) {
+    reserveLegendRoom('chart-series-time', 'series-time', 180, bookSplit);
     const ctx = document.getElementById('chart-series-time').getContext('2d');
     charts['series-time'] = new Chart(ctx, {
       type: 'bar',
-      data: { labels: shownLabels, datasets: [{
-        label: 'Time', data: timeVals.map(s => s / 60), backgroundColor: '#5B8CFF',
-        borderRadius: 3, borderSkipped: false,
-      }]},
+      data: {
+        labels: shownLabels,
+        datasets: bookSplit
+          ? seriesBookDatasets(byBook, books, 'secs', 1 / 60)
+          : [{ label: 'Time', data: timeVals.map(s => s / 60), backgroundColor: '#5B8CFF',
+               borderRadius: 3, borderSkipped: false }]
+      },
       options: {
         responsive: true, maintainAspectRatio: false, animation: false,
-        plugins: { legend: { display: false },
-          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtTime(c.raw * 60) } } },
+        interaction: bookSplit ? { mode: 'index', intersect: false } : undefined,
+        plugins: {
+          legend: { display: bookSplit, position: 'bottom', labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
+          tooltip: { callbacks: {
+            title: c => labels[c[0].dataIndex],
+            label: bookSplit
+              ? c => `${c.dataset.label}: ${fmtTime(c.raw * 60)}`
+              : c => fmtTime(c.raw * 60),
+            footer: bookSplit ? c => `Total: ${fmtTime(c.reduce((a, x) => a + x.raw, 0) * 60)}` : undefined,
+          } }
+        },
         scales: {
-          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v * 60)}, afterFit: s => { s.width = 62; } },
+          x: { stacked: bookSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
+          y: { stacked: bookSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v * 60)}, afterFit: s => { s.width = 62; } },
         }
       }
     });
@@ -3747,6 +3833,7 @@ function closeSeriesDetail() {
   destroyChart('detail');
   destroyChart('detail-time');
   currentSeriesId    = null;
+  currentSeriesChart = null;
   currentDetailTitle = null;
   showMediaView('grid');
   renderMediaGrid();
@@ -4053,7 +4140,7 @@ function renderMediaDetail(d) {
 
   // Session list
   const countEl = document.getElementById('detail-session-count');
-  countEl.textContent = `(${d.session_count})`;
+  countEl.textContent = `(${d.days_count})`;
   renderDetailSessions(d.daily, isGSM);
 }
 

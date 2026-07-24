@@ -19,4 +19,4 @@ if ($Fresh) {
 }
 
 Write-Host "Data dir: $env:IMMERSION_TRACKER_DATA_DIR" -ForegroundColor Cyan
-python tracker.py
+python (Join-Path $PSScriptRoot "src\tracker.py")

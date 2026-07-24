@@ -1,6 +1,6 @@
 # GSM rollover attribution
 
-The `gsm_rollover_attributions` table (defined in [db.py](db.py)) is a load-bearing
+The `gsm_rollover_attributions` table (defined in [db.py](src/db.py)) is a load-bearing
 cross-cutting concern. **Any query that surfaces session-level chars/time/cards
 must apply it.** Forgetting to do so produces numbers that silently disagree
 with the rest of the app.
@@ -10,7 +10,7 @@ with the rest of the app.
 Sessions are stored in the `sessions` table at their **real calendar
 `session_date`**. But the user can set a `rollover_hour` in settings — when
 non-zero, "logical today" is the previous calendar date until that hour passes
-(see `get_today()` in [db.py](db.py)). GSM is the only source that pulls
+(see `get_today()` in [db.py](src/db.py)). GSM is the only source that pulls
 incrementally during this rollover window, so it's the only source that needs
 attribution: a GSM pull at 01:00 on 2026-05-14 with `rollover_hour=4` writes
 session rows under `session_date='2026-05-14'`, but those chars logically
@@ -48,11 +48,11 @@ change their math. `init_db` migrates the pre-`game_id` shape by backfilling eac
 old row's `game_id` from the sole GSM session that lived on its `source_date`.
 
 Attribution rows are written by `upsert_gsm_attribution` and
-`refresh_gsm_attribution_tail` in [db.py](db.py), called from the GSM import
-path in [imports.py](imports.py) — and, manually, by `set_rollover_attribution`
-(also [db.py](db.py)), the **Rollover tab** of the per-row GSM adjust modal
-(`openGsmEdit()`/`submitGsmEdit()` in [ui.js](ui.js), Api `set_rollover_attribution`
-in [tracker.py](tracker.py), shown on real GSM rows in the dashboard and History).
+`refresh_gsm_attribution_tail` in [db.py](src/db.py), called from the GSM import
+path in [imports.py](src/imports.py) — and, manually, by `set_rollover_attribution`
+(also [db.py](src/db.py)), the **Rollover tab** of the per-row GSM adjust modal
+(`openGsmEdit()`/`submitGsmEdit()` in [ui.js](src/ui.js), Api `set_rollover_attribution`
+in [tracker.py](src/tracker.py), shown on real GSM rows in the dashboard and History).
 That control is the user's escape hatch
 for displacements the live pull missed — app closed at the rollover hour, or data
 corrected after the fact: it sets how many chars/minutes of a game's `source_date`
@@ -61,7 +61,7 @@ what was read), and `0/0` deletes the row. It writes the *same* `(rollover_date,
 source_date, game_id)` shape every read path already understands, so no consumer
 needs special-casing. When the history import (`import_gsm_history_apply`)
 updates a session row's totals, `_sync_rollover_attribution_to` in
-[imports.py](imports.py) **clamps** that date's attributions so a displacement
+[imports.py](src/imports.py) **clamps** that date's attributions so a displacement
 never exceeds the new total (preventing ghost rows in per-title charts). It must
 only ever SHRINK a displacement, never grow one — a displacement is a fixed
 historical event. The old version overwrote the attribution to the full-day
@@ -73,7 +73,7 @@ and shoved an entire day's reading onto the prior day.
 There are two canonical patterns. Pick whichever fits the query shape:
 
 **1. Per-row reconciliation (multi-session lists).** Used by `get_today_stats`
-in [db.py](db.py) and `get_recent_sessions` (History page). The shape is:
+in [db.py](src/db.py) and `get_recent_sessions` (History page). The shape is:
 
 - Fetch raw session rows for the dates you care about.
 - For each `(date, game_id)`, **deduct** the sum of outgoing attributions
@@ -88,7 +88,7 @@ in [db.py](db.py) and `get_recent_sessions` (History page). The shape is:
 
 **2. Net adjustment per day (single-number-per-day queries).** Used by
 `get_daily_time_series`, `get_weekly_summary`, and `get_heatmap` in
-[db.py](db.py). Helper: `get_gsm_day_adjustment(d)` returns
+[db.py](src/db.py). Helper: `get_gsm_day_adjustment(d)` returns
 `(chars_delta, secs_delta, cards_delta)` to add to date `d`'s raw GSM totals.
 Always `max(0, raw + delta)` — net can go negative if all chars rolled out.
 Note this helper's `secs_delta` **also folds in the manual time overlay**
@@ -110,7 +110,7 @@ the shared `_adjusted_day_totals` helper — reuse it rather than re-deriving.
 
 ## Misc related notes
 
-- `in_rollover_window()` in [db.py](db.py) is the test for "are we currently
+- `in_rollover_window()` in [db.py](src/db.py) is the test for "are we currently
   inside the window where attribution writes can happen." Use it before
   capturing snapshots; don't use it to decide whether to APPLY attribution
   (always apply, regardless of current time).
@@ -124,7 +124,7 @@ the shared `_adjusted_day_totals` helper — reuse it rather than re-deriving.
 
 ## GSM "reopen catch-up" pull — EXPERIMENTAL
 
-`GsmWalHandler` in [tracker.py](tracker.py) has a third pull trigger
+`GsmWalHandler` in [tracker.py](src/tracker.py) has a third pull trigger
 (`open_gap_secs`, setting `gsm_open_gap_secs`, **default 0 = OFF**, UI: Settings →
 Advanced → "GSM reopen catch-up gap"): when a WAL write arrives after GSM has
 been idle longer than the gap, it fires a pull immediately, before the debounce.
@@ -158,14 +158,14 @@ rollover session with later same-day reading, which again points to `game_lines`
 
 # Manual per-game time overlay (`manual_time_adjust`)
 
-The `manual_time_adjust` table (defined in [db.py](db.py)) is the user's escape
+The `manual_time_adjust` table (defined in [db.py](src/db.py)) is the user's escape
 hatch for the rollover-tail desync above: when GSM strands dead/AFK time on a day
 (the documented limitation of the reopen catch-up), the user shaves it off by
 hand — **per game**, picking which game on the dashboard absorbs the shave. It's a
 second display-time overlay that lives **alongside** GSM rollover attribution, for
 the same reason the attribution table exists — it must survive GSM re-ingests,
 which `DELETE`+re-insert or `UPDATE` the underlying `sessions` rows
-([imports.py](imports.py)) and would wipe any edit made to the row itself.
+([imports.py](src/imports.py)) and would wipe any edit made to the row itself.
 
 ```
 manual_time_adjust (
@@ -183,14 +183,14 @@ key is `(display date, game_id)`: the date is the logical/display date
 (`get_today()` for "today"), the same date a `rollover_date` uses — never a raw
 `session_date`; `game_id` is the GSM game's stable id (survives the re-ingest that
 churns rowids). Only GSM rows carry a `game_id`, so only GSM sessions can be
-adjusted. Helpers in [db.py](db.py): `set_manual_time_adjust(date, game_id, …)`,
+adjusted. Helpers in [db.py](src/db.py): `set_manual_time_adjust(date, game_id, …)`,
 `get_manual_time_adjust(date, game_id)`, plus three read shapes —
 `get_manual_time_adjusts_by_day` (date→summed secs, for net-per-day),
 `get_manual_time_adjusts_all` ((date,game_id)→secs, for per-row), and
 `get_manual_time_adjusts_for_date` (game_id→secs, for the dashboard indicator). A
 zero delta deletes the row. Written from `set_game_time_adjust` in
-[tracker.py](tracker.py); the per-row control is the **Subtract minutes tab** of the
-GSM adjust modal (`openGsmEdit()`/`submitGsmEdit()` in [ui.js](ui.js), the ✎ chip
+[tracker.py](src/tracker.py); the per-row control is the **Subtract minutes tab** of the
+GSM adjust modal (`openGsmEdit()`/`submitGsmEdit()` in [ui.js](src/ui.js), the ✎ chip
 shown on GSM rows in both the dashboard and History — the same modal also hosts the
 Rollover tab above).
 
@@ -229,22 +229,22 @@ the **same chokepoints** so the surface stays minimal:
     the two consistent or the dashboard and History will disagree on which row
     shows the shave.
 - **Heatmaps go through the chokepoint too.** `get_heatmap_data` (rolling-window,
-  [db.py](db.py)) and `Api.get_heatmap` year-mode ([tracker.py](tracker.py)) build
+  [db.py](src/db.py)) and `Api.get_heatmap` year-mode ([tracker.py](src/tracker.py)) build
   `{session_date: raw_secs}` then apply `get_gsm_day_adjustments()` per date,
   clamped to their window. They used to re-derive attribution+manual inline; that
   was consolidated so they can't drift.
 - **Paths that legitimately need a different aggregation** than per-day — leave
   these as-is, they're not whack-a-mole, they just can't use the per-day dict:
-  - `get_activity_breakdown` ([db.py](db.py)) unions manual-overlay dates into its
+  - `get_activity_breakdown` ([db.py](src/db.py)) unions manual-overlay dates into its
     candidate-date set so a shave folds into the Reading slice (the per-day
     `adj.get(d)[1]` it sums already bundles the manual delta — the union just makes
     sure manual-only dates are visited; dedupe prevents double-count).
-  - `get_all_time_totals` ([db.py](db.py)) adds `_manual_secs_sum()`. GSM rollover
+  - `get_all_time_totals` ([db.py](src/db.py)) adds `_manual_secs_sum()`. GSM rollover
     attribution nets to zero over all-time (both endpoints in range) so it's
     ignored there, but the manual overlay is a **true reduction** and must be
     subtracted or the dashboard all-time total drifts from the daily views.
   - The chars/hour denominators in `get_extra_stats` / `get_range_extra_stats`
-    ([db.py](db.py)) use `_manual_secs_sum(since)` so reading speed is computed
+    ([db.py](src/db.py)) use `_manual_secs_sum(since)` so reading speed is computed
     against the same adjusted time the page shows as "Total time" (reading-speed
     invariant below). The dashboard's cph falls out of the already-shaved
     `get_today_stats` rows, so it's consistent for free.
@@ -255,7 +255,7 @@ Because the overlay is keyed **per game**, a shave maps cleanly to a title, so t
 media views honor it. Two rails:
 
 - **Per-day per-title** (detail panel + milestone chart): `_compute_title_core`
-  ([db.py](db.py)) deducts the `(date, game_id)` shave from its `daily_map` secs
+  ([db.py](src/db.py)) deducts the `(date, game_id)` shave from its `daily_map` secs
   right after the attribution deduction (secs only — chars stay, so reading speed
   *rises*). The per-day speed line, the title average, and `db_get_milestone_detail`
   (which slices `_compute_title_core`'s `daily`) all recompute from that adjusted
@@ -278,11 +278,11 @@ column directly, and never from a time-weighted average of that column.
 
 GSM ingests give us `chars_read` and `reading_speed` from GSM's API, and we
 derive `time_seconds = chars_read / reading_speed * 3600` in
-[imports.py](imports.py). So on a freshly-ingested row the three fields are
+[imports.py](src/imports.py). So on a freshly-ingested row the three fields are
 self-consistent: `chars_read / (time_seconds/3600) == reading_speed`.
 
 But the **GSM rollover attribution deduction** in `_compute_title_core`
-([db.py](db.py)) subtracts an outgoing attribution's chars and time from a
+([db.py](src/db.py)) subtracts an outgoing attribution's chars and time from a
 row by independent amounts (the attribution row stores both). The amounts
 are taken from a *different* GSM snapshot than the row itself, so their
 chars/time ratio is whatever GSM's speed was *at the moment of that earlier

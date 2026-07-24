@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['tracker.py'],
-    pathex=[],
+    ['src/tracker.py'],
+    pathex=['src'],
     binaries=[],
-    datas=[('ui.html', '.'), ('ui.js', '.'), ('ui.css', '.'), ('assets', 'assets')],
+    datas=[('src/ui.html', '.'), ('src/ui.js', '.'), ('src/ui.css', '.'), ('src/assets', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='assets/icon.ico',
+    icon='src/assets/icon.ico',
 )

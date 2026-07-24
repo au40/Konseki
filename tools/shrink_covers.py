@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 # Import the app's single source of truth for the shrink logic + cap.
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from tracker import _shrink_cover_b64, COVER_MAX_EDGE, _COVER_PIL_OK, _CoverImage  # noqa: E402
 import db as dbmod  # noqa: E402
 

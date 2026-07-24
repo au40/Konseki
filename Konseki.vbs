@@ -5,4 +5,4 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 Set shell = CreateObject("WScript.Shell")
 scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
 shell.CurrentDirectory = scriptDir
-shell.Run "pythonw.exe " & Chr(34) & "tracker.py" & Chr(34), 0, False
+shell.Run "pythonw.exe " & Chr(34) & "src\tracker.py" & Chr(34), 0, False
