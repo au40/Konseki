@@ -40,6 +40,7 @@ import imports
 import backup
 import catalog
 import devlog
+import singleton
 from db import (
     APP_NAME, DB_PATH, SESSIONS_DIR,
     init_db, scan_existing_files,
@@ -1195,6 +1196,16 @@ gsm_wal_handler = None  # set in main(); read by Api.save_settings
 def main():
     global gsm_wal_handler
 
+    # One instance per data dir. First thing in main(): before devlog.install()
+    # (which opens konseki.log in "w" mode and would truncate the running
+    # instance's log) and before any DB, scan, or backup work.
+    lock = singleton.SingleInstance()
+    if not lock.acquire(timeout=singleton.HANDOFF_SECS
+                        if singleton.RESTART_FLAG in sys.argv else 0.0):
+        if not singleton.ask_running_instance_to_show():
+            singleton.show_already_running_dialog()
+        return
+
     devlog.install()  # before anything prints — captures stdout/stderr for the Dev tab
 
     # Give Windows an explicit AppUserModelID so the taskbar button is treated
@@ -1236,6 +1247,10 @@ def main():
         background_color="#1C1C28",
     )
     api._window = win
+
+    # Answer duplicate launches by raising this window (pings queued during the
+    # startup work above are handled as soon as the loop starts).
+    lock.serve(win.show)
 
     # Sessions directory watcher (existing)
     handler  = SessionHandler(api._notify)
@@ -1328,8 +1343,11 @@ def main():
         if tray_icon:
             tray_icon.stop()
         ext_server.stop()
+        lock.release()  # before the spawn below, so the replacement can acquire
         if _TRAY_AVAILABLE and _state.get("restarting"):
-            args = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, *sys.argv]
+            base = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, *sys.argv]
+            # Strip any inherited flag so repeated restarts don't accumulate it.
+            args = [a for a in base if a != singleton.RESTART_FLAG] + [singleton.RESTART_FLAG]
             subprocess.Popen(args, close_fds=True)
 
 
