@@ -1213,9 +1213,12 @@ async function submitAddMediaEpub() {
     fb.className = 'feedback err'; fb.textContent = (r && r.error) || 'Something went wrong.'; return;
   }
 
-  // Brand-new entry, so no existing milestones to replace (pass 0).
+  // Brand-new entry, so no existing milestones to replace (pass 0). Only let
+  // the chapter import rewrite the length if the user left the extractor's
+  // number alone — a hand-typed length is theirs to keep.
   const extra = await maybeImportEpubChapters(
-    title, addEpubMeta.chapter_candidates, addEpubMeta.char_count, 0);
+    title, addEpubMeta.chapter_candidates, addEpubMeta.char_count, 0,
+    Number(chars || 0) === Number(addEpubMeta.char_count || 0));
 
   closeAddMediaModal();
   statsCache = {};
@@ -1450,15 +1453,34 @@ async function fileToBase64(file) {
 
 // ── EPUB chapters → milestones checklist ─────────────────────────────────────
 // Size alone can't tell a short prologue from a same-size character-list, so the
-// import shows every candidate section (with its char count) pre-checked by the
-// heuristic and lets the user tick/untick before creating. See _epub_candidates
-// / _epub_finalize in imports.py.
+// import shows every candidate section (with its char count) pre-set by the
+// heuristic and lets the user adjust before creating. See _epub_candidates /
+// _epub_finalize in imports.py.
+//
+// Each row is TRI-state, because "don't make this a milestone" turned out to
+// mean two incompatible things:
+//   chapter — becomes a milestone
+//   merge   — read, but folded into the previous chapter (splitting a book into
+//             Parts = mark the part openers 'chapter' and everything else 'merge')
+//   skip    — not read at all: chars leave the axis AND the book length
+// Only 'skip' moves boundaries. Getting these two confused is what put every
+// chapter boundary a constant ~520 chars late: front matter was correctly
+// unchecked, then folded straight back into chapter 1.
+// Key order is the click-cycle order.
+const EPUB_STATE_UI = {
+  chapter: { mark: '✓', label: 'Chapter' },
+  merge:   { mark: '↰', label: 'Merged into previous' },
+  skip:    { mark: '✕', label: 'Skipped — not part of the book' },
+};
+const EPUB_STATES = Object.keys(EPUB_STATE_UI);
+
 let epubChaptersResolve    = null;
 let epubChaptersCandidates = [];
+let epubChaptersStates     = [];
 let epubChaptersTotal      = 0;
 let epubChaptersReplace    = false;
 
-// Show the checklist. Resolves to {selected, replace} on Create, or null on
+// Show the checklist. Resolves to {sections, replace} on Create, or null on
 // cancel. `existing` = milestones the title already has (>0 ⇒ create replaces).
 function chooseEpubChapters(title, candidates, total, existing) {
   return new Promise(resolve => {
@@ -1474,44 +1496,84 @@ function chooseEpubChapters(title, candidates, total, existing) {
     const list = document.getElementById('epub-chapters-list');
     list.innerHTML = '';
     candidates.forEach((c, i) => {
-      const row = document.createElement('label');
-      row.className = 'epub-ch-row' + (c.suggested ? '' : ' off');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox'; cb.checked = !!c.suggested; cb.dataset.idx = i;
-      cb.onchange = () => { row.classList.toggle('off', !cb.checked); updateEpubChaptersCount(); };
+      const row = document.createElement('div');
+      row.dataset.idx = i;
+      row.onclick = () => cycleEpubChapterState(i);
+      const st = document.createElement('span');
+      st.className = 'epub-ch-state';
       const nm = document.createElement('span');
       nm.className = 'epub-ch-name'; nm.textContent = c.name;
       const ch = document.createElement('span');
       ch.className = 'epub-ch-chars'; ch.textContent = Math.round(c.span).toLocaleString();
-      row.append(cb, nm, ch);
+      row.append(st, nm, ch);
       list.appendChild(row);
     });
-    updateEpubChaptersCount();
+    resetEpubChapterStates();
     document.getElementById('epub-chapters-overlay').style.display = 'flex';
   });
 }
 
-function epubChapterBoxes() {
-  return Array.from(document.querySelectorAll('#epub-chapters-list input[type=checkbox]'));
+function paintEpubChapterRow(i) {
+  const row = document.querySelector(`#epub-chapters-list > div[data-idx="${i}"]`);
+  if (!row) return;
+  const state = epubChaptersStates[i];
+  row.className = `epub-ch-row epub-ch-${state}`;
+  row.title = `${EPUB_STATE_UI[state].label} — click to change`;
+  row.querySelector('.epub-ch-state').textContent = EPUB_STATE_UI[state].mark;
+}
+
+function cycleEpubChapterState(i) {
+  const next = (EPUB_STATES.indexOf(epubChaptersStates[i]) + 1) % EPUB_STATES.length;
+  epubChaptersStates[i] = EPUB_STATES[next];
+  paintEpubChapterRow(i);
+  updateEpubChaptersCount();
+}
+
+function applyEpubChapterStates(states) {
+  epubChaptersStates = states;
+  states.forEach((_, i) => paintEpubChapterRow(i));
+  updateEpubChaptersCount();
+}
+
+function setAllEpubChapterStates(state) {
+  applyEpubChapterStates(epubChaptersCandidates.map(() => state));
+}
+
+function resetEpubChapterStates() {
+  applyEpubChapterStates(epubChaptersCandidates.map(c => c.default_state));
+}
+
+// Mirror of the compaction in _epub_finalize: skipped spans, plus the head gap
+// before the first TOC-named section, leave the book. Kept in sync so the dialog
+// can show the length it's about to write.
+function epubAdjustedTotal() {
+  const cand = epubChaptersCandidates;
+  if (!cand.length) return epubChaptersTotal;
+  let removed = Number(cand[0].start_chars) || 0;
+  cand.forEach((c, i) => {
+    if (epubChaptersStates[i] === 'skip') removed += Number(c.span) || 0;
+  });
+  return Math.max(0, epubChaptersTotal - removed);
 }
 
 function updateEpubChaptersCount() {
-  const boxes = epubChapterBoxes();
-  const n = boxes.filter(b => b.checked).length;
-  document.getElementById('epub-chapters-count').textContent =
-    `${n} of ${boxes.length} selected`;
-  const all = document.getElementById('epub-chapters-all');
-  all.checked = n === boxes.length && n > 0;
-  all.indeterminate = n > 0 && n < boxes.length;
-  document.getElementById('epub-chapters-ok').disabled = n === 0;
-}
+  const n = { chapter: 0, merge: 0, skip: 0 };
+  epubChaptersStates.forEach(s => { n[s]++; });
+  const adj     = epubAdjustedTotal();
+  const removed = Math.round(epubChaptersTotal - adj);
 
-function toggleAllEpubChapters(checked) {
-  epubChapterBoxes().forEach(b => {
-    b.checked = checked;
-    b.closest('.epub-ch-row').classList.toggle('off', !checked);
-  });
-  updateEpubChaptersCount();
+  const bits = [`${n.chapter} chapter${n.chapter === 1 ? '' : 's'}`];
+  if (n.merge) bits.push(`${n.merge} merged`);
+  if (n.skip)  bits.push(`${n.skip} skipped`);
+  document.getElementById('epub-chapters-count').textContent = bits.join(' · ');
+
+  // The length change isn't a side effect the user should discover later.
+  const lenEl = document.getElementById('epub-chapters-length');
+  lenEl.textContent = removed > 0
+    ? `Book length: ${Math.round(adj).toLocaleString()} chars (−${removed.toLocaleString()} not read)`
+    : `Book length: ${Math.round(adj).toLocaleString()} chars`;
+
+  document.getElementById('epub-chapters-ok').disabled = n.chapter === 0;
 }
 
 function resolveEpubChapters(value) {
@@ -1522,26 +1584,28 @@ function resolveEpubChapters(value) {
 }
 
 function submitEpubChapters() {
-  const selected = epubChapterBoxes()
-    .filter(b => b.checked)
-    .map(b => epubChaptersCandidates[Number(b.dataset.idx)])
-    .map(c => ({ name: c.name, start_chars: c.start_chars }));
-  if (!selected.length) return;
-  resolveEpubChapters({ selected, replace: epubChaptersReplace });
+  if (!epubChaptersStates.some(s => s === 'chapter')) return;
+  const sections = epubChaptersCandidates.map((c, i) => ({
+    name: c.name, start_chars: c.start_chars, state: epubChaptersStates[i],
+  }));
+  resolveEpubChapters({ sections, replace: epubChaptersReplace });
 }
 
 // After an EPUB import, offer the chapter checklist. `candidates` is the
 // extractor's chapter_candidates; `total` the book's char count; `existing` the
-// title's current milestone count. Returns a short status suffix, or '' if
-// declined / nothing created.
-async function maybeImportEpubChapters(title, candidates, total, existing) {
+// title's current milestone count. `setLength` is false when the user typed
+// their own book length and we mustn't overwrite it. Returns a short status
+// suffix, or '' if declined / nothing created.
+async function maybeImportEpubChapters(title, candidates, total, existing, setLength = true) {
   if (!candidates || !candidates.length) return '';
   const choice = await chooseEpubChapters(title, candidates, total, existing);
-  if (!choice || !choice.selected.length) return '';
+  if (!choice) return '';
   const r = await window.pywebview.api.apply_epub_chapters(
-    title, choice.selected, total, choice.replace);
+    title, choice.sections, total, choice.replace, setLength);
   if (!r || !r.ok) { setStatus('Chapter import failed: ' + ((r && r.error) || 'unknown error')); return ''; }
-  return `${r.count} chapter${r.count === 1 ? '' : 's'} → milestones`;
+  let msg = `${r.count} chapter${r.count === 1 ? '' : 's'} → milestones`;
+  if (r.length_set) msg += `, length → ${r.length_set.toLocaleString()} chars`;
+  return msg;
 }
 
 // Drag an .epub onto the cover box to auto-fill its cover (first page's image)
@@ -1584,7 +1648,9 @@ async function importEpubFile(file, title, overwrite = false) {
   let existing = 0;
   try { existing = (await window.pywebview.api.list_milestones(title) || []).length; }
   catch (e) { /* leave existing at 0 */ }
-  const extra = await maybeImportEpubChapters(title, r.chapter_candidates, r.char_count, existing);
+  // Adjust the length only if this import is what set it in the first place.
+  const extra = await maybeImportEpubChapters(
+    title, r.chapter_candidates, r.char_count, existing, !!r.count_set);
   if (extra) bits.push(extra);
 
   [mediaAllData, seriesData] = await Promise.all([

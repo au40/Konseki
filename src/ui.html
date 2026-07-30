@@ -1260,13 +1260,19 @@
   <div id="epub-chapters-dialog" class="card">
     <h2 style="margin:0 0 4px">Import chapters as milestones</h2>
     <p class="muted" id="epub-chapters-sub" style="font-size:12px;margin:0 0 12px"></p>
+    <p class="muted" id="epub-chapters-legend">
+      Click a row to change it: <b>✓</b> chapter · <b>↰</b> merge into previous ·
+      <b>✕</b> skip (not read — leaves the book length)
+    </p>
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-      <label style="font-size:12px;display:flex;gap:6px;align-items:center;cursor:pointer;color:var(--dim)">
-        <input type="checkbox" id="epub-chapters-all" onchange="toggleAllEpubChapters(this.checked)"> Select all
-      </label>
+      <span style="font-size:12px;display:flex;gap:10px;color:var(--dim)">
+        <a href="#" onclick="setAllEpubChapterStates('chapter');return false">All chapters</a>
+        <a href="#" onclick="resetEpubChapterStates();return false">Reset</a>
+      </span>
       <span class="muted" id="epub-chapters-count" style="font-size:12px"></span>
     </div>
     <div id="epub-chapters-list"></div>
+    <p class="muted" id="epub-chapters-length"></p>
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">
       <button class="btn btn-outline btn-sm" onclick="resolveEpubChapters(null)">Cancel</button>
       <button class="btn btn-primary btn-sm" id="epub-chapters-ok" onclick="submitEpubChapters()">Create</button>

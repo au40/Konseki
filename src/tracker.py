@@ -936,8 +936,7 @@ class Api:
 
         return {"ok": True, "char_count": new_count, "count_set": new_count > 0,
                 "cover_found": cover_found,
-                "chapter_candidates": res.get("chapter_candidates") or [],
-                "chapter_count": int(res.get("chapter_count") or 0)}
+                "chapter_candidates": res.get("chapter_candidates") or []}
 
     def extract_epub_meta(self, b64_str):
         """Preview an EPUB for the Add-media 'Epub import' tab: pull its title,
@@ -959,7 +958,6 @@ class Api:
             "cover_mime":  res.get("cover_mime"),
             "cover_found": bool(res.get("cover_found")),
             "chapter_candidates": res.get("chapter_candidates") or [],
-            "chapter_count": int(res.get("chapter_count") or 0),
         }
 
     def add_media_epub(self, title, atype, minutes, session_date, book_chars,
@@ -1084,24 +1082,36 @@ class Api:
             print(f"[milestones] list: {e}")
             return []
 
-    def apply_epub_chapters(self, title, selected, total, replace=False):
-        """Turn the user's chosen EPUB sections into chars-unit milestones for
-        `title`. `selected` is the checked subset of the extractor's
-        chapter_candidates (each {name, start_chars}); `total` is the book's
-        char count. Ends are recomputed over the selection (imports._epub_finalize)
-        so unselected sections fold into the previous kept one. `replace=True`
-        clears the title's existing milestones first."""
+    def apply_epub_chapters(self, title, sections, total, replace=False,
+                            set_length=True):
+        """Turn the user's EPUB section decisions into chars-unit milestones for
+        `title`. `sections` is the extractor's full chapter_candidates list, each
+        carrying the state the user left it in ('chapter'/'merge'/'skip'); `total`
+        is the book's raw char count. imports._epub_finalize compacts the skipped
+        sections out of the axis, so it also hands back the adjusted book length.
+
+        That length is written back to media_char_counts unless `set_length` is
+        false — the EPUB paths commit the RAW total before this runs, and leaving
+        it there would put the progress bar on a different axis than the
+        milestones it draws. `set_length=False` is for when the user hand-edited
+        the length in the Add-media form and we'd be clobbering their number.
+        `replace=True` clears the title's existing milestones first."""
         try:
             title = (title or "").strip()
             if not title:
                 return {"ok": False, "error": "Missing title."}
-            finalized = imports._epub_finalize(selected or [], float(total or 0))
+            raw = float(total or 0)
+            finalized, adj_total = imports._epub_finalize(sections or [], raw)
             items = [{"name": c["name"], "unit": "chars",
                       "start_val": c["start_chars"], "end_val": c["end_chars"]}
-                     for c in finalized if (c.get("name") or "").strip()]
+                     for c in finalized]
             if not items:
                 return {"ok": False, "error": "No chapters selected."}
-            return db.db_add_milestones_bulk(title, items, replace=bool(replace))
+            res = db.db_add_milestones_bulk(title, items, replace=bool(replace))
+            if res.get("ok") and set_length and 0 < adj_total < raw:
+                db.db_set_media_char_count(title, int(round(adj_total)))
+                res["length_set"] = int(round(adj_total))
+            return res
         except Exception as e:
             print(f"[milestones] epub chapters: {e}")
             return {"ok": False, "error": str(e)}

@@ -914,14 +914,20 @@ _IMG_MIME = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
              "svg": "image/svg+xml"}
 
 
-def _ttsu_char_count(xhtml):
-    """Japanese-script code points in an XHTML document, ruby + markup removed."""
+def _ttsu_clean(xhtml):
+    """Rendered text of an XHTML document: head, script/style, ruby and markup
+    stripped. Split out from _ttsu_char_count so tools/epub_boundary_check.py can
+    break the same text down by character class without re-deriving the pipeline."""
     t = _HEAD_RE.sub("", xhtml)  # <title>/meta aren't rendered text; ttsu ignores them
     t = _STYLE_RE.sub("", t)     # inline <style>/<script> left in the body
     t = _RUBY_RE.sub("", t)      # drop furigana before it collapses into bare text
     t = _TAG_RE.sub("", t)
-    t = html.unescape(t)
-    return len(_TTSU_STRIP_RE.sub("", t))
+    return html.unescape(t)
+
+
+def _ttsu_char_count(xhtml):
+    """Japanese-script code points in an XHTML document, ruby + markup removed."""
+    return len(_TTSU_STRIP_RE.sub("", _ttsu_clean(xhtml)))
 
 
 def _epub_attr(tag, name):
@@ -1110,23 +1116,34 @@ _EPUB_KEEP_RE = re.compile(
     r'prologue|epilogue|interlude|prelude)', re.IGNORECASE)
 _EPUB_DROP_RE = re.compile(
     r'^\s*(?:目次|表紙|奥付|挿絵|口絵|扉|カバー|著作権|版権|'
-    r'cover|contents|table of contents|copyright|colophon|index|acknowledg)',
+    # Author/translator back matter. Distinct from エピローグ (in KEEP above):
+    # an あとがき is commentary about the book, not part of it, and leaving it in
+    # holds the progress bar short of 100% for every book that has one.
+    r'あとがき|後書き|後書|訳者あとがき|解説|'
+    r'cover|contents|table of contents|copyright|colophon|index|acknowledg|'
+    r'afterword|about the author|translator)',
     re.IGNORECASE)
 
 
-def _epub_suggest(name, span, thr):
-    """Default keep/drop vote for a candidate: name hints win, else size >= thr."""
+def _epub_default_state(name, span, thr):
+    """Default state for a candidate: name hints win, else size >= thr.
+
+    Only ever proposes 'chapter' or 'skip'. The third state, 'merge', expresses
+    a user intent ("I read this, just don't list it") that no signal in the file
+    can distinguish from 'skip' — and both signals we do have (a front/back-matter
+    name, a junk-sized span) mean "this isn't part of the text". See
+    _epub_finalize for what each state does to the axis."""
     n = (name or "").strip()
     if _EPUB_DROP_RE.match(n):
-        return False
+        return "skip"
     if _EPUB_KEEP_RE.match(n):
-        return True
-    return span >= thr
+        return "chapter"
+    return "chapter" if span >= thr else "skip"
 
 
 def _epub_candidates(toc_entries, cum_by_doc, total):
     """Full ordered candidate list for the import checklist:
-    [{name, start_chars, span, suggested}]. `cum_by_doc` maps each counted
+    [{name, start_chars, span, default_state}]. `cum_by_doc` maps each counted
     spine-doc path to the cumulative char count at its start; `total` is the
     book's counted char total.
 
@@ -1135,7 +1152,7 @@ def _epub_candidates(toc_entries, cum_by_doc, total):
     which shares its start offset with the next real chapter — can't steal that
     chapter's name. Each candidate spans from its document to the next candidate's
     (the section it introduces); empty spans (cover images, dup fragments) are
-    dropped entirely. `suggested` is the default checkbox state: junk is removed
+    dropped entirely. `default_state` is the row's starting state: junk is removed
     by size relative to a high percentile of spans (`_EPUB_REF_PCTL`/
     `_EPUB_TRIM_FRAC`, robust to many tiny files), with name hints overriding."""
     first_label = {}
@@ -1158,35 +1175,69 @@ def _epub_candidates(toc_entries, cum_by_doc, total):
     thr = (_EPUB_TRIM_FRAC * _percentile([c["span"] for c in cand], _EPUB_REF_PCTL)
            if len(cand) >= 3 else 0.0)
     for c in cand:
-        c["suggested"] = _epub_suggest(c["name"], c["span"], thr)
+        c["default_state"] = _epub_default_state(c["name"], c["span"], thr)
     return cand
 
 
-def _epub_finalize(selected, total):
-    """Turn a chosen subset of candidates (each {name, start_chars}) into
-    contiguous milestones [{name, start_chars, end_chars}]. Ends are recomputed
-    over the selection (so unselected sections fold into the previous kept one)
-    and snapped to cover [0, total]. Order-independent: sorts by start."""
-    sel = sorted((s for s in (selected or []) if (s.get("name") or "").strip()),
-                 key=lambda s: float(s.get("start_chars") or 0))
-    if not sel:
-        return []
+def _epub_finalize(sections, total):
+    """Turn the user's per-section decisions into contiguous milestones over a
+    COMPACTED char axis. Returns (milestones, adj_total), where milestones are
+    [{name, start_chars, end_chars}] and adj_total is the book's length with the
+    skipped text removed.
+
+    `sections` is the full ordered candidate list, each {name, start_chars,
+    state}; spans are re-derived from neighbours so callers needn't send them.
+    State is one of:
+
+      'chapter' — becomes a milestone
+      'merge'   — read, but folded into the preceding chapter (no milestone)
+      'skip'    — NOT read: its chars leave the axis and the book length entirely
+
+    Skipping is what keeps chapter boundaries lined up with the reader. A
+    skipped section's chars are subtracted from every boundary after it, so
+    front matter (目次/表紙/奥付, plus any pre-TOC head gap) no longer displaces
+    chapter 1 and everything behind it by a constant, and back matter no longer
+    inflates the final chapter and holds the progress bar short of 100%.
+
+    Merged sections keep their chars — they just don't get their own milestone —
+    which is why the two end-snaps below are still correct: leading/trailing
+    merges genuinely belong to the first/last chapter, and skips have already
+    left the axis by the time we get here. Order-independent: sorts by start."""
+    secs = sorted(sections or [],
+                  key=lambda s: float(s.get("start_chars") or 0))
+    if not secs:
+        return [], float(total or 0)
+
+    # Walk the sections in order, laying the non-skipped ones down end-to-end on
+    # a fresh axis. Chars before the first section belong to no TOC entry (a
+    # cover page the TOC never names) and are dropped with the skips — `pos`
+    # starts at 0 rather than at secs[0]'s offset.
+    pos = 0.0
+    placed = []
+    for i, c in enumerate(secs):
+        start = float(c.get("start_chars") or 0)
+        end   = (float(secs[i + 1].get("start_chars") or 0)
+                 if i + 1 < len(secs) else float(total or 0))
+        span  = max(0.0, end - start)
+        state = c.get("state") or "chapter"
+        if state == "skip":
+            continue
+        placed.append({"name": (c.get("name") or "").strip(), "state": state,
+                       "start": pos, "end": pos + span})
+        pos += span
+    adj_total = pos
+
+    chapters = [p for p in placed if p["state"] == "chapter"]
+    if not chapters:
+        return [], adj_total
+
     out = []
-    for i, c in enumerate(sel):
-        s = float(c.get("start_chars") or 0)
-        e = float(sel[i + 1]["start_chars"]) if i + 1 < len(sel) else float(total)
-        out.append({"name": c["name"].strip(), "start_chars": s, "end_chars": e})
-    out[0]["start_chars"] = 0.0
-    out[-1]["end_chars"] = float(total)
-    return out
-
-
-def _epub_chapters(toc_entries, cum_by_doc, total):
-    """Auto-suggested milestones (no user input): the candidates the size/name
-    heuristic pre-checks, finalized. Kept for callers that want the default
-    without the checklist."""
-    cand = _epub_candidates(toc_entries, cum_by_doc, total)
-    return _epub_finalize([c for c in cand if c["suggested"]], total)
+    for i, p in enumerate(chapters):
+        end = chapters[i + 1]["start"] if i + 1 < len(chapters) else adj_total
+        out.append({"name": p["name"], "start_chars": p["start"], "end_chars": end})
+    out[0]["start_chars"] = 0.0        # absorb any leading merges
+    out[-1]["end_chars"]  = adj_total  # ...and any trailing ones
+    return out, adj_total
 
 
 def extract_epub(zip_bytes):
@@ -1267,8 +1318,7 @@ def extract_epub(zip_bytes):
         return {"ok": True, "char_count": total, "title": _epub_title(opf),
                 "cover_b64": cover_b64, "cover_mime": cover_mime,
                 "cover_found": cover_b64 is not None,
-                "chapter_candidates": candidates,
-                "chapter_count": sum(1 for c in candidates if c["suggested"])}
+                "chapter_candidates": candidates}
 
 
 # ── GSM aggregate import — INACTIVE ──────────────────────────────────────────
