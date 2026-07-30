@@ -9,3 +9,5 @@ backups/
 dev-data/
 web-ext-artifacts/
 konseki.log
+konseki.lock
+.konseki.flock
