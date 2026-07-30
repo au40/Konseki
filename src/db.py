@@ -364,6 +364,29 @@ def init_db():
         )
     """)
 
+    # To-read list: media the user intends to start. Purely a backlog — no chars,
+    # time or dates, and no session rows — so none of the GSM attribution /
+    # manual-overlay rules apply. Categories are seeded (Games/Books/Manga/Anime)
+    # but user-editable, same shape as dev_tabs.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS toread_categories (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            position   INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS toread_items (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            title       TEXT NOT NULL,
+            category_id INTEGER,
+            difficulty  INTEGER,
+            created_at  TEXT NOT NULL
+        )
+    """)
+
     # Enforce the GSM invariant at the DB level: exactly one GSM session row per
     # (game_id, session_date). The pull path is delete-then-insert and assumes
     # this, but pull_gsm_now() has callers outside the WAL handler's _pull_lock
@@ -2026,6 +2049,126 @@ def db_delete_dev_tab(tab_id):
     if dest_id is not None:
         con.execute("UPDATE dev_notes SET tab_id=? WHERE tab_id=?", (dest_id, tab_id))
     con.execute("DELETE FROM dev_tabs WHERE id=?", (tab_id,))
+    con.commit()
+    con.close()
+    return dest_id
+
+
+# ── To-read list ────────────────────────────────────────────────────────────
+# Backlog of media the user means to start. Same tabs-and-rows model as the dev
+# notes above: every item belongs to exactly one category, and there is always
+# at least one category for items to live in.
+TOREAD_SEED_CATEGORIES = ['Games', 'Books', 'Manga', 'Anime']
+
+def _ensure_toread_categories(con):
+    """Seed the default categories on an empty table and re-home orphan items.
+
+    Returns the id of the first category, used as the fallback home for items
+    added without one (or left behind by a deleted category).
+    """
+    n = con.execute("SELECT COUNT(*) FROM toread_categories").fetchone()[0]
+    if n == 0:
+        now = datetime.now().isoformat()
+        con.executemany(
+            "INSERT INTO toread_categories (name, position, created_at) VALUES (?,?,?)",
+            [(name, i, now) for i, name in enumerate(TOREAD_SEED_CATEGORIES, start=1)]
+        )
+    first_id = con.execute(
+        "SELECT id FROM toread_categories ORDER BY position, id LIMIT 1").fetchone()[0]
+    con.execute("UPDATE toread_items SET category_id=? WHERE category_id IS NULL", (first_id,))
+    return first_id
+
+def _norm_difficulty(value):
+    """None/blank stays unrated; anything else clamps into 1..10."""
+    if value is None or value == "":
+        return None
+    try:
+        return max(1, min(10, int(value)))
+    except (TypeError, ValueError):
+        return None
+
+def db_get_toread_categories():
+    con = sqlite3.connect(DB_PATH)
+    _ensure_toread_categories(con)
+    con.commit()
+    rows = con.execute(
+        "SELECT id, name FROM toread_categories ORDER BY position, id").fetchall()
+    con.close()
+    return [{"id": r[0], "name": r[1]} for r in rows]
+
+def db_get_toread_items():
+    rows = _q("SELECT id, title, category_id, difficulty, created_at "
+              "FROM toread_items ORDER BY id DESC")
+    return [{"id": r[0], "title": r[1], "category_id": r[2],
+             "difficulty": r[3], "created_at": r[4]} for r in rows]
+
+def db_add_toread_item(title, category_id=None, difficulty=None):
+    title = (title or "").strip()
+    if not title:
+        return
+    con = sqlite3.connect(DB_PATH)
+    first_id = _ensure_toread_categories(con)
+    try:
+        cat_id = int(category_id)
+    except (TypeError, ValueError):
+        cat_id = first_id
+    # A category id from a stale UI render would strand the item in no tab.
+    if not con.execute("SELECT 1 FROM toread_categories WHERE id=?", (cat_id,)).fetchone():
+        cat_id = first_id
+    con.execute(
+        "INSERT INTO toread_items (title, category_id, difficulty, created_at) VALUES (?,?,?,?)",
+        (title, cat_id, _norm_difficulty(difficulty), datetime.now().isoformat())
+    )
+    con.commit()
+    con.close()
+
+def db_delete_toread_item(item_id):
+    con = sqlite3.connect(DB_PATH)
+    con.execute("DELETE FROM toread_items WHERE id=?", (int(item_id),))
+    con.commit()
+    con.close()
+
+def db_add_toread_category(name):
+    name = (name or "").strip() or "Untitled"
+    con = sqlite3.connect(DB_PATH)
+    _ensure_toread_categories(con)
+    pos = con.execute("SELECT COALESCE(MAX(position), 0) + 1 FROM toread_categories").fetchone()[0]
+    cur = con.execute("INSERT INTO toread_categories (name, position, created_at) VALUES (?,?,?)",
+                      (name, pos, datetime.now().isoformat()))
+    new_id = cur.lastrowid
+    con.commit()
+    con.close()
+    return new_id
+
+def db_rename_toread_category(cat_id, name):
+    name = (name or "").strip()
+    if not name:
+        return
+    con = sqlite3.connect(DB_PATH)
+    con.execute("UPDATE toread_categories SET name=? WHERE id=?", (name, int(cat_id)))
+    con.commit()
+    con.close()
+
+def db_delete_toread_category(cat_id):
+    """Delete a category, moving its items to the first remaining one.
+
+    Returns the destination category id, or None if refused (the last category
+    can't go — its items would have nowhere to live).
+    """
+    con = sqlite3.connect(DB_PATH)
+    _ensure_toread_categories(con)
+    total = con.execute("SELECT COUNT(*) FROM toread_categories").fetchone()[0]
+    if total <= 1:
+        con.commit()
+        con.close()
+        return None
+    cat_id = int(cat_id)
+    dest = con.execute("SELECT id FROM toread_categories WHERE id<>? ORDER BY position, id LIMIT 1",
+                       (cat_id,)).fetchone()
+    dest_id = dest[0] if dest else None
+    if dest_id is not None:
+        con.execute("UPDATE toread_items SET category_id=? WHERE category_id=?", (dest_id, cat_id))
+    con.execute("DELETE FROM toread_categories WHERE id=?", (cat_id,))
     con.commit()
     con.close()
     return dest_id

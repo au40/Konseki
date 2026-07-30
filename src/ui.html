@@ -411,6 +411,7 @@
             <span class="muted" id="media-count"></span>
           </div>
           <div style="display:flex;gap:8px">
+            <button class="btn btn-outline btn-sm" onclick="openToRead()">📚 To-read</button>
             <button class="btn btn-outline btn-sm" onclick="openStatPortal()">📊 Stat portal</button>
             <button class="btn btn-outline btn-sm" onclick="openAddMediaModal()">+ Add media</button>
           </div>
@@ -656,6 +657,41 @@
             <div class="chart-wrap"><canvas id="chart-portal-scatter" height="220"></canvas></div>
           </div>
         </div>
+        <div style="height:32px"></div>
+      </div>
+
+      <!-- To-read view (backlog of titles not started yet) -->
+      <div id="media-toread-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeToRead()">← Back</button>
+          <span class="muted" style="font-size:12px">Media  ›  To-read</span>
+        </div>
+
+        <div class="page-header">
+          <div style="display:flex;align-items:center;gap:12px">
+            <h1>To-read list</h1>
+            <span class="muted" id="toread-count"></span>
+          </div>
+        </div>
+        <p class="muted" style="margin:6px 0 14px">Media you mean to start. Remove an entry once you begin it.</p>
+
+        <div class="toread-tabs-bar">
+          <div class="seg" id="toread-tabs"></div>
+          <button class="btn btn-outline btn-sm toread-cat-op" onclick="addToReadCategory()" title="Add a category">＋</button>
+          <button class="btn btn-outline btn-sm toread-cat-op" id="toread-cat-rename" onclick="renameToReadCategory()" title="Rename this category" style="display:none">✎</button>
+          <button class="btn btn-outline btn-sm toread-cat-op" id="toread-cat-delete" onclick="deleteToReadCategory()" title="Delete this category" style="display:none">🗑</button>
+        </div>
+
+        <div class="toread-add-row">
+          <input type="text" id="toread-title" placeholder="Title…" onkeydown="if(event.key==='Enter') addToReadItem()">
+          <select id="toread-cat"></select>
+          <input type="number" id="toread-diff" min="1" max="10" step="1" placeholder="Diff 1–10"
+                 onkeydown="if(event.key==='Enter') addToReadItem()">
+          <button class="btn btn-primary btn-sm" onclick="addToReadItem()">＋ Add</button>
+        </div>
+        <div class="feedback" id="toread-feedback"></div>
+
+        <div id="toread-list"></div>
         <div style="height:32px"></div>
       </div>
 

@@ -1148,6 +1148,29 @@ span.flatpickr-weekday { color: var(--dim) !important; background: #2a2a42 !impo
 .portal-table td:first-child { color: var(--text); }
 .portal-table .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; vertical-align: middle; }
 
+/* ── Media to-read list ───────────────────────────────────────────────────── */
+.toread-tabs-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toread-tabs-bar .seg { flex-wrap: wrap; }
+.toread-cat-op { flex: none; padding: 5px 10px; line-height: 1; }
+.toread-add-row { display: flex; align-items: center; gap: 8px; margin: 12px 0 0; flex-wrap: wrap; }
+.toread-add-row #toread-title { flex: 1; min-width: 180px; }
+.toread-add-row #toread-cat   { width: 130px; flex: none; }
+.toread-add-row #toread-diff  { width: 110px; flex: none; }
+.toread-add-row .btn          { flex: none; }
+.toread-row {
+  display: flex; align-items: center; gap: 12px; padding: 9px 0;
+  border-bottom: 1px solid var(--grid);
+}
+.toread-row:last-child { border-bottom: none; }
+.toread-title { flex: 1; font-size: 13px; word-break: break-word; }
+.toread-cat-label { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.toread-diff {
+  flex: none; width: 26px; height: 26px; border-radius: 50%;
+  background: var(--inset); color: var(--text); font-size: 12px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.toread-diff.none { color: var(--dim); }
+
 /* ── Dev page ── */
 .dev-log-box {
   background: var(--inset); border: 1px solid var(--grid); border-radius: 8px;

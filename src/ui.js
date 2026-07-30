@@ -3116,7 +3116,7 @@ async function doFinishGoal(id) {
 }
 
 // ── Media (grid) ────────────────────────────────────────────────────────────
-// The Media page has four mutually-exclusive sub-views. Switching must hide ALL
+// The Media page has six mutually-exclusive sub-views. Switching must hide ALL
 // the others — milestone-view was added late and several callers forgot it,
 // leaving its stat/graph page stacked under the next view.
 function showMediaView(name) {
@@ -3126,6 +3126,7 @@ function showMediaView(name) {
     series:    'media-series-view',
     milestone: 'media-milestone-view',
     portal:    'media-portal-view',
+    toread:    'media-toread-view',
   };
   for (const [key, id] of Object.entries(views)) {
     document.getElementById(id).style.display = key === name ? 'block' : 'none';
@@ -6403,6 +6404,159 @@ function onPortalAlign() {
   destroyChart('portal-speed');     renderPortalSpeed(withChars, dates);
   destroyChart('portal-cum-chars'); renderPortalCum(sel, dates, 'chars', 'chart-portal-cum-chars', 'portal-cum-chars', v => fmtChars(v));
   destroyChart('portal-cum-time');  renderPortalCum(sel, dates, 'hours', 'chart-portal-cum-time', 'portal-cum-time', v => v.toFixed(0) + 'h');
+}
+
+// ── Media to-read list ──────────────────────────────────────────────────────
+// Backlog of titles not started yet. Same tabs-and-rows model as the dev notes:
+// every item lives in exactly one category, and there's always ≥1 category.
+// The extra "All" tab (toreadActiveCat === null) is a read-only aggregate view,
+// so the rename/delete category controls hide while it's active.
+let toreadItems     = [];    // [{id, title, category_id, difficulty, created_at}]
+let toreadCats      = [];    // [{id, name}]; always ≥1 after a load
+let toreadActiveCat = null;  // numeric category id, or null for the All tab
+
+async function openToRead() {
+  showMediaView('toread');                  // visibility FIRST, like openStatPortal
+  await loadToRead();
+}
+
+function closeToRead() { showMediaView('grid'); }
+
+async function loadToRead() {
+  const data = await window.pywebview.api.get_toread();
+  toreadCats  = (data && data.categories) || [];
+  toreadItems = (data && data.items) || [];
+  // Fall back to All if the active category was deleted out from under us.
+  if (toreadActiveCat !== null && !toreadCats.some(c => c.id === toreadActiveCat)) {
+    toreadActiveCat = null;
+  }
+  renderToRead();
+}
+
+function renderToRead() {
+  const list = document.getElementById('toread-list');
+  const tabs = document.getElementById('toread-tabs');
+  if (!list) return;
+
+  if (tabs) {
+    tabs.innerHTML =
+      `<button class="seg-btn${toreadActiveCat === null ? ' active' : ''}" ` +
+      `onclick="setToReadFilter(null)">All</button>` +
+      toreadCats.map(c =>
+        `<button class="seg-btn${toreadActiveCat === c.id ? ' active' : ''}" ` +
+        `onclick="setToReadFilter(${c.id})" ondblclick="renameToReadCategory()">` +
+        `${escHtml(c.name)}</button>`
+      ).join('');
+  }
+  // Rename/delete act on the active category, so they're meaningless on All.
+  // Delete also needs a spare — the last category can't go (items need a home).
+  const rn = document.getElementById('toread-cat-rename');
+  const dl = document.getElementById('toread-cat-delete');
+  if (rn) rn.style.display = toreadActiveCat !== null ? '' : 'none';
+  if (dl) dl.style.display = (toreadActiveCat !== null && toreadCats.length > 1) ? '' : 'none';
+
+  // The add-row category defaults to the active tab, or the first category on All.
+  const sel = document.getElementById('toread-cat');
+  if (sel) {
+    sel.innerHTML = toreadCats.map(c =>
+      `<option value="${c.id}">${escHtml(c.name)}</option>`).join('');
+    const want = toreadActiveCat !== null ? toreadActiveCat
+               : (toreadCats.length ? toreadCats[0].id : null);
+    if (want !== null) sel.value = String(want);
+  }
+
+  const shown = toreadActiveCat === null
+    ? toreadItems
+    : toreadItems.filter(i => i.category_id === toreadActiveCat);
+
+  const count = document.getElementById('toread-count');
+  if (count) count.textContent = shown.length ? `${shown.length} item${shown.length === 1 ? '' : 's'}` : '';
+
+  if (!shown.length) {
+    list.innerHTML = '<p class="empty-msg">Nothing on the list yet.</p>';
+    return;
+  }
+  const catName = id => {
+    const c = toreadCats.find(x => x.id === id);
+    return c ? c.name : '';
+  };
+  list.innerHTML = shown.map(i => {
+    const d = i.difficulty;
+    const diff = (d === null || d === undefined)
+      ? '<span class="toread-diff none" title="No difficulty set">–</span>'
+      : `<span class="toread-diff" title="Difficulty ${d}/10">${d}</span>`;
+    // The category label only earns its place on All, where rows are mixed.
+    const cat = toreadActiveCat === null
+      ? `<span class="toread-cat-label">${escHtml(catName(i.category_id))}</span>` : '';
+    return `
+    <div class="toread-row">
+      ${diff}
+      <span class="toread-title">${escHtml(i.title)}</span>
+      ${cat}
+      <button class="btn btn-outline btn-sm" onclick="deleteToReadItem(${i.id})" title="Remove from the list">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function setToReadFilter(catId) {
+  toreadActiveCat = catId;   // null or a numeric id; filters the cached list, no re-fetch
+  renderToRead();
+}
+
+async function addToReadItem() {
+  const fb    = document.getElementById('toread-feedback');
+  const tEl   = document.getElementById('toread-title');
+  const dEl   = document.getElementById('toread-diff');
+  const title = (tEl.value || '').trim();
+  const diffRaw = (dEl.value || '').trim();
+
+  if (!title) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a title.'; return;
+  }
+  if (diffRaw && (isNaN(diffRaw) || Number(diffRaw) < 1 || Number(diffRaw) > 10)) {
+    fb.className = 'feedback err'; fb.textContent = 'Difficulty must be between 1 and 10.'; return;
+  }
+  const catRaw = document.getElementById('toread-cat').value;
+  const r = await window.pywebview.api.add_toread_item(
+    title, catRaw ? Number(catRaw) : null, diffRaw ? Number(diffRaw) : null);
+  if (!r.ok) {
+    fb.className = 'feedback err'; fb.textContent = r.error || 'Could not add that.'; return;
+  }
+  fb.className = 'feedback'; fb.textContent = '';
+  tEl.value = ''; dEl.value = '';
+  tEl.focus();
+  await loadToRead();
+}
+
+async function deleteToReadItem(id) {
+  if (!await showConfirm('Remove this from the to-read list?')) return;
+  const r = await window.pywebview.api.delete_toread_item(id);
+  if (r.ok) await loadToRead();
+}
+
+async function addToReadCategory() {
+  const name = (prompt('New category name:') || '').trim();
+  if (!name) return;
+  const r = await window.pywebview.api.add_toread_category(name);
+  if (r.ok) { toreadActiveCat = r.id; await loadToRead(); }   // jump to the new category
+}
+
+async function renameToReadCategory() {
+  if (toreadActiveCat === null) return;
+  const cur = toreadCats.find(c => c.id === toreadActiveCat);
+  const name = (prompt('Rename category:', cur ? cur.name : '') || '').trim();
+  if (!name) return;
+  const r = await window.pywebview.api.rename_toread_category(toreadActiveCat, name);
+  if (r.ok) await loadToRead();
+}
+
+async function deleteToReadCategory() {
+  if (toreadActiveCat === null || toreadCats.length <= 1) return;
+  const cur = toreadCats.find(c => c.id === toreadActiveCat);
+  if (!await showConfirm(`Delete category “${cur ? cur.name : ''}”? Its items move to the first category.`)) return;
+  const r = await window.pywebview.api.delete_toread_category(toreadActiveCat);
+  if (r.ok) { toreadActiveCat = r.moved_to; await loadToRead(); }
+  else setStatus(r.error || 'Could not delete category');
 }
 
 if (window.pywebview) {

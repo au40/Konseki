@@ -57,6 +57,8 @@ from db import (
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     db_get_dev_notes, db_add_dev_note, db_delete_dev_note, db_set_dev_note_importance,
     db_set_dev_note_tab, db_get_dev_tabs, db_add_dev_tab, db_rename_dev_tab, db_delete_dev_tab,
+    db_get_toread_categories, db_get_toread_items, db_add_toread_item, db_delete_toread_item,
+    db_add_toread_category, db_rename_toread_category, db_delete_toread_category,
     _get_aliases, _q, _q1,
     insert_manual_session, create_manual_media, import_csv_file,
     get_total_log_baseline, set_total_log_baseline,
@@ -542,6 +544,48 @@ class Api:
             dest = db_delete_dev_tab(tab_id)
             if dest is None:
                 return {"ok": False, "error": "Can't delete the last tab."}
+            return {"ok": True, "moved_to": dest}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    # ── To-read list ──────────────────────────────────────────────────────────
+    def get_toread(self):
+        """Categories + items in one call — the whole view refreshes together."""
+        return {"categories": db_get_toread_categories(), "items": db_get_toread_items()}
+
+    def add_toread_item(self, title, category_id=None, difficulty=None):
+        try:
+            db_add_toread_item(title, category_id, difficulty)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_toread_item(self, item_id):
+        try:
+            db_delete_toread_item(item_id)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def add_toread_category(self, name):
+        try:
+            new_id = db_add_toread_category(name)
+            return {"ok": True, "id": new_id}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def rename_toread_category(self, cat_id, name):
+        try:
+            db_rename_toread_category(cat_id, name)
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def delete_toread_category(self, cat_id):
+        try:
+            dest = db_delete_toread_category(cat_id)
+            if dest is None:
+                return {"ok": False, "error": "Can't delete the last category."}
             return {"ok": True, "moved_to": dest}
         except Exception as e:
             return {"ok": False, "error": str(e)}
