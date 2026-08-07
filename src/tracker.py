@@ -660,18 +660,21 @@ class Api:
         try:
             datetime.strptime(session_date, "%Y-%m-%d")
             base = get_total_log_baseline(media_key or "")
-            if base is None:
-                return {"ok": False, "error": "Set a baseline before logging a difference."}
+            # No baseline yet = starting from zero, so the first entry logs its full
+            # total. "Set as baseline" stays the escape hatch for pre-existing hours
+            # the user does NOT want logged.
+            base_secs  = float(base["base_secs"]) if base else 0.0
+            base_chars = int(base["base_chars"])  if base else 0
 
             new_secs   = float(new_secs)
-            base_secs  = float(base["base_secs"])
             delta_secs = new_secs - base_secs
             if delta_secs <= 0:
-                return {"ok": False, "error": "New total must be greater than the last recorded total."}
+                return {"ok": False, "error": (
+                    "New total must be greater than the last recorded total."
+                    if base else "Enter a total greater than 0.")}
             delta_hours = delta_secs / 3600.0
 
             has_chars = new_chars not in (None, "", 0, "0")
-            base_chars = int(base["base_chars"])
             if has_chars:
                 delta_chars = max(0, int(float(new_chars)) - base_chars)
             elif cph not in (None, "", 0, "0"):

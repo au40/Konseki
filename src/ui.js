@@ -114,6 +114,28 @@ function fmtChars(n) {
   if (n >= 1000)      return `${(n/1000).toFixed(1)}k`;
   return String(n);
 }
+// ── Decimal places ─────────────────────────────────────────────────────────
+// A metric that shows a decimal shows it *always*: 24 renders as "24.0", never
+// collapsing to a whole number just because the fraction happens to be zero.
+// Never strip a trailing ".0" from these — a column of "31.2 / 24 / 18.7" reads
+// as three different precisions.
+function fmtFixed(n, dp = 1) { return Number(n || 0).toFixed(dp); }
+// Every percentage shown as text is 1-decimal.
+function fmtPct(n) { return fmtFixed(n, 1); }
+// Chart.js hands a tick callback (value, index, ticks). Its "nice" steps include
+// 2.5, which makes some ticks fractional and others whole on the same axis
+// ("0 / 2.5 / 5"). Format every tick to the most precise one so the axis reads
+// "0.0 / 2.5 / 5.0". Values are pre-rounded to kill float noise (7.500000000001).
+function tickDp(ticks) {
+  let dp = 0;
+  (ticks || []).forEach(t => {
+    const s = String(Math.round((t?.value ?? t) * 1e6) / 1e6);
+    const i = s.indexOf('.');
+    if (i >= 0) dp = Math.max(dp, s.length - i - 1);
+  });
+  return Math.min(dp, 2);
+}
+function fmtTick(v, ticks, suffix = '') { return fmtFixed(v, tickDp(ticks)) + suffix; }
 function twRolling(charArr, secsArr, window) {
   return charArr.map((_, i) => {
     const start = Math.max(0, i - window + 1);
@@ -1312,12 +1334,16 @@ async function refreshTotalLogBaseline() {
     const charsPart = tlogBaseChars > 0 ? ` · ${fmtChars(tlogBaseChars)} chars` : '';
     line.textContent = `Last recorded total ${scope}: ${secsToHMS(tlogBaseSecs)}${charsPart}`;
   } else {
-    line.textContent = `No baseline set yet ${scope} — enter your current total and press “Set as baseline”.`;
+    line.textContent = `No baseline yet ${scope} — starting from 0:00:00, so your first entry logs its full total. `
+                     + `Press “Set as baseline” instead if you already have hours you don't want logged.`;
   }
 
+  // Only per-media mode with no media picked still gates the button — a missing
+  // baseline just means "start from zero", not "you can't log".
   const btn = document.getElementById('tlog-submit');
-  btn.disabled = !tlogHasBaseline;
-  btn.style.opacity = tlogHasBaseline ? '' : '0.5';
+  const needMedia = tlogMode === 'per_media' && !tlogKey();
+  btn.disabled = needMedia;
+  btn.style.opacity = needMedia ? '0.5' : '';
   updateTotalLogPreview();
 }
 
@@ -1330,20 +1356,21 @@ function updateTotalLogPreview() {
   const cphRaw   = document.getElementById('tlog-cph').value.trim();
   if (newSecs === null) { prev.style.display = 'none'; return; }
 
-  if (!tlogHasBaseline) {
-    prev.style.display = '';
-    prev.textContent = 'No baseline yet — “Set as baseline” will store this as your starting total.';
-    return;
-  }
-  const deltaSecs = newSecs - tlogBaseSecs;
+  // No baseline yet = starting from zero, so the whole total is the first entry.
+  const baseSecs  = tlogHasBaseline ? tlogBaseSecs  : 0;
+  const baseChars = tlogHasBaseline ? tlogBaseChars : 0;
+
+  const deltaSecs = newSecs - baseSecs;
   if (deltaSecs <= 0) {
     prev.style.display = '';
-    prev.textContent = `New total must exceed the last recorded total (${secsToHMS(tlogBaseSecs)}).`;
+    prev.textContent = tlogHasBaseline
+      ? `New total must exceed the last recorded total (${secsToHMS(baseSecs)}).`
+      : 'Enter a total greater than 0:00:00.';
     return;
   }
   const deltaHours = deltaSecs / 3600;
   let deltaChars = 0;
-  if (charsRaw)    deltaChars = Math.max(0, Number(charsRaw) - tlogBaseChars);
+  if (charsRaw)    deltaChars = Math.max(0, Number(charsRaw) - baseChars);
   else if (cphRaw) deltaChars = Math.round(Number(cphRaw) * deltaHours);
 
   const parts = [`Will log: ${fmtTime(deltaSecs)}`];
@@ -1351,6 +1378,7 @@ function updateTotalLogPreview() {
     parts.push(`${fmtChars(deltaChars)} chars`);
     parts.push(`~${fmtChars(Math.round(deltaChars / deltaHours))}/hr`);
   }
+  if (!tlogHasBaseline) parts.push('first entry — full total');
   prev.style.display = '';
   prev.textContent = parts.join(' · ');
 }
@@ -1985,7 +2013,7 @@ function renderStats(d) {
   document.getElementById('es-best-week').textContent  = fmtTime(d.best_week_secs);
   document.getElementById('es-best-week-date').textContent = d.best_week_start ? `w/o ${d.best_week_start}` : '—';
   document.getElementById('sc-avg').textContent        = fmtTime(d.avg_secs);
-  document.getElementById('es-consistency').textContent    = `${d.consistency_pct}%`;
+  document.getElementById('es-consistency').textContent    = `${fmtPct(d.consistency_pct)}%`;
   document.getElementById('es-consistency-sub').textContent = d.active_days ? `${d.active_days}/${d.window_days}d active` : '';
   // Preset range: park the brush handles at the edges (full span, no dimming)
   // and restore the streak card to its live "Current Streak" meaning.
@@ -2537,7 +2565,7 @@ function applyBrushCards(v) {
   document.getElementById('es-best-day-date').textContent  = v.best_day ? v.best_day.date : '—';
   document.getElementById('es-best-week').textContent      = fmtTime(v.best_week ? v.best_week.secs : 0);
   document.getElementById('es-best-week-date').textContent = v.best_week ? `w/o ${v.best_week.start}` : '—';
-  document.getElementById('es-consistency').textContent     = `${v.consistency_pct}%`;
+  document.getElementById('es-consistency').textContent     = `${fmtPct(v.consistency_pct)}%`;
   document.getElementById('es-consistency-sub').textContent =
     v.active_days ? `${v.active_days}/${v.window_days}d active` : '';
 }
@@ -3020,15 +3048,15 @@ function makeGoalCard(g) {
         const total = Math.max(1, g.total_days);
         const elapsed = Math.max(0, Math.min(total, (g.total_days - g.days_left) + 1));
         const expPct = (elapsed / total) * 100;
-        // Match the right-side progress %: 1-decimal precision, trailing zeros dropped.
-        const expDisp = Math.round(expPct * 10) / 10;
+        // Match the right-side progress %: 1-decimal precision, always shown.
+        const expDisp = fmtPct(expPct);
         const expVal = fmtMetric((expPct / 100) * g.target);
         return `<div class="progress-expected" style="left:${expPct}%" title="Expected by end of today: ${expDisp}% (${expVal})"></div>`;
       })()}
     </div>
     <div class="goal-meta">
       <span class="goal-numbers">${fmtMetric(g.completed)} / ${fmtMetric(g.target)}${actLabel}${charsLabel}</span>
-      <span class="goal-pct" style="color:${fillColor}">${pct}%</span>
+      <span class="goal-pct" style="color:${fillColor}">${fmtPct(pct)}%</span>
     </div>
     ${chunkHtml}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
@@ -3501,7 +3529,7 @@ function renderSeriesProgress(s, detailByTitle, daily = []) {
   const L = books.reduce((a, b) => a + b.length, 0);
   const R = books.reduce((a, b) => a + b.read, 0);
   const pct = L > 0 ? R / L * 100 : 0;
-  pctEl.textContent = `${pct.toFixed(1).replace(/\.0$/, '')}%`;
+  pctEl.textContent = `${fmtPct(pct)}%`;
   cntEl.textContent = `${fmtChars(R)} / ${fmtChars(L)} chars`;
 
   // ETA bottom-right, same as the media completion bar: remaining chars over the
@@ -3537,7 +3565,7 @@ function renderSeriesProgress(s, detailByTitle, daily = []) {
     seg.style.background = b.color;
     const meta = b.completed
       ? `Complete · ${fmtChars(b.length)} chars`
-      : `${b.pct.toFixed(1).replace(/\.0$/, '')}% · ${fmtChars(b.read)} / ${fmtChars(b.length)} chars`;
+      : `${fmtPct(b.pct)}% · ${fmtChars(b.read)} / ${fmtChars(b.length)} chars`;
     seg.addEventListener('mouseenter', () => showProgressTip(seg, b.display, meta));
     seg.addEventListener('mouseleave', hideProgressTip);
     seg.addEventListener('click', () => { hideProgressTip(); openMediaDetail(b.title); });
@@ -4037,8 +4065,8 @@ function renderMediaDetail(d) {
   hideProgressTip();   // a segment could be removed mid-hover
   if (gcc > 0) {
     const pct = Math.min(100, d.total_chars / gcc * 100);
-    // 1-decimal, trailing zero dropped (matches goal-card % formatting).
-    const pctDisp = pct.toFixed(1).replace(/\.0$/, '');
+    // 1-decimal, always shown (matches goal-card % formatting).
+    const pctDisp = fmtPct(pct);
     document.getElementById('detail-progress-pct').textContent = `${pctDisp}%`;
     document.getElementById('detail-progress-counts').textContent =
       `${fmtChars(d.total_chars)} / ${fmtChars(gcc)} chars`;
@@ -5250,7 +5278,7 @@ function fmtMilestoneTotals(m, gcc) {
   // range that draws its tinted section on the bar.
   if (gcc > 0 && m.start_chars != null && m.end_chars != null) {
     const span = Math.max(0, (m.end_chars - m.start_chars) / gcc * 100);
-    if (span > 0) parts.push(`${span.toFixed(1).replace(/\.0$/, '')}%`);
+    if (span > 0) parts.push(`${fmtPct(span)}%`);
   }
   return parts.join(' · ') || '—';
 }
@@ -6235,7 +6263,7 @@ function portalDateScale(yTickCb) {
 // Linear "days since start" x-axis, used by the calendar charts in aligned mode.
 function portalDayScale(yTickCb) {
   return {
-    x: { type: 'linear', grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', maxRotation: 0, callback: v => v + 'd' }, title: { display: true, text: 'Days since start', color: '#9090A8' }, beginAtZero: true },
+    x: { type: 'linear', grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', maxRotation: 0, callback: (v, _i, ts) => fmtTick(v, ts, 'd') }, title: { display: true, text: 'Days since start', color: '#9090A8' }, beginAtZero: true },
     y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: yTickCb }, beginAtZero: false },
   };
 }
@@ -6344,7 +6372,7 @@ function renderPortalNorm(withChars) {
         tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmtChars(Math.round(c.parsed.y))}/h @ ${c.parsed.x.toFixed(byDay ? 0 : 1)}${unit}` } },
       },
       scales: {
-        x: { type: 'linear', grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', maxRotation: 0, callback: v => v + unit }, title: { display: true, text: byDay ? 'Reading day' : 'Hours into title', color: '#9090A8' } },
+        x: { type: 'linear', grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', maxRotation: 0, callback: (v, _i, ts) => fmtTick(v, ts, unit) }, title: { display: true, text: byDay ? 'Reading day' : 'Hours into title', color: '#9090A8' } },
         y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => fmtChars(v) }, beginAtZero: false },
       },
     },
@@ -6403,7 +6431,7 @@ function renderPortalGain(withChars) {
         } } },
       },
       scales: {
-        x: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => v + '%' }, beginAtZero: true },
+        x: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: (v, _i, ts) => fmtTick(v, ts, '%') }, beginAtZero: true },
         y: { grid: { display: false }, ticks: { color: '#9090A8' } },
       },
     },
