@@ -414,6 +414,7 @@
             <span class="muted" id="media-count"></span>
           </div>
           <div style="display:flex;gap:8px">
+            <button class="btn btn-outline btn-sm" onclick="openShelf()">📖 Shelf</button>
             <button class="btn btn-outline btn-sm" onclick="openToRead()">📚 To-read</button>
             <button class="btn btn-outline btn-sm" onclick="openStatPortal()">📊 Stat portal</button>
             <button class="btn btn-outline btn-sm" onclick="openAddMediaModal()">+ Add media</button>
@@ -653,6 +654,26 @@
             <div class="chart-wrap"><canvas id="chart-portal-scatter" height="220"></canvas></div>
           </div>
         </div>
+        <div style="height:32px"></div>
+      </div>
+
+      <!-- Shelf view: everything in progress, with completion and a projection -->
+      <div id="media-shelf-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeShelf()">← Back</button>
+          <span class="muted" style="font-size:12px">Media  ›  Shelf</span>
+        </div>
+
+        <div class="page-header">
+          <div style="display:flex;align-items:center;gap:12px">
+            <h1>Shelf</h1>
+            <span class="muted" id="shelf-count"></span>
+          </div>
+        </div>
+        <p class="muted" style="margin:6px 0 14px">Titles you're partway through, most recently read first.
+          Estimates project from each title's own trailing 7-reading-day speed.</p>
+
+        <div id="shelf-list" class="shelf-list"></div>
         <div style="height:32px"></div>
       </div>
 

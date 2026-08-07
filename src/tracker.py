@@ -53,7 +53,8 @@ from db import (
     get_streak, get_top_titles, get_heatmap_data,
     get_manual_time_adjust, set_manual_time_adjust, get_manual_time_adjusts_for_date,
     get_manual_time_adjusts_all,
-    get_media_stats, get_media_titles, get_series_data, get_extra_stats, get_range_extra_stats,
+    get_media_stats, get_media_shelf, get_media_titles, get_series_data,
+    get_extra_stats, get_range_extra_stats,
     db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     db_get_dev_notes, db_add_dev_note, db_delete_dev_note, db_set_dev_note_importance,
@@ -354,6 +355,9 @@ class Api:
             "activity":        [{"type": a[0], "seconds": a[1]} for a in activity],
             "titles":          [{"title": t[0], "hours": t[1]} for t in titles],
         }
+
+    def get_media_shelf(self):
+        return get_media_shelf()
 
     def get_extra_stats(self):
         return get_extra_stats()

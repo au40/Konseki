@@ -3459,6 +3459,7 @@ function showMediaView(name) {
     milestone: 'media-milestone-view',
     portal:    'media-portal-view',
     toread:    'media-toread-view',
+    shelf:     'media-shelf-view',
   };
   for (const [key, id] of Object.entries(views)) {
     document.getElementById(id).style.display = key === name ? 'block' : 'none';
@@ -3568,6 +3569,26 @@ async function shiftMediaCard(key, delta) {
   mediaOrderMap = Object.fromEntries(ordered.map((k, idx) => [k, idx]));
   renderMediaGrid();
   await window.pywebview.api.set_media_order(ordered);
+}
+
+// 30-day activity strip, used by the shelf rows. Plain divs rather than a
+// canvas — a Chart.js instance per row would be absurd for 30 bars.
+//
+// Bars are scaled to the title's OWN busiest day, not a global max, so a title
+// you read lightly still shows shape. That does mean heights aren't comparable
+// BETWEEN rows; the strip answers "when did I read this", not "how much".
+// Days with no reading keep a 1px floor so it reads as a timeline, not as gaps.
+function sparkHTML(spark, color) {
+  if (!Array.isArray(spark) || !spark.some(v => v > 0)) {
+    return '<div class="spark spark-empty"></div>';
+  }
+  const max = Math.max(...spark);
+  const total = spark.reduce((a, b) => a + b, 0);
+  const bars = spark.map(v => {
+    const h = v > 0 ? Math.max(12, Math.round(v / max * 100)) : 0;
+    return `<i style="height:${h}%;${v > 0 ? `background:${color}` : ''}"></i>`;
+  }).join('');
+  return `<div class="spark" title="Last 30 days — ${fmtTime(total)}">${bars}</div>`;
 }
 
 function makeMediaCard(m) {
@@ -6643,6 +6664,55 @@ let toreadActiveCat = null;  // numeric category id, or null for the All tab
 async function openToRead() {
   showMediaView('toread');                  // visibility FIRST, like openStatPortal
   await loadToRead();
+}
+
+// ── Shelf ──────────────────────────────────────────────────────────────────
+// Every title that's partway through, as one sorted list: how far in, how much
+// is left, and how long that would take at the title's own recent pace. The
+// per-row numbers come from get_media_shelf(), which routes through the same
+// attribution-aware helpers as the detail page, so a row here and that title's
+// completion bar agree.
+function closeShelf() { showMediaView('grid'); }
+
+async function openShelf() {
+  showMediaView('shelf');
+  const rows = await window.pywebview.api.get_media_shelf();
+  renderShelf(rows || []);
+}
+
+function renderShelf(rows) {
+  const el  = document.getElementById('shelf-list');
+  const cnt = document.getElementById('shelf-count');
+  if (cnt) cnt.textContent = rows.length ? `${rows.length} in progress` : '';
+  if (!rows.length) {
+    el.innerHTML = '<p class="empty-msg">Nothing in progress. A title appears here once it has a known length and some reading.</p>';
+    return;
+  }
+  el.innerHTML = rows.map(r => {
+    const color = acolor(r.activity_type);
+    const eta = r.eta_hours > 0
+      ? `${r.eta_hours < 1 ? '<1' : r.eta_hours.toFixed(1)}h left`
+      : (r.remaining <= 0 ? 'Ready to finish' : 'No recent pace');
+    const etaTitle = r.speed > 0
+      ? `${fmtChars(r.remaining)} chars left at ${fmtChars(Math.round(r.speed))} chars/h (7 reading days)`
+      : `${fmtChars(r.remaining)} chars left — no reading in the last 7 sessions to project from`;
+    return `
+      <div class="shelf-row" onclick="openMediaDetail(${JSON.stringify(r.title).replace(/"/g, '&quot;')})">
+        <div>
+          <div class="shelf-name">${escHtml(r.display_title || r.title)}</div>
+          <div class="shelf-sub">${fmtChars(r.total_chars)} / ${fmtChars(r.length)} chars${
+            r.length_source === 'gsm' ? '' : ' · your length'}</div>
+        </div>
+        <div>
+          <div class="shelf-track"><div class="shelf-fill" style="width:${r.pct}%;background:${color}"></div></div>
+          ${sparkHTML(r.spark, color)}
+        </div>
+        <div class="shelf-right">
+          <div class="shelf-pct" style="color:${color}">${fmtPct(r.pct)}%</div>
+          <div class="shelf-eta" title="${escHtml(etaTitle)}">${eta}</div>
+        </div>
+      </div>`;
+  }).join('');
 }
 
 function closeToRead() { showMediaView('grid'); }

@@ -1425,6 +1425,137 @@ def get_recent_log_titles(method, days=7, limit=12):
     return [{"title": t, "display_title": aliases.get(t, t)}
             for t, _ in recent if t in existing]
 
+def _game_id_to_title():
+    """{game_id: title} — the mapping both overlays need to reach a title.
+    One title per game, same lookup get_manual_secs_by_title uses."""
+    return {g: t for g, t in _q(
+        "SELECT game_id, MAX(title) FROM sessions "
+        "WHERE source='gsm' AND game_id IS NOT NULL GROUP BY game_id"
+    )}
+
+
+def _title_daily(days=90):
+    """{title: {date: [chars, secs]}} over the last `days` logical days, with GSM
+    rollover attribution and the manual overlay applied.
+
+    Net-adjustment-per-day pattern (CLAUDE.md), keyed per title. A displacement
+    moves chars/time between two dates of the SAME game — hence the same title —
+    so within a title it relabels which day owns the reading; it only nets to
+    zero if both endpoints fall in the window, which is exactly why a per-day
+    series has to apply it even though a per-title TOTAL doesn't.
+
+    Powers the media-card sparklines and the shelf view's ETA. Upper bound is
+    clamped to logical today so rollover-window rows can't leak."""
+    since, today = window_bounds(days)
+    out = {}
+
+    def bump(t, d, chars, secs):
+        if (since and d < since) or d > today:
+            return
+        cell = out.setdefault(t, {}).setdefault(d, [0, 0])
+        cell[0] += chars
+        cell[1] += secs
+
+    for t, d, c, s in _q(
+        "SELECT title, session_date, COALESCE(SUM(chars_read),0), "
+        "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0) "
+        "FROM sessions WHERE title IS NOT NULL AND title<>'' AND session_date>=? "
+        "GROUP BY title, session_date", since or "0000-00-00"
+    ):
+        bump(t, d, c, s)
+
+    g2t = _game_id_to_title()
+
+    for rd, sd, gid, ch, sec in _q(
+        "SELECT rollover_date, source_date, game_id, chars, time_seconds "
+        "FROM gsm_rollover_attributions WHERE rollover_date<>source_date"
+    ):
+        t = g2t.get(gid)
+        if not t:
+            continue
+        bump(t, sd, -ch, -sec)
+        bump(t, rd,  ch,  sec)
+
+    # Manual overlay touches time only, never chars.
+    for d, gid, delta in _q(
+        "SELECT date, game_id, secs_delta FROM manual_time_adjust WHERE secs_delta <> 0"
+    ):
+        t = g2t.get(gid)
+        if t:
+            bump(t, d, 0, delta)
+
+    return {t: {d: [max(0, c), max(0, s)] for d, (c, s) in m.items()}
+            for t, m in out.items()}
+
+
+def _title_spark(daily_map, days=30):
+    """Dense last-`days` seconds array for one title's {date: [chars, secs]}."""
+    end = get_today_date()
+    return [round((daily_map.get((end - timedelta(days=i)).isoformat()) or [0, 0])[1])
+            for i in range(days - 1, -1, -1)]
+
+
+def _title_recent_speed(daily_map, reading_days=7):
+    """Trailing chars/hour over the last N days that actually had reading —
+    summed chars over summed secs, never sessions.reading_speed. Mirrors
+    recentSpeed()'s window so the shelf ETA matches the detail page's."""
+    active = sorted((d for d, (c, s) in daily_map.items() if s > 0), reverse=True)[:reading_days]
+    c = sum(daily_map[d][0] for d in active)
+    s = sum(daily_map[d][1] for d in active)
+    return (c / (s / 3600)) if (s > 0 and c > 0) else 0
+
+
+def get_media_shelf():
+    """In-progress titles with completion and a projected finish — the 'what's in
+    flight' view for the media page.
+
+    A title qualifies when it has a known length (user-entered wins over GSM's,
+    same precedence as the detail completion bar), has been read at all, and
+    isn't marked complete. ETA divides remaining chars by the title's own trailing
+    speed, derived from totals."""
+    stats = {m["title"]: m for m in get_media_stats()}
+    daily = _title_daily(90)
+
+    user_cc = {t: c for t, c in _q("SELECT title, char_count FROM media_char_counts")}
+    game_cc = {t: c for t, c in _q(
+        "SELECT game_name, char_count FROM gsm_games WHERE char_count > 0")}
+
+    out = []
+    for title, m in stats.items():
+        if m["completed"]:
+            continue
+        length = user_cc.get(title) or game_cc.get(title) or 0
+        if length <= 0 or m["total_chars"] <= 0:
+            continue
+        dm        = daily.get(title, {})
+        speed     = _title_recent_speed(dm)
+        remaining = max(0, length - m["total_chars"])
+        out.append({
+            # 30-day activity strip. Lives here rather than on the media cards:
+            # the grid is cover-art-first and a strip on every card competed with
+            # it, while this view is already the "what's active" one. Derived from
+            # the same _title_daily map as the ETA, so the two agree.
+            "spark":         _title_spark(dm, 30),
+            "title":         title,
+            "display_title": m["display_title"],
+            "source":        m["source"],
+            "activity_type": m["activity_type"],
+            "image":         m["image"],
+            "total_chars":   m["total_chars"],
+            "total_secs":    m["total_secs"],
+            "length":        length,
+            "length_source": "user" if user_cc.get(title) else "gsm",
+            "pct":           min(100.0, m["total_chars"] / length * 100),
+            "remaining":     remaining,
+            "speed":         speed,
+            "eta_hours":     (remaining / speed) if (speed > 0 and remaining > 0) else 0,
+            "last_date":     m["last_date"],
+        })
+    # Most recently read first — the shelf answers "what am I working on now".
+    out.sort(key=lambda r: (r["last_date"] or ""), reverse=True)
+    return out
+
+
 def get_media_stats():
     rows = _q("""
         SELECT

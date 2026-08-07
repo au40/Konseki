@@ -396,3 +396,127 @@ class TestPrevRange:
         seed.gsm(seed.day(-3), chars=9_999, secs=9_999, game_id="g1")   # future
         tot = db._adjusted_day_totals(seed.day(10), seed.day(-5))
         assert seed.day(-3) not in tot
+
+
+# ── M4: per-title daily series + shelf ─────────────────────────────────────
+class TestTitleDaily:
+    """_title_daily powers the shelf's activity strip and ETA. It's a per-DAY
+    per-title view, so unlike a per-title total it must apply attribution —
+    a displacement relabels which of the title's own days owns the reading."""
+
+    def test_attribution_moves_a_titles_reading_between_its_own_days(self, seed, db):
+        src, roll = seed.day(3), seed.day(4)
+        seed.gsm(src, chars=10_000, secs=3600, game_id="g1", title="Book")
+        seed.displace(roll, src, "g1", chars=4_000, secs=1200)
+
+        dm = db._title_daily(30)["Book"]
+        assert dm[src] == [6_000, 2400]
+        assert dm[roll] == [4_000, 1200]
+
+    def test_displacement_conserves_the_titles_window_total(self, seed, db):
+        src, roll = seed.day(3), seed.day(4)
+        seed.gsm(src, chars=10_000, secs=3600, game_id="g1", title="Book")
+        before = sum(s for c, s in db._title_daily(30)["Book"].values())
+        seed.displace(roll, src, "g1", chars=4_000, secs=1200)
+        after = sum(s for c, s in db._title_daily(30)["Book"].values())
+        assert before == after
+
+    def test_manual_shave_applies_and_touches_time_only(self, seed, db):
+        d = seed.day(3)
+        seed.gsm(d, chars=10_000, secs=3600, game_id="g1", title="Book")
+        seed.shave(d, "g1", -600)
+        assert db._title_daily(30)["Book"][d] == [10_000, 3000]
+
+    def test_future_dated_rows_are_clamped(self, seed, db):
+        seed.gsm(seed.day(1), chars=100, secs=60, game_id="g1", title="Book")
+        seed.gsm(seed.day(-3), chars=9_999, secs=9_999, game_id="g1", title="Book")
+        assert seed.day(-3) not in db._title_daily(30)["Book"]
+
+    def test_agrees_with_the_per_title_total(self, seed, db):
+        """Cross-surface: with every day inside the window and a displacement
+        whose endpoints are both in range, the per-day series must sum to the
+        same number the media grid shows as the title's total."""
+        src, roll = seed.day(3), seed.day(4)
+        seed.gsm(src, chars=10_000, secs=3600, game_id="g1", title="Book")
+        seed.gsm(seed.day(8), chars=5_000, secs=1800, game_id="g1", title="Book")
+        seed.displace(roll, src, "g1", chars=4_000, secs=1200)
+        seed.shave(src, "g1", -300)
+
+        per_day = sum(s for c, s in db._title_daily(30)["Book"].values())
+        total = next(m["total_secs"] for m in db.get_media_stats() if m["title"] == "Book")
+        assert per_day == total
+
+    def test_spark_is_dense_and_ends_today(self, seed, db):
+        seed.gsm(seed.day(0), chars=1, secs=600, game_id="g1", title="Book")
+        seed.gsm(seed.day(29), chars=1, secs=300, game_id="g1", title="Book")
+        spark = db._title_spark(db._title_daily(30)["Book"], 30)
+        assert len(spark) == 30
+        assert spark[-1] == 600, "last cell is today"
+        assert spark[0] == 300, "first cell is 29 days ago"
+        assert sum(1 for v in spark if v) == 2
+
+    def test_recent_speed_is_totals_first_then_divide(self, seed, db):
+        seed.gsm(seed.day(3), chars=10_000, secs=3_600, game_id="g1", title="Book")
+        seed.gsm(seed.day(4), chars=1_000, secs=36_000, game_id="g1", title="Book")
+        spd = db._title_recent_speed(db._title_daily(30)["Book"])
+        assert round(spd) == 1_000, "11000 chars over 11h"
+        assert round(spd) != round((10_000 + 100) / 2), "not the mean of daily speeds"
+
+    def test_recent_speed_ignores_days_with_no_reading(self, seed, db):
+        seed.gsm(seed.day(20), chars=10_000, secs=3600, game_id="g1", title="Book")
+        # a long gap must not dilute the trailing speed
+        assert round(db._title_recent_speed(db._title_daily(90)["Book"])) == 10_000
+
+
+class TestMediaShelf:
+    def _book(self, seed, db, chars=4_000, length=10_000):
+        seed.gsm(seed.day(2), chars=chars, secs=3600, game_id="g1", title="Book")
+        db.db_set_media_char_count("Book", length)
+
+    def test_in_progress_title_appears_with_pct_and_eta(self, seed, db):
+        self._book(seed, db)
+        row = db.get_media_shelf()[0]
+        assert len(row["spark"]) == 30, "activity strip rides on the shelf row"
+        assert row["title"] == "Book"
+        assert round(row["pct"]) == 40
+        assert row["remaining"] == 6_000
+        assert round(row["speed"]) == 4_000          # 4000 chars in 1h
+        assert round(row["eta_hours"], 1) == 1.5     # 6000 / 4000
+        assert row["length_source"] == "user"
+
+    def test_completed_titles_are_excluded(self, seed, db):
+        self._book(seed, db)
+        assert len(db.get_media_shelf()) == 1
+        db.db_set_media_complete("Book", True)
+        assert db.get_media_shelf() == []
+
+    def test_titles_without_a_known_length_are_excluded(self, seed, db):
+        seed.gsm(seed.day(2), chars=4_000, secs=3600, game_id="g1", title="Book")
+        assert db.get_media_shelf() == []
+
+    def test_user_length_wins_over_gsm(self, seed, db):
+        seed.gsm(seed.day(2), chars=4_000, secs=3600, game_id="g1", title="Book")
+        con = sqlite3.connect(db.DB_PATH)
+        con.execute("INSERT INTO gsm_games (game_id, game_name, char_count, last_updated) "
+                    "VALUES ('g1','Book',99999,datetime('now'))")
+        con.commit(); con.close()
+        assert db.get_media_shelf()[0]["length"] == 99999
+        db.db_set_media_char_count("Book", 8_000)
+        row = db.get_media_shelf()[0]
+        assert row["length"] == 8_000 and row["length_source"] == "user"
+
+    def test_shelf_total_matches_the_media_grid(self, seed, db):
+        """Both surfaces describe the same title; a shave must land on both."""
+        self._book(seed, db)
+        seed.shave(seed.day(2), "g1", -600)
+        shelf = db.get_media_shelf()[0]
+        grid = next(m for m in db.get_media_stats() if m["title"] == "Book")
+        assert shelf["total_secs"] == grid["total_secs"] == 3000
+        assert shelf["total_chars"] == grid["total_chars"]
+
+    def test_pct_never_exceeds_100(self, seed, db):
+        self._book(seed, db, chars=20_000, length=10_000)
+        row = db.get_media_shelf()[0]
+        assert row["pct"] == 100.0
+        assert row["remaining"] == 0
+        assert row["eta_hours"] == 0

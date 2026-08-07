@@ -99,7 +99,7 @@ const PROBE = `
   set portalSelected(v) { portalSelected = v; },
   applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty,
   rollDetailSeries, twRolling, splitBarDatasets, speedSegmentColors, memberLegendLabels,
-  bucketDaily, statsMetricAvail,
+  bucketDaily, statsMetricAvail, sparkHTML,
 };`;
 
 try {
@@ -378,6 +378,20 @@ check('an empty range offers nothing',
       JSON.stringify(P.statsMetricAvail(empty)), '{"time":false,"chars":false,"speed":false}');
 check('missing spd_* fields default to 0, not NaN',
       P.bucketDaily([{ date: '2026-03-02', seconds: 60, chars: 5 }], 'day').spdChars[0], 0);
+
+console.log('\n--- M4: shelf activity strip ---');
+const spark = P.sparkHTML([0, 60, 600, 0, 300], '#5B8CFF');
+const heights = [...spark.matchAll(/height:(\d+)%/g)].map(m => +m[1]);
+check('one bar per day', heights.length, 5);
+check('the busiest day is full height', Math.max(...heights), 100);
+check('empty days are zero height', heights[0], 0);
+// Scaled to the title's OWN max, so a lightly-read title still shows shape.
+check('a small day still clears the visibility floor', heights[1] >= 12, true);
+check('bars are proportional to their own max', heights[4], 50);
+check('empty series renders the placeholder strip',
+      P.sparkHTML([0, 0, 0], '#5B8CFF').includes('spark-empty'), true);
+check('a missing series is tolerated',
+      P.sparkHTML(undefined, '#5B8CFF').includes('spark-empty'), true);
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
