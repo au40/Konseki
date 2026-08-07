@@ -462,24 +462,21 @@
           <div id="series-progress-nolen" class="muted" style="font-size:11px"></div>
         </div>
 
-        <!-- Charts -->
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px">
-          <h2 style="margin:0">Daily time</h2>
-          <label class="toggle-label" id="series-split-label" style="display:none">
-            <input type="checkbox" id="series-split-toggle" onchange="onSeriesSplitToggle()"> Split by book
-          </label>
+        <!-- Daily activity: one chart, Time / Chars / Speed -->
+        <div class="detail-chart-head">
+          <h2 style="margin:0">Daily activity</h2>
+          <div class="detail-chart-ctrl">
+            <label class="toggle-label" id="series-split-label" style="display:none">
+              <input type="checkbox" id="series-split-toggle" onchange="onSeriesSplitToggle()"> Split by book
+            </label>
+            <div class="seg" id="series-metric-seg">
+              <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('series','time')">Time</button>
+              <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('series','chars')">Chars</button>
+              <button class="seg-btn"        data-metric="speed" onclick="setDetailMetric('series','speed')">Speed</button>
+            </div>
+          </div>
         </div>
-        <div class="chart-wrap"><canvas id="chart-series-time" height="180"></canvas></div>
-
-        <h2 style="margin-top:20px">Daily characters</h2>
-        <div class="chart-wrap"><canvas id="chart-series-chars" height="180"></canvas></div>
-
-        <div id="series-speed-section" style="display:none">
-          <h2 style="margin-top:20px">Read speed (chars/h)</h2>
-          <div class="chart-wrap"><canvas id="chart-series-speed" height="180"></canvas></div>
-          <h2 style="margin-top:20px">Read speed — 7d rolling avg (chars/h)</h2>
-          <div class="chart-wrap"><canvas id="chart-series-speed-rolling" height="180"></canvas></div>
-        </div>
+        <div class="chart-wrap"><canvas id="chart-series-main" height="180"></canvas></div>
 
         <div style="height:32px"></div>
       </div>
@@ -528,23 +525,20 @@
         </div>
 
         <!-- Daily activity chart -->
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px">
-          <h2 style="margin:0">Daily time</h2>
-          <label class="toggle-label" id="ms-split-label" style="display:none">
-            <input type="checkbox" id="ms-split-toggle" onchange="onMilestoneSplitToggle()"> Split by milestone
-          </label>
+        <div class="detail-chart-head">
+          <h2 style="margin:0">Daily activity</h2>
+          <div class="detail-chart-ctrl">
+            <label class="toggle-label" id="ms-split-label" style="display:none">
+              <input type="checkbox" id="ms-split-toggle" onchange="onMilestoneSplitToggle()"> Split by milestone
+            </label>
+            <div class="seg" id="detail-metric-seg">
+              <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('detail','time')">Time</button>
+              <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('detail','chars')">Chars</button>
+              <button class="seg-btn"        data-metric="speed" onclick="setDetailMetric('detail','speed')">Speed</button>
+            </div>
+          </div>
         </div>
-        <div class="chart-wrap"><canvas id="chart-detail-time" height="180"></canvas></div>
-
-        <h2 style="margin-top:20px">Daily characters</h2>
-        <div class="chart-wrap"><canvas id="chart-detail" height="180"></canvas></div>
-
-        <div id="detail-speed-section" style="display:none">
-          <h2 style="margin-top:20px">Read speed (chars/h)</h2>
-          <div class="chart-wrap"><canvas id="chart-detail-speed" height="180"></canvas></div>
-          <h2 style="margin-top:20px">Read speed — 7d rolling avg (chars/h)</h2>
-          <div class="chart-wrap"><canvas id="chart-detail-speed-rolling" height="180"></canvas></div>
-        </div>
+        <div class="chart-wrap"><canvas id="chart-detail-main" height="180"></canvas></div>
 
         <!-- Session list -->
         <h2 style="margin-top:20px">Days read <span id="detail-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
@@ -573,18 +567,17 @@
 
         <div class="stat-grid" id="milestone-stats-grid"></div>
 
-        <h2 style="margin-top:16px">Daily time</h2>
-        <div class="chart-wrap"><canvas id="chart-milestone-time" height="180"></canvas></div>
-
-        <h2 style="margin-top:20px">Daily characters</h2>
-        <div class="chart-wrap"><canvas id="chart-milestone-chars" height="180"></canvas></div>
-
-        <div id="milestone-speed-section" style="display:none">
-          <h2 style="margin-top:20px">Read speed (chars/h)</h2>
-          <div class="chart-wrap"><canvas id="chart-milestone-speed" height="180"></canvas></div>
-          <h2 style="margin-top:20px">Read speed — 7d rolling avg (chars/h)</h2>
-          <div class="chart-wrap"><canvas id="chart-milestone-speed-rolling" height="180"></canvas></div>
+        <div class="detail-chart-head">
+          <h2 style="margin:0">Daily activity</h2>
+          <div class="detail-chart-ctrl">
+            <div class="seg" id="milestone-metric-seg">
+              <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('milestone','time')">Time</button>
+              <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('milestone','chars')">Chars</button>
+              <button class="seg-btn"        data-metric="speed" onclick="setDetailMetric('milestone','speed')">Speed</button>
+            </div>
+          </div>
         </div>
+        <div class="chart-wrap"><canvas id="chart-milestone-main" height="180"></canvas></div>
 
         <h2 style="margin-top:20px">Sessions <span id="milestone-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
         <div class="detail-sessions" id="milestone-session-list"></div>

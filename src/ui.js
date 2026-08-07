@@ -65,8 +65,11 @@ let currentDetailTitle = null;
 let currentMilestoneId  = null;        // when a milestone detail view is open
 let currentMilestones   = [];          // milestones for the current media detail
 let currentDetailData   = null;        // full payload for the open media detail
-let splitByMilestone    = false;       // stack media-detail bars by milestone color
-let splitBySeriesBook   = false;       // stack series-detail bars by book color
+// Split media detail by milestone by default — if a title has milestones at all,
+// the per-milestone breakdown is the more useful default view. The toggle only
+// appears when milestones exist, so this is a no-op for titles without them.
+let splitByMilestone    = true;        // split media detail by milestone
+let splitBySeriesBook   = false;       // split series detail by book
 let currentSeriesChart  = null;        // {daily, byBook, books} for the open series detail
 let _milestoneEditingId = null;        // null = adding, number = editing
 let _milestoneDragId    = null;        // dragged milestone id for reorder
@@ -78,6 +81,10 @@ let portalColorMap  = {};              // title -> hex, stable while the app is 
 const PORTAL_MAX = 8;
 
 const BUILTIN_TYPES = ['Listening','Reading','Speaking','Vocabulary','Other'];
+// Identity palettes — deliberately literal, not theme-bound. These say "this is
+// Reading" or "this is the third title", so they must stay the same color in
+// every theme. Only chart *chrome* (grid/ticks) and chart *data* colors follow
+// the theme, via CT below.
 const ACOLORS = {
   Reading:'#5B8CFF', Listening:'#4ECBA0',
   Speaking:'#C78BFF', Vocabulary:'#FF7BAC', Other:'#6B6B8A'
@@ -90,8 +97,35 @@ const PALETTE = ['#5B8CFF','#4ECBA0','#FF9F5B','#C78BFF','#FF7BAC','#5BE8C4','#F
 const PORTAL_PALETTE = CAT_PALETTE;    // stat-portal per-title colors; 8-cap keeps them distinct
 let HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
 
-Chart.defaults.color       = '#9090A8';
-Chart.defaults.borderColor = '#2E2E48';
+// Chart colors, read from the theme's CSS custom properties instead of being
+// hardcoded per chart. The dark values in :root are byte-identical to the hex
+// literals these replaced, so dark renders exactly as before; mint now follows
+// the theme too (its charts used to keep dark grid/tick colors on a light bg).
+// Repopulated by applyTheme() after the data-theme attribute flips.
+let CT = {};
+function refreshChartTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const v  = n => cs.getPropertyValue(n).trim();
+  CT = {
+    grid:    v('--grid'),    dim:   v('--dim'),   accent: v('--accent'),
+    success: v('--success'), card:  v('--card'),  warn:   v('--warn'),
+    purple:  v('--purple'),  pink:  v('--pink'),  inset:  v('--inset'),
+    text:    v('--text'),    muted: v('--muted'),
+  };
+  Chart.defaults.color       = CT.dim;
+  Chart.defaults.borderColor = CT.grid;
+}
+refreshChartTheme();
+
+// Translucent fill from a theme color — replaces the hardcoded rgba() fills so
+// the cumulative/speed area fills follow the theme with the line they belong to.
+function ctAlpha(hex, a) {
+  const h = (hex || '').replace('#', '');
+  if (h.length !== 6) return `rgba(78,203,160,${a})`;
+  const n = parseInt(h, 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
 Chart.defaults.font.family = "'Segoe UI', system-ui, sans-serif";
 Chart.defaults.font.size   = 11;
 
@@ -540,12 +574,18 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
     }
   }
 
+  // Bucket boundaries in hours. The old 0.25/0.75/1.5 ramp saturated at the top
+  // shade for anything past 90 minutes, flattening most of a good year into one
+  // color; 1/2/3 spreads a normal reading day across the full ramp.
+  const HEATMAP_STEPS  = [1, 2, 3];
+  const HEATMAP_LEGEND = ['No reading', 'Under 1h', '1–2h', '2–3h', '3h+'];
+
   function getColor(secs) {
     if (!secs) return HEATMAP_COLORS[0];
     const h = secs / 3600;
-    if (h < 0.25) return HEATMAP_COLORS[1];
-    if (h < 0.75) return HEATMAP_COLORS[2];
-    if (h < 1.5)  return HEATMAP_COLORS[3];
+    if (h < HEATMAP_STEPS[0]) return HEATMAP_COLORS[1];
+    if (h < HEATMAP_STEPS[1]) return HEATMAP_COLORS[2];
+    if (h < HEATMAP_STEPS[2]) return HEATMAP_COLORS[3];
     return HEATMAP_COLORS[4];
   }
 
@@ -600,8 +640,8 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
 
   html += '</div>';
   html += '<div class="heatmap-legend"><span>Less</span>';
-  HEATMAP_COLORS.forEach(c => {
-    html += `<div class="heatmap-legend-cell" style="background:${c}"></div>`;
+  HEATMAP_COLORS.forEach((c, i) => {
+    html += `<div class="heatmap-legend-cell" style="background:${c}" title="${HEATMAP_LEGEND[i]}"></div>`;
   });
   html += '<span>More</span></div>';
   html += '</div>';
@@ -1658,7 +1698,7 @@ async function importEpubFile(file, title, overwrite = false) {
               : r.would_replace_count ? 'a progress-bar length' : 'a cover';
     const ok = await showConfirm(
       `“${disp}” already has ${has}. This EPUB will ${acts.join(' and ')}. Continue?`,
-      'Replace', '#5B8CFF');
+      'Replace', CT.accent);
     if (!ok) { setStatus(''); return; }
     return importEpubFile(file, title, true);
   }
@@ -2031,6 +2071,32 @@ function destroyChart(id) {
   if (charts[id]) { charts[id].destroy(); delete charts[id]; }
 }
 
+// ── Chart empty state ──────────────────────────────────────────────────────
+// A chart with nothing to plot used to just be destroyed, leaving a blank card
+// that reads as broken rather than as "no data here". Overlay a message on the
+// wrapper instead. Passing a falsy msg clears it; upsertChart() does that
+// automatically whenever a chart actually renders, so callers only ever have to
+// set it, never unset it.
+function setChartEmpty(canvasId, msg) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  const wrap = canvas.closest('.chart-wrap') || canvas.parentElement;
+  if (!wrap) return;
+  let el = wrap.querySelector('.chart-empty');
+  if (!msg) {
+    canvas.style.visibility = '';
+    if (el) el.remove();
+    return;
+  }
+  canvas.style.visibility = 'hidden';
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'chart-empty';
+    wrap.appendChild(el);
+  }
+  el.textContent = msg;
+}
+
 // ── Legend room ────────────────────────────────────────────────────────────
 // Chart.js renders the legend/key INSIDE the canvas, so flipping a "split" or
 // "cumulative" toggle steals vertical space from the plot and squashes the bars
@@ -2089,7 +2155,7 @@ function morphBars(id, chart, canvas, newConfig) {
       if (d.type === 'line') return;
       segs.push({
         label: d.label,
-        color: typeof d.backgroundColor === 'string' ? d.backgroundColor : '#5B8CFF',
+        color: typeof d.backgroundColor === 'string' ? d.backgroundColor : CT.accent,
         bars:  chart.getDatasetMeta(k).data.map(b => ({ x:b.x, y:b.y, base:b.base, width:b.width })),
       });
     });
@@ -2204,6 +2270,7 @@ function morphBars(id, chart, canvas, newConfig) {
 function upsertChart(id, ctxId, config) {
   const existing = charts[id];
   const canvas   = document.getElementById(ctxId);
+  setChartEmpty(ctxId, null);   // this chart has data — drop any empty overlay
   if (existing && existing.config.type === config.type) {
     const oldLen = existing.data.labels?.length ?? 0;
     const newLen = config.data.labels?.length ?? 0;
@@ -2231,12 +2298,13 @@ function renderDailyChart(daily) {
   const values  = secs.map(s => s * scale);
   const fmt     = v => isHours ? `${v.toFixed(1)}h` : fmtTime(v * 60);
 
-  const step        = Math.max(1, Math.floor(labels.length / 14));
-  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
+  // Labels are passed whole and thinned by Chart.js autoSkip (see x.ticks).
+  // Blanking every Nth label by hand made the visible set jump around as the
+  // range changed, and reliably dropped the last date — the one you most want.
 
   const datasets = splitByActivity
     ? activityDatasets(byType, scale)
-    : [{ label: 'Time', data: values, backgroundColor: '#5B8CFF',
+    : [{ label: 'Time', data: values, backgroundColor: CT.accent,
          borderRadius: 3, borderSkipped: false }];
 
   let cumStepH = 1;
@@ -2251,7 +2319,7 @@ function renderDailyChart(daily) {
       .find(s => s >= maxH / 5) || Math.ceil(maxH / 5 / 1000) * 1000;
     datasets.push({
       label: 'Cumulative', data: cumVals, type: 'line',
-      borderColor: '#4ECBA0', backgroundColor: 'rgba(78,203,160,0.08)',
+      borderColor: CT.success, backgroundColor: ctAlpha(CT.success, 0.08),
       borderWidth: 2, pointRadius: 0, fill: true, tension: 0.3,
       yAxisID: 'y2',
     });
@@ -2260,14 +2328,14 @@ function renderDailyChart(daily) {
   reserveLegendRoom('chart-daily', 'daily', 180, cum || splitByActivity);
   upsertChart('daily', 'chart-daily', {
     type: 'bar',
-    data: { labels: shownLabels, datasets },
+    data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
       onResize: () => positionDailyBrush(),
       interaction: splitByActivity ? { mode: 'index', intersect: false } : undefined,
       plugins: {
         legend: { display: cum || splitByActivity, position: 'bottom',
-                  labels: { color:'#9090A8', boxWidth:12, boxHeight:12, usePointStyle:true } },
+                  labels: { color:CT.dim, boxWidth:12, boxHeight:12, usePointStyle:true } },
         tooltip: {
           callbacks: {
             title: c => labels[c[0].dataIndex],
@@ -2279,10 +2347,10 @@ function renderDailyChart(daily) {
         }
       },
       scales: {
-        x: { stacked: splitByActivity, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { stacked: splitByActivity, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
+        x: { stacked: splitByActivity, grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
+        y: { stacked: splitByActivity, grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
         ...(cum ? {y2:{position:'right',grid:{display:false},
-          ticks:{color:'#4ECBA0', stepSize: cumStepH * (isHours ? 1 : 60),
+          ticks:{color:CT.success, stepSize: cumStepH * (isHours ? 1 : 60),
                  callback: v => fmtHourTick(isHours ? v : v / 60)}}} : {})
       }
     }
@@ -2294,15 +2362,20 @@ function renderDailyChart(daily) {
 
 function renderDailyCharsChart(daily) {
   const { labels, chars } = bucketDaily(daily, currentGranularity);
-  if (!chars.some(c => c > 0)) { destroyChart('daily-chars'); return; }
+  if (!chars.some(c => c > 0)) {
+    destroyChart('daily-chars');
+    setChartEmpty('chart-daily-chars', 'No character data in this range');
+    return;
+  }
 
-  const step        = Math.max(1, Math.floor(labels.length / 14));
-  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
+  // Labels are passed whole and thinned by Chart.js autoSkip (see x.ticks).
+  // Blanking every Nth label by hand made the visible set jump around as the
+  // range changed, and reliably dropped the last date — the one you most want.
 
   upsertChart('daily-chars', 'chart-daily-chars', {
     type: 'bar',
-    data: { labels: shownLabels, datasets: [{
-      label: 'Characters', data: chars, backgroundColor: '#4ECBA0',
+    data: { labels, datasets: [{
+      label: 'Characters', data: chars, backgroundColor: CT.success,
       borderRadius: 3, borderSkipped: false,
     }]},
     options: {
@@ -2312,8 +2385,8 @@ function renderDailyCharsChart(daily) {
         tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtChars(c.raw) + ' chars' } }
       },
       scales: {
-        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
+        x: { grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
+        y: { grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
       }
     }
   });
@@ -2321,12 +2394,16 @@ function renderDailyCharsChart(daily) {
 
 function renderDowChart(daily) {
   const { labels, secs, byType } = bucketByDayOfWeek(daily);
-  if (!secs.some(s => s > 0)) { destroyChart('dow'); return; }
+  if (!secs.some(s => s > 0)) {
+    destroyChart('dow');
+    setChartEmpty('chart-dow', 'No activity in this range');
+    return;
+  }
   const values = secs.map(s => s / 3600);
 
   const datasets = splitByActivity
     ? activityDatasets(byType, 1 / 3600)
-    : [{ label: 'Time', data: values, backgroundColor: '#5B8CFF',
+    : [{ label: 'Time', data: values, backgroundColor: CT.accent,
          borderRadius: 3, borderSkipped: false }];
 
   reserveLegendRoom('chart-dow', 'dow', 180, splitByActivity);
@@ -2338,7 +2415,7 @@ function renderDowChart(daily) {
       interaction: splitByActivity ? { mode: 'index', intersect: false } : undefined,
       plugins: {
         legend: { display: splitByActivity, position: 'bottom',
-                  labels: { color:'#9090A8', boxWidth:12, boxHeight:12, usePointStyle:true } },
+                  labels: { color:CT.dim, boxWidth:12, boxHeight:12, usePointStyle:true } },
         tooltip: { callbacks: {
           title: c => labels[c[0].dataIndex],
           label: splitByActivity
@@ -2350,15 +2427,19 @@ function renderDowChart(daily) {
         } }
       },
       scales: {
-        x: { stacked: splitByActivity, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { stacked: splitByActivity, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => `${v.toFixed(1)}h`}, afterFit: s => { s.width = 62; } },
+        x: { stacked: splitByActivity, grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
+        y: { stacked: splitByActivity, grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => `${v.toFixed(1)}h`}, afterFit: s => { s.width = 62; } },
       }
     }
   });
 }
 
 function renderDonutChart(activity) {
-  if (!activity.length) { destroyChart('donut'); return; }
+  if (!activity.length) {
+    destroyChart('donut');
+    setChartEmpty('chart-donut', 'No activity in this range');
+    return;
+  }
   const labels = activity.map(a=>a.type);
   const values = activity.map(a=>a.seconds);
   const colors = labels.map(acolor);
@@ -2367,12 +2448,12 @@ function renderDonutChart(activity) {
     data: {
       labels,
       datasets: [{ data: values, backgroundColor: colors,
-                   borderColor:'#24243A', borderWidth:2, hoverOffset:4 }]
+                   borderColor:CT.card, borderWidth:2, hoverOffset:4 }]
     },
     options: {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM, cutout: '60%',
       plugins: {
-        legend: { position:'bottom', labels:{color:'#9090A8',padding:10,boxWidth:12,boxHeight:12,usePointStyle:true} },
+        legend: { position:'bottom', labels:{color:CT.dim,padding:10,boxWidth:12,boxHeight:12,usePointStyle:true} },
         tooltip: { callbacks: { label: c => `${c.label}: ${fmtTime(c.raw)}` } }
       }
     }
@@ -2902,7 +2983,7 @@ function makeGoalCard(g) {
   }
 
   const pct = g.pct;
-  const fillColor = g.is_complete ? '#4ECBA0' : '#FF6B6B';
+  const fillColor = g.is_complete ? CT.success : '#FF6B6B';
 
   let statusBadge;
   if (g.is_complete) {
@@ -2983,9 +3064,9 @@ function makeGoalCard(g) {
     const behind   = chunkNeeded > originalChunk * 1.05;
     const ahead    = chunkNeeded < originalChunk * 0.95;
     const icon     = behind ? '⚠' : ahead ? '↑' : '→';
-    const color    = behind ? '#FF9F5B' : ahead ? '#4ECBA0' : 'var(--dim)';
+    const color    = behind ? '#FF9F5B' : ahead ? CT.success : 'var(--dim)';
     const periodPct = barTarget > 0 ? Math.min(100, periodDone / barTarget * 100) : 0;
-    const barColor  = periodPct >= 100 ? '#4ECBA0' : '#5B8CFF';
+    const barColor  = periodPct >= 100 ? CT.success : CT.accent;
     const tickStyle = tickCount > 1 ? `--tick-step:${(100/tickCount).toFixed(4)}%` : '';
     const ticksHtml = tickCount > 1 ? `<div class="daily-bar-ticks" style="${tickStyle}"></div>` : '';
     const expectedTickHtml = (tickCount > 1 && expectedTickIdx > 0 && expectedTickIdx < tickCount)
@@ -3012,7 +3093,7 @@ function makeGoalCard(g) {
   if (g.projected_end && !g.is_complete && !g.is_overdue) {
     const delta = g.projected_days_delta || 0;
     const late  = delta > 0;
-    const color = late ? '#FF9F5B' : delta < 0 ? '#4ECBA0' : 'var(--dim)';
+    const color = late ? '#FF9F5B' : delta < 0 ? CT.success : 'var(--dim)';
     const deltaTxt = delta === 0 ? 'on time' : `${Math.abs(delta)}d ${late ? 'late' : 'early'}`;
     projHtml = `<span style="font-size:10px;color:${color}" title="Finish date extrapolated from your average pace since the goal started">projected finish: ${g.projected_end} (${deltaTxt})</span>`;
   }
@@ -3229,7 +3310,6 @@ function showMediaView(name) {
 
 async function loadMedia() {
   destroyChart('detail');
-  destroyChart('detail-time');
   destroyPortalCharts();
   currentDetailTitle = null;
   currentSeriesId    = null;
@@ -3742,191 +3822,34 @@ function renderSeriesDetail(s, memberDetails = []) {
   renderSeriesCharts();
 }
 
-// Build stacked datasets for a series chart, one per book (in series order),
-// colored from MILESTONE_PALETTE — mirror of milestoneDatasets, keyed by book.
-// `field` is 'chars' or 'secs'; `scale` converts to the chart's display unit.
-function seriesBookDatasets(byBook, books, field, scale) {
-  return books
-    .filter(o => byBook.some(b => b[o.key] && b[o.key][field] > 0))
-    .map(o => ({
-      label: o.label,
-      data: byBook.map(b => ((b[o.key] && b[o.key][field]) || 0) * scale),
-      backgroundColor: o.color,
-      stack: 'book',
-      borderRadius: 3,
-      borderSkipped: false,
-    }));
-}
-
 function onSeriesSplitToggle() {
   splitBySeriesBook = document.getElementById('series-split-toggle').checked;
   renderSeriesCharts();
 }
 
 function renderSeriesCharts() {
-  destroyChart('series-chars');
-  destroyChart('series-time');
-  destroyChart('series-speed');
-  destroyChart('series-speed-rolling');
-  const cs = currentSeriesChart;
-  if (!cs || !cs.daily.length) return;
-  const { daily, byBook, books } = cs;
-
-  // Stack bars by book color when the toggle is on and there's data to split.
-  const bookSplit = splitBySeriesBook && books.length > 1
-                    && byBook.some(b => Object.keys(b).length);
-
-  const labels      = daily.map(r => r.date.slice(5));
-  const charVals    = daily.map(r => r.chars);
-  const timeVals    = daily.map(r => r.seconds);
-  const speedVals   = daily.map(r => r.seconds > 0 && r.chars > 0 ? r.chars / (r.seconds / 3600) : 0);
-  const twSpeedVals = twRolling(charVals, timeVals, 7);
-  const step        = Math.max(1, Math.floor(labels.length / 14));
-  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
-
-  if (charVals.some(v => v > 0)) {
-    reserveLegendRoom('chart-series-chars', 'series-chars', 180, bookSplit);
-    const ctx = document.getElementById('chart-series-chars').getContext('2d');
-    charts['series-chars'] = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels: shownLabels,
-        datasets: bookSplit
-          ? seriesBookDatasets(byBook, books, 'chars', 1)
-          : [{ label: 'Characters', data: charVals, backgroundColor: '#4ECBA0',
-               borderRadius: 3, borderSkipped: false }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false, animation: false,
-        interaction: bookSplit ? { mode: 'index', intersect: false } : undefined,
-        plugins: {
-          legend: { display: bookSplit, position: 'bottom', labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
-          tooltip: { callbacks: {
-            title: c => labels[c[0].dataIndex],
-            label: bookSplit
-              ? c => `${c.dataset.label}: ${fmtChars(Math.round(c.raw))}`
-              : c => `${fmtChars(c.raw)} chars`,
-            footer: bookSplit ? c => `Total: ${fmtChars(Math.round(c.reduce((a, x) => a + x.raw, 0)))}` : undefined,
-          } }
-        },
-        scales: {
-          x: { stacked: bookSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { stacked: bookSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
-        }
-      }
-    });
-  }
-
-  if (timeVals.some(v => v > 0)) {
-    reserveLegendRoom('chart-series-time', 'series-time', 180, bookSplit);
-    const ctx = document.getElementById('chart-series-time').getContext('2d');
-    charts['series-time'] = new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels: shownLabels,
-        datasets: bookSplit
-          ? seriesBookDatasets(byBook, books, 'secs', 1 / 60)
-          : [{ label: 'Time', data: timeVals.map(s => s / 60), backgroundColor: '#5B8CFF',
-               borderRadius: 3, borderSkipped: false }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false, animation: false,
-        interaction: bookSplit ? { mode: 'index', intersect: false } : undefined,
-        plugins: {
-          legend: { display: bookSplit, position: 'bottom', labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
-          tooltip: { callbacks: {
-            title: c => labels[c[0].dataIndex],
-            label: bookSplit
-              ? c => `${c.dataset.label}: ${fmtTime(c.raw * 60)}`
-              : c => fmtTime(c.raw * 60),
-            footer: bookSplit ? c => `Total: ${fmtTime(c.reduce((a, x) => a + x.raw, 0) * 60)}` : undefined,
-          } }
-        },
-        scales: {
-          x: { stacked: bookSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { stacked: bookSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v * 60)}, afterFit: s => { s.width = 62; } },
-        }
-      }
-    });
-  }
-
-  const speedSection = document.getElementById('series-speed-section');
-  if (speedVals.some(v => v > 0)) {
-    speedSection.style.display = 'block';
-    const seriesSpeedOpts = {
-      responsive: true, maintainAspectRatio: false, animation: false,
-      plugins: {
-        legend: { display: false },
-        tooltip: {
-          callbacks: {
-            title: c => labels[c[0].dataIndex],
-            label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : ''
-          }
-        }
-      },
-      scales: {
-        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false, afterFit: s => { s.width = 62; } },
-      },
-    };
-    const speedCtx = document.getElementById('chart-series-speed').getContext('2d');
-    charts['series-speed'] = new Chart(speedCtx, {
-      type: 'line',
-      data: {
-        labels: shownLabels,
-        datasets: [{
-          label: 'Read speed',
-          data: speedVals.map(v => v > 0 ? v : null),
-          borderColor: '#4ECBA0',
-          backgroundColor: 'rgba(78,203,160,0.08)',
-          borderWidth: 2,
-          pointRadius: 4,
-          pointHoverRadius: 7,
-          pointBackgroundColor: '#4ECBA0',
-          pointBorderColor: '#24243A',
-          pointBorderWidth: 2,
-          fill: true,
-          tension: 0.35,
-          spanGaps: false,
-        }]
-      },
-      options: seriesSpeedOpts,
-    });
-    const rollingCtx = document.getElementById('chart-series-speed-rolling').getContext('2d');
-    charts['series-speed-rolling'] = new Chart(rollingCtx, {
-      type: 'line',
-      data: {
-        labels: shownLabels,
-        datasets: [{
-          label: 'Read speed (7d rolling)',
-          data: twSpeedVals,
-          borderColor: '#4ECBA0',
-          backgroundColor: 'rgba(78,203,160,0.08)',
-          borderWidth: 2,
-          pointRadius: 4,
-          pointHoverRadius: 7,
-          pointBackgroundColor: '#4ECBA0',
-          pointBorderColor: '#24243A',
-          pointBorderWidth: 2,
-          fill: true,
-          tension: 0.35,
-          spanGaps: true,
-        }]
-      },
-      options: seriesSpeedOpts,
-    });
-  } else {
-    speedSection.style.display = 'none';
-  }
+  const cs     = currentSeriesChart;
+  const daily  = cs ? cs.daily  : [];
+  const books  = cs ? cs.books  : [];
+  const byBook = cs ? cs.byBook : [];
+  detailChartCfg.series = {
+    key: 'series', canvasId: 'chart-series-main', segId: 'series-metric-seg',
+    splitLabelId: 'series-split-label',
+    daily,
+    // Series keep per-day resolution (unchanged from before the merge); only
+    // media detail rolls up to weeks.
+    weeklyOver: null,
+    splitOn: splitBySeriesBook && books.length > 1,
+    splitSource: byBook,
+    splitMembers: () => books,      // books are already [{key, color, label}]
+    stackName: 'book',
+  };
+  renderDetailMetricChart('series');
 }
 
 function closeSeriesDetail() {
-  destroyChart('series-chars');
-  destroyChart('series-time');
-  destroyChart('series-speed');
-  destroyChart('series-speed-rolling');
+  destroyChart('series');
   destroyChart('detail');
-  destroyChart('detail-time');
   currentSeriesId    = null;
   currentSeriesChart = null;
   currentDetailTitle = null;
@@ -3963,9 +3886,6 @@ async function openMediaDetail(title) {
 
 function closeMediaDetail() {
   destroyChart('detail');
-  destroyChart('detail-time');
-  destroyChart('detail-speed');
-  destroyChart('detail-speed-rolling');
   currentDetailTitle = null;
   currentMilestones  = [];
   // If we came from a series view, go back to it; otherwise go to grid
@@ -3984,20 +3904,11 @@ function onMilestoneSplitToggle() {
 // Build stacked datasets for a media-detail bar, one per milestone (in position
 // order) plus an '_uncovered' accent segment, colored by milestone color.
 // `field` is 'chars' or 'secs'; `scale` converts to the chart's display unit.
-function milestoneDatasets(byMs, field, scale) {
+function milestoneMembers() {
   const accent = currentDetailData ? acolor(currentDetailData.activity_type) : '#6B6B8A';
   const order  = currentMilestones.map(m => ({ key: String(m.id), color: m.color || accent, label: m.name }));
   order.push({ key: '_uncovered', color: accent, label: 'Other' });
-  return order
-    .filter(o => byMs.some(m => m[o.key] && m[o.key][field] > 0))
-    .map(o => ({
-      label: o.label,
-      data: byMs.map(m => ((m[o.key] && m[o.key][field]) || 0) * scale),
-      backgroundColor: o.color,
-      stack: 'milestone',
-      borderRadius: 3,
-      borderSkipped: false,
-    }));
+  return order;
 }
 
 function renderMediaDetail(d) {
@@ -4239,190 +4150,311 @@ function renderMediaDetail(d) {
   renderDetailSessions(d.daily, isGSM);
 }
 
-function renderDetailChart(daily, isGSM) {
-  destroyChart('detail');
-  destroyChart('detail-time');
-  destroyChart('detail-speed');
-  destroyChart('detail-speed-rolling');
-  if (!daily.length) return;
+// ── Detail charts (shared) ─────────────────────────────────────────────────
+// Media detail, series detail and milestone detail each used to render the same
+// four stacked charts — time bar, chars bar, speed line, speed 7d-rolling line —
+// from three near-identical functions. They are now one chart driven by a
+// Time / Chars / Speed switcher, built here once.
+//
+// Speed mode draws the raw per-day series and its 7d rolling average on the SAME
+// chart; comparing a spike against its own trend used to mean scrolling between
+// two of them.
+//
+// Reading-speed invariant: every speed value below is derived from a chars total
+// over a time total. `sessions.reading_speed` is never consulted.
 
-  const n = daily.length;
-  let labels, charVals, speedVals, timeVals, byMs;
+let detailMetric = 'time';        // 'time' | 'chars' | 'speed' — shared by all three views
+const detailChartCfg = {};        // view -> config, set by that view's render fn
 
-  if (n > 90) {
-    const wb = {}, tb = {}, mb = {};
-    daily.forEach(({ date: dt, chars: c, seconds: sec, by_milestone: bm }) => {
-      const d  = new Date(dt);
-      const wk = `${d.getFullYear()}-W${String(Math.ceil(
-        (d.getDate() + new Date(d.getFullYear(), 0, 1).getDay()) / 7
-      )).padStart(2,'0')}`;
-      wb[wk] = (wb[wk] || 0) + c;
-      tb[wk] = (tb[wk] || 0) + sec;
-      if (bm) {
-        const dst = mb[wk] || (mb[wk] = {});
-        for (const k in bm) {
-          const s = dst[k] || (dst[k] = { chars: 0, secs: 0 });
-          s.chars += bm[k].chars || 0;
-          s.secs  += bm[k].secs  || 0;
-        }
-      }
-    });
-    const agg = Object.entries(wb).sort();
-    labels    = agg.map(([k]) => k);
-    charVals  = agg.map(([k]) => wb[k]);
-    timeVals  = agg.map(([k]) => tb[k]);
-    byMs      = agg.map(([k]) => mb[k] || {});
-    speedVals = charVals.map((c, i) => timeVals[i] > 0 ? c / (timeVals[i] / 3600) : 0);
-  } else {
-    labels    = daily.map(r => r.date.slice(5));
-    charVals  = daily.map(r => r.chars);
-    timeVals  = daily.map(r => r.seconds);
-    byMs      = daily.map(r => r.by_milestone || {});
-    speedVals = daily.map(r => r.seconds > 0 && r.chars > 0 ? r.chars / (r.seconds / 3600) : 0);
+// Roll a daily series up to weekly buckets past `weeklyOver` days, so a long
+// title doesn't render hundreds of 1px bars. `splitSource` is an array parallel
+// to `daily` of { key: { chars, secs } } — the same shape for milestone splits
+// and book splits, so one rollup serves both.
+function rollDetailSeries(daily, splitSource, weeklyOver) {
+  const blank = daily.map(() => ({}));
+  if (!weeklyOver || daily.length <= weeklyOver) {
+    return {
+      labels: daily.map(r => r.date.slice(5)),
+      chars:  daily.map(r => r.chars),
+      secs:   daily.map(r => r.seconds),
+      split:  splitSource || blank,
+    };
   }
-
-  // Stack bars by milestone color when the toggle is on and there's data to split.
-  const msSplit = splitByMilestone && currentMilestones.length > 0
-                  && byMs.some(m => Object.keys(m).length);
-
-  const twSpeedVals = twRolling(charVals, timeVals, 7);
-
-  const step        = Math.max(1, Math.floor(labels.length / 14));
-  const shownLabels = labels.map((l, i) => i % step === 0 ? l : '');
-  const hasSpeed    = speedVals.some(s => s > 0);
-
-  // Characters chart (bars only)
-  reserveLegendRoom('chart-detail', 'detail', 180, msSplit);
-  const ctx = document.getElementById('chart-detail').getContext('2d');
-  charts['detail'] = new Chart(ctx, {
-    type: 'bar',
-    data: {
-      labels: shownLabels,
-      datasets: msSplit
-        ? milestoneDatasets(byMs, 'chars', 1)
-        : [{ label: 'Characters', data: charVals, backgroundColor: '#4ECBA0',
-             borderRadius: 3, borderSkipped: false }]
-    },
-    options: {
-      responsive: true, maintainAspectRatio: false, animation: false,
-      interaction: msSplit ? { mode: 'index', intersect: false } : undefined,
-      plugins: {
-        legend: { display: msSplit, position: 'bottom', labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
-        tooltip: { callbacks: {
-          title: c => labels[c[0].dataIndex],
-          label: msSplit
-            ? c => `${c.dataset.label}: ${fmtChars(Math.round(c.raw))}`
-            : c => `${fmtChars(c.raw)} chars`,
-          footer: msSplit ? c => `Total: ${fmtChars(Math.round(c.reduce((a, x) => a + x.raw, 0)))}` : undefined,
-        } }
-      },
-      scales: {
-        x: { stacked: msSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { stacked: msSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
-      },
+  const cb = {}, tb = {}, sb = {};
+  daily.forEach((r, i) => {
+    const d = new Date(r.date);
+    // Bucket by the Monday of that date's week. The previous key was built from
+    // the day of MONTH -- `year-W{ceil((getDate() + jan1Dow) / 7)}` -- so Jan 2,
+    // Feb 2 and Mar 2 all landed in "W01" and a full year collapsed into six
+    // buckets, silently averaging months together in one bar.
+    const monday = new Date(d);
+    monday.setDate(d.getDate() - ((d.getDay() + 6) % 7));
+    const wk = isoDateFromObj(monday);
+    cb[wk] = (cb[wk] || 0) + r.chars;
+    tb[wk] = (tb[wk] || 0) + r.seconds;
+    const src = splitSource && splitSource[i];
+    if (src) {
+      const dst = sb[wk] || (sb[wk] = {});
+      for (const k in src) {
+        const s = dst[k] || (dst[k] = { chars: 0, secs: 0 });
+        s.chars += src[k].chars || 0;
+        s.secs  += src[k].secs  || 0;
+      }
     }
   });
+  const keys = Object.keys(cb).sort();   // ISO week-start dates sort chronologically
+  return {
+    labels: keys.map(k => k.slice(5)),   // MM-DD of the week start, like the daily labels
+    chars:  keys.map(k => cb[k]),
+    secs:   keys.map(k => tb[k]),
+    split:  keys.map(k => sb[k] || {}),
+  };
+}
 
-  // Read speed chart (line with visible points)
-  const speedSection = document.getElementById('detail-speed-section');
-  if (hasSpeed) {
-    speedSection.style.display = 'block';
-    const speedCtx = document.getElementById('chart-detail-speed').getContext('2d');
-    const speedLineOpts = {
+// Stacked bar segments, one per split member. `members` is [{key,color,label}] —
+// milestones for media detail, books for a series — and is the single source of
+// truth for both this and the per-member speed lines below.
+function splitBarDatasets(split, members, field, scale, stackName) {
+  return members
+    .filter(o => split.some(m => m[o.key] && m[o.key][field] > 0))
+    .map(o => ({
+      label: o.label,
+      data: split.map(m => ((m[o.key] && m[o.key][field]) || 0) * scale),
+      backgroundColor: o.color,
+      stack: stackName,
+      borderRadius: 3,
+      borderSkipped: false,
+    }));
+}
+
+// Splitting speed COLORS the existing line rather than recomputing per member.
+//
+// Time and chars split by segmenting the same totals, so speed should too: the
+// line you see is identical whether the toggle is on or off, and the split only
+// annotates which member you were in. Recomputing a separate rolling average per
+// member instead meant each line carried its own trailing-window boundary, which
+// ran past the end of a milestone and tangled with the next one — a whole bug
+// class that simply doesn't exist when nothing is recalculated.
+//
+// Returns one color per bucket: the member with the most chars in that bucket
+// (falling back to secs for chars-less reading). A bucket where two members were
+// both read — the handoff day — takes the dominant one; the line only has a
+// single value there, so a single color is the honest representation.
+function speedSegmentColors(split, members) {
+  const active = members.filter(o =>
+    split.some(m => m[o.key] && ((m[o.key].chars || 0) > 0 || (m[o.key].secs || 0) > 0)));
+  const colors = split.map(m => {
+    let best = null, bestChars = -1, bestSecs = -1;
+    for (const o of active) {
+      const v = m[o.key];
+      if (!v) continue;
+      const c = v.chars || 0, s = v.secs || 0;
+      if (c > bestChars || (c === bestChars && c === 0 && s > bestSecs)) {
+        best = o; bestChars = c; bestSecs = s;
+      }
+    }
+    return best ? best.color : null;
+  });
+  return { colors, active };
+}
+
+// Legend entries for a member color key (split speed mode), where the swatches
+// describe milestones/books rather than datasets.
+//
+// `fontColor` is NOT optional: Chart.js v4 draws legend text with
+// `ctx.fillStyle = item.fontColor` and no fallback, so an item missing it renders
+// black regardless of `labels.color`. The built-in generateLabels populates it
+// from labels.color; a custom one has to do the same.
+function memberLegendLabels(items) {
+  return (items || []).map(o => ({
+    text: o.label,
+    fillStyle: o.color,
+    strokeStyle: o.color,
+    fontColor: CT.dim,
+    lineWidth: 0,
+    pointStyle: 'circle',
+    hidden: false,
+  }));
+}
+
+// Grey out Chars/Speed for a title that has no character data (listening, say)
+// and fall back to Time so the view never lands on an empty metric.
+function syncDetailMetricSeg(view, avail) {
+  const seg = document.getElementById(detailChartCfg[view]?.segId);
+  if (!seg) return;
+  seg.querySelectorAll('.seg-btn').forEach(b => {
+    const ok = avail[b.dataset.metric];
+    b.disabled = !ok;
+    b.classList.toggle('active', ok && b.dataset.metric === detailMetric);
+  });
+}
+
+function setDetailMetric(view, metric) {
+  detailMetric = metric;
+  renderDetailMetricChart(view);
+}
+
+function renderDetailMetricChart(view) {
+  const cfg = detailChartCfg[view];
+  if (!cfg) return;
+  const { key, canvasId, daily, splitOn, splitMembers, stackName, splitSource, weeklyOver, splitLabelId } = cfg;
+
+  destroyChart(key);
+  if (!daily || !daily.length) {
+    setChartEmpty(canvasId, 'No session data yet');
+    return;
+  }
+
+  const { labels, chars, secs, split } = rollDetailSeries(daily, splitSource, weeklyOver);
+  const speed   = chars.map((c, i) => secs[i] > 0 && c > 0 ? c / (secs[i] / 3600) : 0);
+  const rolling = twRolling(chars, secs, 7);
+
+  const avail = {
+    time:  secs.some(v => v > 0),
+    chars: chars.some(v => v > 0),
+    speed: speed.some(v => v > 0),
+  };
+  if (!avail[detailMetric]) detailMetric = avail.time ? 'time' : (avail.chars ? 'chars' : 'time');
+  syncDetailMetricSeg(view, avail);
+
+  const metric  = detailMetric;
+  // Splitting applies to every metric. Time and chars stack into segments;
+  // speed can't stack (it's a rate) so it becomes one line per member instead.
+  const members = splitMembers ? splitMembers() : null;
+  const doSplit = !!splitOn && !!members && split.some(s => Object.keys(s).length);
+
+  if (!avail[metric]) {
+    setChartEmpty(canvasId, 'No data for this metric');
+    return;
+  }
+
+  reserveLegendRoom(canvasId, key, 180, doSplit || metric === 'speed');
+
+  const cfgByMetric = {
+    time: () => ({
+      type: 'bar',
+      datasets: doSplit
+        ? splitBarDatasets(split, members, 'secs', 1 / 60, stackName)
+        : [{ label: 'Time', data: secs.map(s => s / 60), backgroundColor: CT.accent,
+             borderRadius: 3, borderSkipped: false }],
+      yTick: v => fmtTime(v * 60),
+      tip:   c => `${doSplit ? c.dataset.label + ': ' : ''}${fmtTime(c.raw * 60)}`,
+      foot:  c => `Total: ${fmtTime(c.reduce((a, x) => a + x.raw, 0) * 60)}`,
+    }),
+    chars: () => ({
+      type: 'bar',
+      datasets: doSplit
+        ? splitBarDatasets(split, members, 'chars', 1, stackName)
+        : [{ label: 'Characters', data: chars, backgroundColor: CT.success,
+             borderRadius: 3, borderSkipped: false }],
+      yTick: v => fmtChars(v),
+      tip:   c => `${doSplit ? c.dataset.label + ': ' : ''}${fmtChars(Math.round(c.raw))} chars`,
+      foot:  c => `Total: ${fmtChars(Math.round(c.reduce((a, x) => a + x.raw, 0)))}`,
+    }),
+    speed: () => {
+      // Two purple lines: the raw daily dotted and dimmed, the 7d trend solid on
+      // top. One hue separated by weight and dash reads more calmly than two
+      // competing colors.
+      //
+      // With split on, these are the SAME two lines — only recolored per segment
+      // by whichever member dominated that bucket. Nothing is recomputed, so the
+      // curve is identical whether the toggle is on or off.
+      //
+      // Array order is the draw order and the legend order: daily first so it
+      // sits behind and reads first in the key. Don't add `order:` here — lower
+      // order draws FIRST (behind) and also re-sorts the legend, reversing both.
+      //
+      // No area fill: speed is a rate, so the region under the line isn't a
+      // quantity that means anything.
+      const seg  = doSplit ? speedSegmentColors(split, members) : null;
+      const segC = (a) => seg
+        ? { segment: { borderColor: ctx => {
+              const c = seg.colors[ctx.p1DataIndex];
+              return c ? (a < 1 ? ctAlpha(c, a) : c) : undefined;
+            } } }
+        : {};
+      return {
+      type: 'line',
+      legendItems: seg ? seg.active : null,
+      datasets: [
+        { label: 'Daily', data: speed.map(v => v > 0 ? v : null),
+          borderColor: ctAlpha(CT.purple, 0.45), backgroundColor: 'transparent',
+          borderWidth: 1.5, borderDash: [3, 3],
+          pointRadius: 0, pointHoverRadius: 5,
+          pointBackgroundColor: ctAlpha(CT.purple, 0.45), pointBorderWidth: 0,
+          fill: false, tension: 0.35, spanGaps: false, ...segC(0.4) },
+        { label: '7d rolling', data: rolling,
+          borderColor: CT.purple, backgroundColor: 'transparent',
+          borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 6,
+          pointBackgroundColor: CT.purple, pointBorderColor: CT.card, pointBorderWidth: 2,
+          fill: false, tension: 0.35, spanGaps: true, ...segC(1) },
+      ],
+      yTick: v => fmtChars(v),
+      tip:   c => c.raw != null ? `${c.dataset.label}: ${fmtChars(Math.round(c.raw))}/h` : '',
+      foot:  undefined,
+      };
+    },
+  };
+
+  const m       = cfgByMetric[metric]();
+  const stacked = doSplit && m.type === 'bar';
+  const legend  = doSplit || metric === 'speed';
+
+  charts[key] = new Chart(document.getElementById(canvasId).getContext('2d'), {
+    type: m.type,
+    data: { labels, datasets: m.datasets },
+    options: {
       responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: (stacked || metric === 'speed') ? { mode: 'index', intersect: false } : undefined,
       plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : '' } }
+        legend: {
+          display: legend, position: 'bottom',
+          labels: {
+            color: CT.dim, boxWidth: 12, boxHeight: 12, usePointStyle: true,
+            // In split speed mode the color key describes members, not datasets
+            // (there are only two datasets and both are recolored per segment).
+            ...(m.legendItems ? {
+              generateLabels: () => memberLegendLabels(m.legendItems),
+            } : {}),
+          },
+          // Those synthesized entries don't map to datasets, so clicking one
+          // would try to toggle a dataset that isn't there.
+          onClick: m.legendItems ? () => {} : undefined,
+        },
+        tooltip: { callbacks: {
+          title:  c => labels[c[0].dataIndex],
+          label:  m.tip,
+          footer: stacked ? m.foot : undefined,
+        } },
       },
       scales: {
-        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false, afterFit: s => { s.width = 62; } },
+        x: { stacked, grid: { color: CT.grid },
+             ticks: { color: CT.dim, maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } },
+        y: { stacked, grid: { color: CT.grid },
+             // Speed mode carries two differently-colored series, so the axis
+             // stays neutral — tinting it would imply one series owns it.
+             ticks: { color: CT.dim, callback: m.yTick },
+             beginAtZero: metric !== 'speed',
+             afterFit: s => { s.width = 62; } },
       },
-    };
-    charts['detail-speed'] = new Chart(speedCtx, {
-      type: 'line',
-      data: {
-        labels: shownLabels,
-        datasets: [{
-          label: 'Read speed',
-          data: speedVals.map(v => v > 0 ? v : null),
-          borderColor: '#4ECBA0',
-          backgroundColor: 'rgba(78,203,160,0.08)',
-          borderWidth: 2,
-          pointRadius: 4,
-          pointHoverRadius: 7,
-          pointBackgroundColor: '#4ECBA0',
-          pointBorderColor: '#24243A',
-          pointBorderWidth: 2,
-          fill: true,
-          tension: 0.35,
-          spanGaps: false,
-        }]
-      },
-      options: speedLineOpts,
-    });
+    },
+  });
+}
 
-    const rollingCtx = document.getElementById('chart-detail-speed-rolling').getContext('2d');
-    charts['detail-speed-rolling'] = new Chart(rollingCtx, {
-      type: 'line',
-      data: {
-        labels: shownLabels,
-        datasets: [{
-          label: 'Read speed (7d rolling)',
-          data: twSpeedVals,
-          borderColor: '#4ECBA0',
-          backgroundColor: 'rgba(78,203,160,0.08)',
-          borderWidth: 2,
-          pointRadius: 4,
-          pointHoverRadius: 7,
-          pointBackgroundColor: '#4ECBA0',
-          pointBorderColor: '#24243A',
-          pointBorderWidth: 2,
-          fill: true,
-          tension: 0.35,
-          spanGaps: true,
-        }]
-      },
-      options: speedLineOpts,
-    });
-  } else {
-    speedSection.style.display = 'none';
-  }
-
-  // Time chart
-  const hasTime = timeVals.some(v => v > 0);
-  if (hasTime) {
-    reserveLegendRoom('chart-detail-time', 'detail-time', 180, msSplit);
-    const timeCtx = document.getElementById('chart-detail-time').getContext('2d');
-    charts['detail-time'] = new Chart(timeCtx, {
-      type: 'bar',
-      data: {
-        labels: shownLabels,
-        datasets: msSplit
-          ? milestoneDatasets(byMs, 'secs', 1 / 60)
-          : [{ label: 'Time', data: timeVals.map(s => s / 60), backgroundColor: '#5B8CFF',
-               borderRadius: 3, borderSkipped: false }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false, animation: false,
-        interaction: msSplit ? { mode: 'index', intersect: false } : undefined,
-        plugins: {
-          legend: { display: msSplit, position: 'bottom', labels:{color:'#9090A8',boxWidth:12,boxHeight:12,usePointStyle:true} },
-          tooltip: { callbacks: {
-            title: c => labels[c[0].dataIndex],
-            label: msSplit
-              ? c => `${c.dataset.label}: ${fmtTime(c.raw * 60)}`
-              : c => fmtTime(c.raw * 60),
-            footer: msSplit ? c => `Total: ${fmtTime(c.reduce((a, x) => a + x.raw, 0) * 60)}` : undefined,
-          } }
-        },
-        scales: {
-          x: { stacked: msSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { stacked: msSplit, grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v*60)}, afterFit: s => { s.width = 62; } },
-        }
-      }
-    });
-  }
+function renderDetailChart(daily, isGSM) {
+  detailChartCfg.detail = {
+    key: 'detail', canvasId: 'chart-detail-main', segId: 'detail-metric-seg',
+    splitLabelId: 'ms-split-label',
+    daily,
+    // Media detail is the one view that rolls up to weeks past ~3 months; a
+    // long title otherwise renders hundreds of hairline bars.
+    weeklyOver: 90,
+    splitOn: splitByMilestone && currentMilestones.length > 0,
+    splitSource: daily.map(r => r.by_milestone || {}),
+    splitMembers: milestoneMembers,
+    stackName: 'milestone',
+  };
+  renderDetailMetricChart('detail');
 }
 
 function renderDetailSessions(daily, isGSM) {
@@ -4508,13 +4540,17 @@ function applyTheme(theme) {
   if (theme === 'mint') {
     document.documentElement.setAttribute('data-theme', 'mint');
     HEATMAP_COLORS = ['#E8F5F0','#A8DDD2','#62C4B4','#2EAA92','#1A7060'];
+    refreshChartTheme();
+    // Mint's chart text/grid were hand-tuned softer than its --dim/--grid;
+    // keep those exact values rather than letting the vars win.
     Chart.defaults.color       = '#8AADA9';
     Chart.defaults.borderColor = '#C2E4DC';
+    CT.dim  = '#8AADA9';
+    CT.grid = '#C2E4DC';
   } else {
     document.documentElement.removeAttribute('data-theme');
     HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
-    Chart.defaults.color       = '#9090A8';
-    Chart.defaults.borderColor = '#2E2E48';
+    refreshChartTheme();
   }
   // Update active-page charts to reflect new theme colors
   loadPage(currentPage);
@@ -5370,7 +5406,7 @@ async function onCompleteMediaToggle(d, complete) {
     const disp = d.display_title || d.title;
     const ok = await showConfirm(
       `Mark this ${mediaNoun(d)} ("${disp}") as complete? The progress bar will fill to 100% and milestone percentages will be recalculated against the chars you actually read.`,
-      'Complete', '#4ECBA0'
+      'Complete', CT.success
     );
     if (!ok) return;
   }
@@ -5590,10 +5626,7 @@ async function openMilestoneDetail(milestoneId) {
 }
 
 function closeMilestoneDetail() {
-  destroyChart('milestone-time');
-  destroyChart('milestone-chars');
-  destroyChart('milestone-speed');
-  destroyChart('milestone-speed-rolling');
+  destroyChart('milestone');
   currentMilestoneId = null;
   // Return to parent media detail
   showMediaView(currentDetailTitle ? 'detail' : 'grid');
@@ -5671,94 +5704,17 @@ function renderMilestoneDetail(d) {
 }
 
 function renderMilestoneCharts(daily) {
-  destroyChart('milestone-time');
-  destroyChart('milestone-chars');
-  destroyChart('milestone-speed');
-  destroyChart('milestone-speed-rolling');
-  if (!daily.length) return;
-
-  const labels    = daily.map(r => r.date.slice(5));
-  const charVals  = daily.map(r => r.chars);
-  const timeVals  = daily.map(r => r.seconds);
-  const speedVals = daily.map(r => r.seconds > 0 && r.chars > 0 ? r.chars / (r.seconds / 3600) : 0);
-  const twSpeedVals = twRolling(charVals, timeVals, 7);
-  const step = Math.max(1, Math.floor(labels.length / 14));
-  const shown = labels.map((l, i) => i % step === 0 ? l : '');
-
-  if (timeVals.some(v => v > 0)) {
-    const ctx = document.getElementById('chart-milestone-time').getContext('2d');
-    charts['milestone-time'] = new Chart(ctx, {
-      type: 'bar',
-      data: { labels: shown, datasets: [{
-        label: 'Time', data: timeVals.map(s => s / 60),
-        backgroundColor: '#5B8CFF', borderRadius: 3, borderSkipped: false,
-      }]},
-      options: {
-        responsive: true, maintainAspectRatio: false, animation: false,
-        plugins: { legend: { display: false },
-          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtTime(c.raw * 60) } } },
-        scales: {
-          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtTime(v*60)}, afterFit: s => { s.width = 62; } },
-        }
-      }
-    });
-  }
-
-  if (charVals.some(v => v > 0)) {
-    const ctx = document.getElementById('chart-milestone-chars').getContext('2d');
-    charts['milestone-chars'] = new Chart(ctx, {
-      type: 'bar',
-      data: { labels: shown, datasets: [{
-        label: 'Characters', data: charVals,
-        backgroundColor: '#4ECBA0', borderRadius: 3, borderSkipped: false,
-      }]},
-      options: {
-        responsive: true, maintainAspectRatio: false, animation: false,
-        plugins: { legend: { display: false },
-          tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => `${fmtChars(c.raw)} chars` } } },
-        scales: {
-          x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-          y: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8', callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
-        }
-      }
-    });
-  }
-
-  const speedSection = document.getElementById('milestone-speed-section');
-  if (speedVals.some(v => v > 0)) {
-    speedSection.style.display = 'block';
-    const opts = {
-      responsive: true, maintainAspectRatio: false, animation: false,
-      plugins: { legend: { display: false },
-        tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => c.raw != null ? `${fmtChars(Math.round(c.raw))}/h` : '' } } },
-      scales: {
-        x: { grid:{color:'#2E2E48'}, ticks:{color:'#9090A8',maxRotation:0} },
-        y: { grid:{color:'#2E2E48'}, ticks:{color:'#4ECBA0', callback: v => fmtChars(v)}, beginAtZero: false, afterFit: s => { s.width = 62; } },
-      },
-    };
-    const cfg = (label, data, spanGaps) => ({
-      type: 'line',
-      data: { labels: shown, datasets: [{
-        label, data, borderColor: '#4ECBA0',
-        backgroundColor: 'rgba(78,203,160,0.08)', borderWidth: 2,
-        pointRadius: 4, pointHoverRadius: 7, pointBackgroundColor: '#4ECBA0',
-        pointBorderColor: '#24243A', pointBorderWidth: 2,
-        fill: true, tension: 0.35, spanGaps,
-      }]},
-      options: opts,
-    });
-    charts['milestone-speed'] = new Chart(
-      document.getElementById('chart-milestone-speed').getContext('2d'),
-      cfg('Read speed', speedVals.map(v => v > 0 ? v : null), false)
-    );
-    charts['milestone-speed-rolling'] = new Chart(
-      document.getElementById('chart-milestone-speed-rolling').getContext('2d'),
-      cfg('Read speed (7d rolling)', twSpeedVals, true)
-    );
-  } else {
-    speedSection.style.display = 'none';
-  }
+  detailChartCfg.milestone = {
+    key: 'milestone', canvasId: 'chart-milestone-main', segId: 'milestone-metric-seg',
+    splitLabelId: null,
+    daily: daily || [],
+    weeklyOver: null,
+    splitOn: false,          // a milestone is already one slice; nothing to split by
+    splitSource: null,
+    splitMembers: null,
+    stackName: null,
+  };
+  renderDetailMetricChart('milestone');
 }
 
 function renderMilestoneSessions(daily) {
@@ -5788,7 +5744,7 @@ async function endCurrentMilestone() {
   if (currentMilestoneId == null) return;
   const m = currentMilestones.find(x => x.id === currentMilestoneId);
   const label = m ? m.name : 'this milestone';
-  const ok = await showConfirm(`End milestone "${label}" at the current point?`, 'End', '#5B8CFF');
+  const ok = await showConfirm(`End milestone "${label}" at the current point?`, 'End', CT.accent);
   if (!ok) return;
   const r = await window.pywebview.api.end_milestone(currentMilestoneId);
   if (!r.ok) { alert(r.error || 'Failed to end milestone'); return; }
@@ -5952,11 +5908,29 @@ function portalEntries() {
 
 function portalEntryMap() { return new Map(portalEntries().map(e => [e.key, e])); }
 
-// Assign the lowest-index palette color not held by another selected entry.
+// Stable string -> palette index (djb2). Deterministic across sessions, so a
+// title's color doesn't depend on when the app was opened.
+function paletteIndex(str, n) {
+  let h = 5381;
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+  return h % n;
+}
+
+// A title's color is derived from its own name, so it's the same every time it's
+// selected and doesn't shift with selection order. Collisions still have to be
+// broken, though — telling two lines apart is the whole point of this view — so
+// if another selected title already holds the preferred color we walk forward
+// from it. The portal caps at 8 selections against a 10-color palette, so a
+// distinct color is always available.
 function portalColorFor(key) {
   if (portalColorMap[key]) return portalColorMap[key];
   const taken = new Set([...portalSelected].filter(k => k !== key).map(k => portalColorMap[k]));
-  const color = PORTAL_PALETTE.find(c => !taken.has(c)) || PORTAL_PALETTE[0];
+  const start = paletteIndex(key, PORTAL_PALETTE.length);
+  let color = PORTAL_PALETTE[start];
+  for (let i = 0; i < PORTAL_PALETTE.length; i++) {
+    const c = PORTAL_PALETTE[(start + i) % PORTAL_PALETTE.length];
+    if (!taken.has(c)) { color = c; break; }
+  }
   portalColorMap[key] = color;
   return color;
 }
@@ -6245,7 +6219,7 @@ function portalLineDataset(d, data, extra) {
     borderColor: color,
     backgroundColor: color,
     pointBackgroundColor: color,
-    pointBorderColor: '#24243A',
+    pointBorderColor: CT.card,
     pointBorderWidth: 1,
     borderWidth: 2,
     tension: 0.3,
@@ -6255,20 +6229,20 @@ function portalLineDataset(d, data, extra) {
 
 function portalDateScale(yTickCb) {
   return {
-    x: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', autoSkip: true, maxTicksLimit: 14, maxRotation: 0 } },
-    y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: yTickCb }, beginAtZero: false },
+    x: { grid: { color: CT.grid }, ticks: { color: CT.dim, autoSkip: true, maxTicksLimit: 14, maxRotation: 0 } },
+    y: { grid: { color: CT.grid }, ticks: { color: CT.dim, callback: yTickCb }, beginAtZero: false },
   };
 }
 
 // Linear "days since start" x-axis, used by the calendar charts in aligned mode.
 function portalDayScale(yTickCb) {
   return {
-    x: { type: 'linear', grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', maxRotation: 0, callback: (v, _i, ts) => fmtTick(v, ts, 'd') }, title: { display: true, text: 'Days since start', color: '#9090A8' }, beginAtZero: true },
-    y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: yTickCb }, beginAtZero: false },
+    x: { type: 'linear', grid: { color: CT.grid }, ticks: { color: CT.dim, maxRotation: 0, callback: (v, _i, ts) => fmtTick(v, ts, 'd') }, title: { display: true, text: 'Days since start', color: CT.dim }, beginAtZero: true },
+    y: { grid: { color: CT.grid }, ticks: { color: CT.dim, callback: yTickCb }, beginAtZero: false },
   };
 }
 
-const PORTAL_LEGEND = { display: true, position: 'bottom', labels: { color: '#9090A8', usePointStyle: true, boxWidth: 8, padding: 12 } };
+const PORTAL_LEGEND = { display: true, position: 'bottom', labels: { color: CT.dim, usePointStyle: true, boxWidth: 8, padding: 12 } };
 
 function renderPortal() {
   destroyPortalCharts();
@@ -6372,8 +6346,8 @@ function renderPortalNorm(withChars) {
         tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmtChars(Math.round(c.parsed.y))}/h @ ${c.parsed.x.toFixed(byDay ? 0 : 1)}${unit}` } },
       },
       scales: {
-        x: { type: 'linear', grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', maxRotation: 0, callback: (v, _i, ts) => fmtTick(v, ts, unit) }, title: { display: true, text: byDay ? 'Reading day' : 'Hours into title', color: '#9090A8' } },
-        y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => fmtChars(v) }, beginAtZero: false },
+        x: { type: 'linear', grid: { color: CT.grid }, ticks: { color: CT.dim, maxRotation: 0, callback: (v, _i, ts) => fmtTick(v, ts, unit) }, title: { display: true, text: byDay ? 'Reading day' : 'Hours into title', color: CT.dim } },
+        y: { grid: { color: CT.grid }, ticks: { color: CT.dim, callback: v => fmtChars(v) }, beginAtZero: false },
       },
     },
   });
@@ -6431,8 +6405,8 @@ function renderPortalGain(withChars) {
         } } },
       },
       scales: {
-        x: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: (v, _i, ts) => fmtTick(v, ts, '%') }, beginAtZero: true },
-        y: { grid: { display: false }, ticks: { color: '#9090A8' } },
+        x: { grid: { color: CT.grid }, ticks: { color: CT.dim, callback: (v, _i, ts) => fmtTick(v, ts, '%') }, beginAtZero: true },
+        y: { grid: { display: false }, ticks: { color: CT.dim } },
       },
     },
   });
@@ -6471,8 +6445,8 @@ function renderPortalScatter(withChars) {
         } } },
       },
       scales: {
-        x: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => fmtChars(v) }, title: { display: true, text: 'Total characters', color: '#9090A8' } },
-        y: { grid: { color: '#2E2E48' }, ticks: { color: '#9090A8', callback: v => fmtChars(v) }, title: { display: true, text: 'Avg speed (chars/h)', color: '#9090A8' }, beginAtZero: false },
+        x: { grid: { color: CT.grid }, ticks: { color: CT.dim, callback: v => fmtChars(v) }, title: { display: true, text: 'Total characters', color: CT.dim } },
+        y: { grid: { color: CT.grid }, ticks: { color: CT.dim, callback: v => fmtChars(v) }, title: { display: true, text: 'Avg speed (chars/h)', color: CT.dim }, beginAtZero: false },
       },
     },
   });
