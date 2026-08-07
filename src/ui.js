@@ -45,6 +45,7 @@ let selEndDay          = Infinity; // selection end, inclusive day index (clampe
 let excludedTypes      = new Set(); // activity types hidden from the Stats view (only Reading has chars)
 let currentGranularity = 'day';
 let splitByActivity    = false;
+let statsMetric        = 'time';       // 'time' | 'chars' | 'speed' — Stats page chart
 let statsCache    = {};
 let charts        = {};
 let selectedAtype = 'Listening';
@@ -1825,19 +1826,31 @@ function updateGranularityUI() {
 // Bucket key for a day row at the given granularity. Factored out so the range
 // brush can derive identical bucket boundaries (snap-to-bar) with no drift.
 function makeBucketKey(daily, gran) {
-  const weekStart = dateStr => {
-    const d = new Date(dateStr);
-    const day = d.getDay();
-    d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)); // snap to Monday
-    return d.toISOString().slice(0, 10);
+  // Parse as LOCAL, like bucketByDayOfWeek does. `new Date('2026-03-02')` parses
+  // as UTC midnight, but getDay() reads local — so west of UTC every date came
+  // back as the previous weekday. Weeks ran Tue→Mon and every Monday landed in
+  // the previous week's bar. Formatting back through toISOString() reintroduced
+  // the same shift, so the label was wrong too.
+  const parse = s => {
+    const [y, m, d] = s.split('-').map(Number);
+    return new Date(y, m - 1, d);
   };
-  const origin = daily.length ? new Date(daily[0].date) : null;
+  // Math.round absorbs the ±1h wobble when a span crosses a DST boundary.
+  const dayDiff = (a, b) => Math.round((a - b) / 86400000);
+
+  const weekStart = dateStr => {
+    const d = parse(dateStr);
+    d.setDate(d.getDate() - ((d.getDay() + 6) % 7));   // Mon=0 … Sun=6, snap to Monday
+    return isoDateFromObj(d);
+  };
+  const origin = daily.length ? parse(daily[0].date) : null;
   return r => {
     if (gran === 'week') return weekStart(r.date);
     if (gran === '2wk') {
-      const dt  = new Date(r.date);
-      const idx = Math.floor((dt - origin) / (86400000 * 14));
-      return new Date(+origin + idx * 14 * 86400000).toISOString().slice(0, 10);
+      const idx = Math.floor(dayDiff(parse(r.date), origin) / 14);
+      const d   = new Date(origin);
+      d.setDate(d.getDate() + idx * 14);               // setDate, not +ms, for DST
+      return isoDateFromObj(d);
     }
     if (gran === 'month') return r.date.slice(0, 7);
     if (gran === 'year')  return r.date.slice(0, 4);
@@ -1873,12 +1886,19 @@ function bucketDaily(daily, gran) {
   const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   if (!daily.length) return { labels: [], secs: [], chars: [] };
 
+  // spdChars/spdSecs are the backend's per-day reading-speed BASIS (chars-bearing
+  // reading only, manual overlay folded in). They're carried through bucketing so
+  // a bucket's speed is sum(spdChars)/sum(spdSecs) — totals first, then divide.
+  // Deriving speed from the displayed secs instead would fold in chars-less
+  // listening time and understate it.
   if (gran === 'day') {
     return {
       labels: daily.map(r => r.date.slice(5)),
       secs:   daily.map(r => r.seconds),
       chars:  daily.map(r => r.chars),
       byType: daily.map(r => r.by_type || {}),
+      spdChars: daily.map(r => r.spd_chars || 0),
+      spdSecs:  daily.map(r => r.spd_secs  || 0),
     };
   }
 
@@ -1887,9 +1907,11 @@ function bucketDaily(daily, gran) {
 
   daily.forEach(r => {
     const k = getKey(r);
-    if (!buckets[k]) { buckets[k] = { secs: 0, chars: 0, byType: {} }; order.push(k); }
+    if (!buckets[k]) { buckets[k] = { secs: 0, chars: 0, byType: {}, spdChars: 0, spdSecs: 0 }; order.push(k); }
     buckets[k].secs  += r.seconds;
     buckets[k].chars += r.chars;
+    buckets[k].spdChars += (r.spd_chars || 0);
+    buckets[k].spdSecs  += (r.spd_secs  || 0);
     const bt = r.by_type || {};
     for (const t in bt) buckets[k].byType[t] = (buckets[k].byType[t] || 0) + bt[t];
   });
@@ -1912,6 +1934,8 @@ function bucketDaily(daily, gran) {
     secs:   order.map(k => buckets[k].secs),
     chars:  order.map(k => buckets[k].chars),
     byType: order.map(k => buckets[k].byType),
+    spdChars: order.map(k => buckets[k].spdChars),
+    spdSecs:  order.map(k => buckets[k].spdSecs),
   };
 }
 
@@ -2048,6 +2072,15 @@ function renderStats(d) {
   document.getElementById('sc-time').textContent       = fmtTime(d.r_secs);
   document.getElementById('sc-chars').textContent      = fmtChars(d.r_chars);
   document.getElementById('sc-cph').textContent        = d.chars_per_hour ? fmtChars(d.chars_per_hour) : '—';
+
+  // #8 — how this window compares to the one immediately before it, so the big
+  // numbers read as movement rather than as bare absolutes. The backend supplies
+  // the previous period through the same helper chain, so the two can't drift.
+  const prevCph = (d.prev_spd_secs > 0 && d.prev_spd_chars > 0)
+    ? d.prev_spd_chars / (d.prev_spd_secs / 3600) : 0;
+  setDeltaChip('sc-time-delta',  d.r_secs,          d.prev_secs,  rl);
+  setDeltaChip('sc-chars-delta', d.r_chars,         d.prev_chars, rl);
+  setDeltaChip('sc-cph-delta',   d.chars_per_hour,  prevCph,      rl);
   document.getElementById('sc-streak').textContent     = `${d.cur_streak}d`;
   document.getElementById('es-best-day').textContent   = fmtTime(d.best_day_secs);
   document.getElementById('es-best-day-date').textContent  = d.best_day_date || '—';
@@ -2062,7 +2095,6 @@ function renderStats(d) {
   document.getElementById('daily-brush')?.classList.remove('active');
   setStreakLabel('Current Streak');
   renderDailyChart(d.daily);
-  renderDailyCharsChart(d.daily);
   renderDowChart(d.daily);
   renderDonutChart(d.activity);
 }
@@ -2291,21 +2323,83 @@ function upsertChart(id, ctxId, config) {
   return charts[id];
 }
 
+// The Stats page's one chart, driven by the same Time / Chars / Speed control as
+// the detail views. It does NOT reuse renderDetailMetricChart: this chart also
+// carries granularity bucketing, the drag brush, the cumulative overlay and
+// split-by-activity, and bending one function around both would be worse than
+// two that share a control and a stylesheet.
+//
+// Availability differs per metric and is data-driven, not taste:
+//   • Split by activity — Time only. `by_type` holds SECONDS per type; there is
+//     no per-type chars breakdown, and stacking a rate is meaningless.
+//   • Cumulative — Time and Chars only. A running total of a rate is nonsense.
+function statsMetricAvail(b) {
+  return {
+    time:  b.secs.some(v => v > 0),
+    chars: b.chars.some(v => v > 0),
+    speed: b.spdSecs.some(v => v > 0) && b.spdChars.some(v => v > 0),
+  };
+}
+
+function syncStatsMetricSeg(avail) {
+  const seg = document.getElementById('stats-metric-seg');
+  if (seg) {
+    seg.querySelectorAll('.seg-btn').forEach(b => {
+      const ok = avail[b.dataset.metric];
+      b.disabled = !ok;
+      b.classList.toggle('active', ok && b.dataset.metric === statsMetric);
+    });
+  }
+  // Controls that don't apply to the active metric are faded and made inert
+  // rather than hidden, so the header doesn't reflow as you switch.
+  const setOff = (id, off) => {
+    const lbl = document.getElementById(id);
+    if (!lbl) return;
+    lbl.style.opacity       = off ? '0.4' : '';
+    lbl.style.pointerEvents = off ? 'none' : '';
+    const box = lbl.querySelector('input');
+    if (box) box.disabled = off;
+  };
+  setOff('split-toggle-label', statsMetric !== 'time');
+  setOff('cum-toggle-label',   statsMetric === 'speed');
+}
+
+function setStatsMetric(m) {
+  statsMetric = m;
+  if (statsNeedsClient()) { renderClientStats(); return; }
+  if (statsCache[currentRange]) renderDailyChart(statsCache[currentRange].daily);
+}
+
 function renderDailyChart(daily) {
+  const bucket  = bucketDaily(daily, currentGranularity);
+  const { labels, secs, chars, byType, spdChars, spdSecs } = bucket;
+
+  const avail = statsMetricAvail(bucket);
+  if (!avail[statsMetric]) statsMetric = avail.time ? 'time' : (avail.chars ? 'chars' : 'time');
+  syncStatsMetricSeg(avail);
+
+  if (statsMetric === 'speed') return renderDailySpeedChart(bucket);
+
+  const isChars = statsMetric === 'chars';
   const cum     = document.getElementById('cum-toggle').checked;
-  const { labels, secs, byType } = bucketDaily(daily, currentGranularity);
   const isHours = currentGranularity !== 'day';
-  const scale   = isHours ? 1 / 3600 : 1 / 60;
-  const values  = secs.map(s => s * scale);
-  const fmt     = v => isHours ? `${v.toFixed(1)}h` : fmtTime(v * 60);
+  const scale   = isChars ? 1 : (isHours ? 1 / 3600 : 1 / 60);
+  const values  = isChars ? chars : secs.map(s => s * scale);
+  const fmt     = isChars
+    ? v => `${fmtChars(Math.round(v))} chars`
+    : v => isHours ? `${v.toFixed(1)}h` : fmtTime(v * 60);
+
+  // Split is Time-only (see above), so chars never stacks.
+  const doSplit = splitByActivity && !isChars;
 
   // Labels are passed whole and thinned by Chart.js autoSkip (see x.ticks).
   // Blanking every Nth label by hand made the visible set jump around as the
   // range changed, and reliably dropped the last date — the one you most want.
 
-  const datasets = splitByActivity
+  const datasets = doSplit
     ? activityDatasets(byType, scale)
-    : [{ label: 'Time', data: values, backgroundColor: CT.accent,
+    : [{ label: isChars ? 'Characters' : 'Time', data: values,
+         backgroundColor: isChars ? CT.success : CT.accent,
          borderRadius: 3, borderSkipped: false }];
 
   let cumStepH = 1;
@@ -2315,7 +2409,7 @@ function renderDailyChart(daily) {
     // The cumulative axis ticks at whole hours: pick a "nice" hour step sized
     // to the running total (~5 ticks). Sub-hour steps exist only so a range
     // totalling under ~2h doesn't collapse to a single 0h/1h pair of ticks.
-    const maxH = (cumVals[cumVals.length - 1] || 0) * (isHours ? 1 : 1 / 60);
+    const maxH = (cumVals[cumVals.length - 1] || 0) * (isChars ? 1 : (isHours ? 1 : 1 / 60));
     cumStepH = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
       .find(s => s >= maxH / 5) || Math.ceil(maxH / 5 / 1000) * 1000;
     datasets.push({
@@ -2326,33 +2420,35 @@ function renderDailyChart(daily) {
     });
   }
 
-  reserveLegendRoom('chart-daily', 'daily', 180, cum || splitByActivity);
+  reserveLegendRoom('chart-daily', 'daily', 180, cum || doSplit);
   upsertChart('daily', 'chart-daily', {
     type: 'bar',
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
       onResize: () => positionDailyBrush(),
-      interaction: splitByActivity ? { mode: 'index', intersect: false } : undefined,
+      interaction: doSplit ? { mode: 'index', intersect: false } : undefined,
       plugins: {
-        legend: { display: cum || splitByActivity, position: 'bottom',
+        legend: { display: cum || doSplit, position: 'bottom',
                   labels: { color:CT.dim, boxWidth:12, boxHeight:12, usePointStyle:true } },
         tooltip: {
           callbacks: {
             title: c => labels[c[0].dataIndex],
             label: c => `${c.dataset.label}: ${fmt(c.raw)}`,
-            footer: splitByActivity
+            footer: doSplit
               ? c => `Total: ${fmt(c.reduce((a, x) => x.dataset.type === 'line' ? a : a + x.raw, 0))}`
               : undefined,
           }
         }
       },
       scales: {
-        x: { stacked: splitByActivity, grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
-        y: { stacked: splitByActivity, grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
+        x: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
+        y: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
         ...(cum ? {y2:{position:'right',grid:{display:false},
-          ticks:{color:CT.success, stepSize: cumStepH * (isHours ? 1 : 60),
-                 callback: v => fmtHourTick(isHours ? v : v / 60)}}} : {})
+          ticks:{color:CT.success,
+                 ...(isChars ? { callback: v => fmtChars(v) }
+                             : { stepSize: cumStepH * (isHours ? 1 : 60),
+                                 callback: v => fmtHourTick(isHours ? v : v / 60) })}}} : {})
       }
     }
   });
@@ -2361,36 +2457,73 @@ function renderDailyChart(daily) {
   requestAnimationFrame(positionDailyBrush);
 }
 
-function renderDailyCharsChart(daily) {
-  const { labels, chars } = bucketDaily(daily, currentGranularity);
-  if (!chars.some(c => c > 0)) {
-    destroyChart('daily-chars');
-    setChartEmpty('chart-daily-chars', 'No character data in this range');
-    return;
+// #7 — reading speed over time. The one thing Stats couldn't answer before: you
+// could see speed per title, per series, per milestone and across titles in the
+// portal, but never "am I getting faster overall".
+//
+// Every point is sum(spdChars) / sum(spdSecs) for its bucket — totals first,
+// then divide. Never a mean of per-day speeds, never sessions.reading_speed.
+function renderDailySpeedChart(bucket) {
+  const { labels, spdChars, spdSecs } = bucket;
+  const speed = spdChars.map((c, i) => (spdSecs[i] > 0 && c > 0) ? c / (spdSecs[i] / 3600) : null);
+
+  // A rolling overlay only earns its place at day granularity; week/month/year
+  // buckets are already smoothed, and a 7-BUCKET average of months is nonsense.
+  const showRolling = currentGranularity === 'day';
+  const rolling = showRolling ? twRolling(spdChars, spdSecs, 7) : null;
+
+  const datasets = [];
+  if (showRolling) {
+    // Same treatment as the detail views: raw dotted and dimmed, trend solid on
+    // top. Array order is draw + legend order — see renderDetailMetricChart.
+    datasets.push({
+      label: 'Per day', data: speed,
+      borderColor: ctAlpha(CT.purple, 0.45), backgroundColor: 'transparent',
+      borderWidth: 1.5, borderDash: [3, 3], pointRadius: 0, pointHoverRadius: 5,
+      fill: false, tension: 0.35, spanGaps: false,
+    });
+    datasets.push({
+      label: '7d rolling', data: rolling,
+      borderColor: CT.purple, backgroundColor: 'transparent',
+      borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 6,
+      pointBackgroundColor: CT.purple, pointBorderColor: CT.card, pointBorderWidth: 2,
+      fill: false, tension: 0.35, spanGaps: true,
+    });
+  } else {
+    datasets.push({
+      label: 'Chars / hour', data: speed,
+      borderColor: CT.purple, backgroundColor: 'transparent',
+      borderWidth: 2.5, pointRadius: 3, pointHoverRadius: 6,
+      pointBackgroundColor: CT.purple, pointBorderColor: CT.card, pointBorderWidth: 2,
+      fill: false, tension: 0.35, spanGaps: true,
+    });
   }
 
-  // Labels are passed whole and thinned by Chart.js autoSkip (see x.ticks).
-  // Blanking every Nth label by hand made the visible set jump around as the
-  // range changed, and reliably dropped the last date — the one you most want.
-
-  upsertChart('daily-chars', 'chart-daily-chars', {
-    type: 'bar',
-    data: { labels, datasets: [{
-      label: 'Characters', data: chars, backgroundColor: CT.success,
-      borderRadius: 3, borderSkipped: false,
-    }]},
+  reserveLegendRoom('chart-daily', 'daily', 180, showRolling);
+  upsertChart('daily', 'chart-daily', {
+    type: 'line',
+    data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      onResize: () => positionDailyBrush(),
+      interaction: { mode: 'index', intersect: false },
       plugins: {
-        legend: { display: false },
-        tooltip: { callbacks: { title: c => labels[c[0].dataIndex], label: c => fmtChars(c.raw) + ' chars' } }
+        legend: { display: showRolling, position: 'bottom',
+                  labels: { color:CT.dim, boxWidth:12, boxHeight:12, usePointStyle:true } },
+        tooltip: { callbacks: {
+          title: c => labels[c[0].dataIndex],
+          label: c => c.raw != null ? `${c.dataset.label}: ${fmtChars(Math.round(c.raw))}/h` : '',
+        } },
       },
       scales: {
         x: { grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
-        y: { grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmtChars(v)}, afterFit: s => { s.width = 62; } },
-      }
+        y: { grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmtChars(v)},
+             beginAtZero: false, afterFit: s => { s.width = 62; } },
+      },
     }
   });
+
+  requestAnimationFrame(positionDailyBrush);
 }
 
 function renderDowChart(daily) {
@@ -2468,6 +2601,22 @@ function renderDonutChart(activity) {
 // attribution + manual shave) folded into each day's final number, so summing a
 // contiguous sub-slice is correct by construction — no backend round-trip and
 // no re-touching the attribution machinery. The brush slices statsCache[customBase].
+
+// Percentage change vs the previous equivalent period, shown under a stat card.
+// Hidden entirely when there's no basis to compare against (the 'All' range has
+// no earlier period, and a first-ever period would read as a meaningless +∞).
+function setDeltaChip(id, cur, prev, rangeLabel) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (!prev || prev <= 0 || cur == null) { el.style.display = 'none'; return; }
+  const pct = (cur - prev) / prev * 100;
+  const up  = pct >= 0;
+  // Under half a percent either way reads as flat rather than as a fake trend.
+  const flat = Math.abs(pct) < 0.5;
+  el.style.display = '';
+  el.className = 'delta-chip ' + (flat ? 'flat' : (up ? 'up' : 'down'));
+  el.textContent = `${flat ? '±' : (up ? '↑' : '↓')}${Math.abs(pct).toFixed(0)}% vs prior ${rangeLabel}`;
+}
 
 function setStreakLabel(text) {
   const el = document.getElementById('sc-streak-lbl');
@@ -2640,6 +2789,14 @@ function applyBrushCards(v) {
   document.getElementById('sc-time').textContent   = fmtTime(v.secs);
   document.getElementById('sc-chars').textContent  = fmtChars(v.chars);
   document.getElementById('sc-cph').textContent    = v.cph ? fmtChars(v.cph) : '—';
+  // No delta chips in the brushed/filtered view: an arbitrary dragged window has
+  // no well-defined "previous equivalent period", and the backend basis was
+  // computed for the preset range, not this slice. Showing it would be a number
+  // that looks meaningful and isn't.
+  ['sc-time-delta', 'sc-chars-delta', 'sc-cph-delta'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
   setStreakLabel(v.streak_is_current ? 'Current Streak' : 'Longest streak');
   document.getElementById('sc-streak').textContent = `${v.streak}d`;
   document.getElementById('sc-avg').textContent    = fmtTime(v.avg_secs);
@@ -2668,8 +2825,7 @@ function renderClientStats() {
   const v = computeBrushView();
   applyBrushCards(v);
   renderDailyChart(daily);               // filtered full series; masks dim the unselected part
-  renderDailyCharsChart(v.sub);          // downstream views follow the selection
-  renderDowChart(v.sub);
+  renderDowChart(v.sub);                 // downstream views follow the selection
   renderDonutChart(v.activity);
   requestAnimationFrame(positionDailyBrush);
 }

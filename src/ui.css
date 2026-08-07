@@ -101,6 +101,12 @@ h2 { font-size: 14px; font-weight: 700; color: var(--text); margin: 20px 0 8px; 
 .stat-card .label { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
 .stat-card .value { font-size: 26px; font-weight: 700; line-height: 1.1; }
 .stat-card .sub   { font-size: 10px; color: var(--dim); margin-top: 3px; }
+/* Change vs the previous equivalent period. Deliberately quiet — it annotates
+   the big number, it isn't competing with it. */
+.delta-chip { font-size: 10px; margin-top: 4px; color: var(--dim); letter-spacing: .2px; }
+.delta-chip.up   { color: var(--success); }
+.delta-chip.down { color: var(--warn); }
+.delta-chip.flat { color: var(--dim); }
 
 /* ── Page header ─────────────────────────────────────────────────────────── */
 .page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }

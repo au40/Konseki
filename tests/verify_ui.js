@@ -99,6 +99,7 @@ const PROBE = `
   set portalSelected(v) { portalSelected = v; },
   applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty,
   rollDetailSeries, twRolling, splitBarDatasets, speedSegmentColors, memberLegendLabels,
+  bucketDaily, statsMetricAvail,
 };`;
 
 try {
@@ -332,6 +333,51 @@ check('every legend item has one', legendLabels.every(l => !!l.fontColor), true)
 check('legend swatch uses the member color', legendLabels[0].fillStyle, '#A00000');
 check('legend text is the member label', legendLabels[1].text, 'Part Two');
 check('memberLegendLabels tolerates null', P.memberLegendLabels(null).length, 0);
+
+console.log('\n--- M3: Stats speed basis carried through bucketing ---');
+// Durations differ so sum(chars)/sum(secs) and the mean of daily speeds diverge.
+const spdDays = [
+  { date: '2026-03-02', seconds: 3600,  chars: 10000, spd_chars: 10000, spd_secs: 3600 },
+  { date: '2026-03-03', seconds: 36000, chars: 1000,  spd_chars: 1000,  spd_secs: 36000 },
+];
+const byDay = P.bucketDaily(spdDays, 'day');
+check('day granularity carries spdChars', byDay.spdChars.join(','), '10000,1000');
+check('day granularity carries spdSecs',  byDay.spdSecs.join(','),  '3600,36000');
+
+const byMonth = P.bucketDaily(spdDays, 'month');
+check('bucketing conserves spdChars', byMonth.spdChars.reduce((a, b) => a + b, 0), 11000);
+check('bucketing conserves spdSecs',  byMonth.spdSecs.reduce((a, b) => a + b, 0),  39600);
+check('both days land in one month bucket', byMonth.labels.length, 1);
+const mSpeed = byMonth.spdChars[0] / (byMonth.spdSecs[0] / 3600);
+check('bucket speed is chars/secs (1000/h)', Math.round(mSpeed), 1000);
+check('bucket speed is NOT the mean of daily speeds (5050/h)',
+      Math.round(mSpeed) === 5050, false);
+
+// Week bucketing used to parse ISO dates as UTC while reading getDay() locally,
+// so west of UTC every weekday came back one early: weeks ran Tue->Mon and each
+// Monday fell into the previous week's bar.
+const mondayFirst = ['2026-03-02', '2026-03-03', '2026-03-08']    // Mon, Tue, Sun
+  .map(d => ({ date: d, seconds: 60, chars: 1 }));
+const wk = P.bucketDaily(mondayFirst, 'week');
+check('Mon-Sun is one week bucket, not two', wk.labels.length, 1);
+const nextMonday = P.bucketDaily(
+  [{ date: '2026-03-08', seconds: 60, chars: 1 },     // Sunday
+   { date: '2026-03-09', seconds: 60, chars: 1 }],    // Monday -> new week
+  'week');
+check('a new Monday starts a new bucket', nextMonday.labels.length, 2);
+
+console.log('\n--- M3: metric availability is data-driven ---');
+check('all three available with chars + speed basis',
+      JSON.stringify(P.statsMetricAvail(byDay)), '{"time":true,"chars":true,"speed":true}');
+const listening = P.bucketDaily(
+  [{ date: '2026-03-02', seconds: 3600, chars: 0, spd_chars: 0, spd_secs: 0 }], 'day');
+check('a chars-less range offers Time only',
+      JSON.stringify(P.statsMetricAvail(listening)), '{"time":true,"chars":false,"speed":false}');
+const empty = P.bucketDaily([{ date: '2026-03-02', seconds: 0, chars: 0 }], 'day');
+check('an empty range offers nothing',
+      JSON.stringify(P.statsMetricAvail(empty)), '{"time":false,"chars":false,"speed":false}');
+check('missing spd_* fields default to 0, not NaN',
+      P.bucketDaily([{ date: '2026-03-02', seconds: 60, chars: 5 }], 'day').spdChars[0], 0);
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

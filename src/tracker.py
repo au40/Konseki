@@ -46,6 +46,7 @@ from db import (
     init_db, scan_existing_files,
     get_setting, set_setting, get_today,
     get_today_stats, get_weekly_summary, get_all_time_totals, get_range_totals,
+    get_prev_range_totals, get_prev_range_speed_basis,
     get_recent_sessions, get_daily_time_series, get_daily_activity_series,
     get_daily_reading_speed_basis,
     get_activity_breakdown,
@@ -317,6 +318,10 @@ class Api:
         activity    = get_activity_breakdown(n)
         titles      = get_top_titles(8)
         extra       = get_range_extra_stats(n)
+        # Previous equivalent period, for the delta chips. Same helper chain as the
+        # current window (_adjusted_day_totals), so the two can't drift apart.
+        pc, ps, _   = get_prev_range_totals(n)
+        p_sc, p_ss  = get_prev_range_speed_basis(n)
 
         if n is None:
             first = _q1("SELECT MIN(session_date) FROM sessions")[0]
@@ -328,6 +333,10 @@ class Api:
             "range_val":       range_val,
             "r_chars":         rc,
             "r_secs":          rs,
+            "prev_chars":      pc,
+            "prev_secs":       ps,
+            "prev_spd_chars":  p_sc,
+            "prev_spd_secs":   p_ss,
             "cur_streak":      cs,
             "avg_secs":        rs / max(w, 1),
             "chars_per_hour":  extra["chars_per_hour"],

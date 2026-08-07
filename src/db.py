@@ -1014,6 +1014,46 @@ def get_range_totals(n):
     active = sum(1 for c, s in tot.values() if s > 0 or c > 0)
     return (chars, secs, active)
 
+def get_prev_range_totals(n):
+    """(chars, secs, active_days) for the period immediately BEFORE the current
+    n-day window — the comparison basis for the Stats page's delta chips.
+
+    Current window is [today-n+1, today]; this one is [today-2n+1, today-n], the
+    same length and immediately preceding, so "+18% vs prior 30d" is like for
+    like. Goes through _adjusted_day_totals, which is the shared chokepoint for
+    GSM rollover attribution and the manual overlay, so it can't drift from the
+    current-period number it's compared against (see CLAUDE.md).
+
+    n=None (All) has no earlier period; returns zeros."""
+    if n is None:
+        return (0, 0.0, 0)
+    end   = get_today_date() - timedelta(days=n)
+    start = end - timedelta(days=n - 1)
+    tot   = _adjusted_day_totals(start.isoformat(), end.isoformat())
+    chars = sum(c for c, s in tot.values())
+    secs  = sum(s for c, s in tot.values())
+    active = sum(1 for c, s in tot.values() if s > 0 or c > 0)
+    return (chars, secs, active)
+
+
+def get_prev_range_speed_basis(n):
+    """(spd_chars, spd_secs) for the previous n-day window, so the chars/hour
+    delta divides the same way the displayed figure does — totals first, then
+    divide. Never sessions.reading_speed."""
+    if n is None:
+        return (0, 0.0)
+    end   = get_today_date() - timedelta(days=n)
+    start = end - timedelta(days=n - 1)
+    basis = get_daily_reading_speed_basis(None)
+    tot_c = tot_s = 0.0
+    s_iso, e_iso = start.isoformat(), end.isoformat()
+    for d, (c, s) in basis.items():
+        if s_iso <= d <= e_iso:
+            tot_c += c
+            tot_s += s
+    return (tot_c, tot_s)
+
+
 def get_recent_sessions(limit=30):
     # Mirrors get_today_stats attribution handling, but generalized across every date
     # in the history window: deduct outgoing attributions from the first GSM row on
@@ -1485,8 +1525,12 @@ def get_series_data():
 
 
 # ── Extra stats ───────────────────────────────────────────────────────────────
-def _adjusted_day_totals(since=None):
+def _adjusted_day_totals(since=None, until=None):
     """{date: (adj_chars, adj_secs)} applying GSM rollover attribution.
+
+    `until` bounds the window above (inclusive) for callers that need a window
+    ending in the past, e.g. the previous-period comparison. It is clamped to
+    logical today regardless, so a caller can never widen past the clamp.
 
     Net-adjustment-per-day pattern (see CLAUDE.md): a logical day's GSM
     chars/time are split across two calendar session_dates during the rollover
@@ -1496,6 +1540,8 @@ def _adjusted_day_totals(since=None):
     rollover_dates so a fully-displaced day still appears; clamped to logical
     today so rollover-window future-dated rows don't leak."""
     _, today = window_bounds()
+    if until and until < today:
+        today = until          # narrow only; never widen past logical today
     where, params = "", []
     if since:
         where = "WHERE session_date>=?"

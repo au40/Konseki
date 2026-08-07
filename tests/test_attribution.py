@@ -327,3 +327,72 @@ class TestWindowClamp:
         since, today = db.window_bounds(7)
         assert today == db.get_today()
         assert since == seed.day(6)
+
+
+# ── M3 #8: the previous-period comparison ──────────────────────────────────
+class TestPrevRange:
+    """A new backend query, so it runs the standing checklist: it must apply
+    both overlays and clamp, and it must agree with the current-period number
+    it will be displayed next to."""
+
+    def test_window_is_the_period_immediately_before(self, seed, db):
+        # current 7d window is days 0..6; the prior one is days 7..13
+        seed.gsm(seed.day(2), chars=1_000, secs=600, game_id="g1")     # current
+        seed.gsm(seed.day(9), chars=5_000, secs=3000, game_id="g1")    # prior
+        seed.gsm(seed.day(20), chars=9_999, secs=9_999, game_id="g1")  # older still
+
+        assert db.get_range_totals(7)[:2] == (1_000, 600)
+        assert db.get_prev_range_totals(7)[:2] == (5_000, 3000)
+
+    def test_boundaries_are_inclusive_and_do_not_overlap(self, seed, db):
+        seed.gsm(seed.day(6), chars=1, secs=1, game_id="g1")    # last day of current
+        seed.gsm(seed.day(7), chars=2, secs=2, game_id="g1")    # first day of prior
+        seed.gsm(seed.day(13), chars=4, secs=4, game_id="g1")   # last day of prior
+        seed.gsm(seed.day(14), chars=8, secs=8, game_id="g1")   # just outside
+
+        assert db.get_range_totals(7)[0] == 1
+        assert db.get_prev_range_totals(7)[0] == 2 + 4
+
+    def test_applies_the_manual_overlay(self, seed, db):
+        seed.gsm(seed.day(9), chars=5_000, secs=3000, game_id="g1")
+        assert db.get_prev_range_totals(7)[1] == 3000
+        seed.shave(seed.day(9), "g1", -600)
+        assert db.get_prev_range_totals(7)[1] == 2400
+
+    def test_applies_rollover_attribution(self, seed, db):
+        """A displacement inside the prior window relabels days but conserves
+        the window total."""
+        seed.gsm(seed.day(9), chars=5_000, secs=3000, game_id="g1")
+        before = db.get_prev_range_totals(7)
+        seed.displace(seed.day(10), seed.day(9), "g1", 2_000, 1200)
+        assert db.get_prev_range_totals(7)[:2] == before[:2]
+
+    def test_displacement_across_the_boundary_moves_between_windows(self, seed, db):
+        """Reading on day 7 (prior window) displaced to day 6 (current window)
+        must leave one and land in the other — no double count, no loss."""
+        seed.gsm(seed.day(7), chars=4_000, secs=2400, game_id="g1")
+        cur_before = db.get_range_totals(7)[0]
+        prev_before = db.get_prev_range_totals(7)[0]
+        seed.displace(seed.day(6), seed.day(7), "g1", 4_000, 2400)
+        assert db.get_range_totals(7)[0] == cur_before + 4_000
+        assert db.get_prev_range_totals(7)[0] == prev_before - 4_000
+
+    def test_all_range_has_no_previous_period(self, seed, db):
+        seed.gsm(seed.day(2), chars=1_000, secs=600, game_id="g1")
+        assert db.get_prev_range_totals(None) == (0, 0.0, 0)
+        assert db.get_prev_range_speed_basis(None) == (0, 0.0)
+
+    def test_speed_basis_divides_like_the_displayed_figure(self, seed, db):
+        """cph delta must come from summed chars over summed secs."""
+        seed.gsm(seed.day(9), chars=10_000, secs=3_600, game_id="g1")
+        seed.gsm(seed.day(10), chars=1_000, secs=36_000, game_id="g1")
+        c, s = db.get_prev_range_speed_basis(7)
+        assert round(c / (s / 3600)) == 1_000, "11000 chars over 11h"
+
+    def test_until_clamp_never_widens_past_logical_today(self, seed, db):
+        """_adjusted_day_totals gained an `until` argument for this; it must only
+        ever narrow the window, never reach past the clamp."""
+        seed.gsm(seed.day(0), chars=1_000, secs=600, game_id="g1")
+        seed.gsm(seed.day(-3), chars=9_999, secs=9_999, game_id="g1")   # future
+        tot = db._adjusted_day_totals(seed.day(10), seed.day(-5))
+        assert seed.day(-3) not in tot
