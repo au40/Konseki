@@ -42,8 +42,8 @@ import catalog
 import devlog
 import singleton
 from db import (
-    APP_NAME, DB_PATH, SESSIONS_DIR,
-    init_db, scan_existing_files,
+    APP_NAME, DB_PATH,
+    init_db,
     get_setting, set_setting, get_today,
     get_today_stats, get_weekly_summary, get_all_time_totals, get_range_totals,
     get_prev_range_totals, get_prev_range_speed_basis,
@@ -54,6 +54,7 @@ from db import (
     get_manual_time_adjust, set_manual_time_adjust, get_manual_time_adjusts_for_date,
     get_manual_time_adjusts_all,
     get_media_stats, get_media_shelf, get_media_titles, get_series_data,
+    get_title_streams, get_title_speed_distributions, get_activity_trend,
     get_extra_stats, get_range_extra_stats,
     db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
@@ -86,44 +87,6 @@ def _make_tray_image():
 
 
 # ── File watchers ─────────────────────────────────────────────────────────────
-class SessionHandler(FileSystemEventHandler):
-    def __init__(self, cb, debounce_secs=1.0):
-        self.cb = cb
-        self._debounce_secs = debounce_secs
-        self._timer = None
-        self._lock = threading.Lock()
-        self._pending = set()
-
-    def _schedule(self, path):
-        with self._lock:
-            self._pending.add(path)
-            if self._timer:
-                self._timer.cancel()
-            t = threading.Timer(self._debounce_secs, self._flush)
-            t.daemon = True
-            t.start()
-            self._timer = t
-
-    def _flush(self):
-        with self._lock:
-            paths = list(self._pending)
-            self._pending.clear()
-        notified = False
-        for path in paths:
-            if db.ingest_session_file(path):
-                notified = True
-        if notified:
-            self.cb()
-
-    def on_created(self, e):
-        if not e.is_directory and e.src_path.endswith(".json"):
-            self._schedule(e.src_path)
-
-    def on_modified(self, e):
-        if not e.is_directory and e.src_path.endswith(".json"):
-            self._schedule(e.src_path)
-
-
 class GsmWalHandler(FileSystemEventHandler):
     """Watches GSM's WAL file; triggers a GSM pull after writes settle.
 
@@ -354,6 +317,16 @@ class Api:
                                 for d, s, c in daily],
             "activity":        [{"type": a[0], "seconds": a[1]} for a in activity],
             "titles":          [{"title": t[0], "hours": t[1]} for t in titles],
+        }
+
+    def get_showcase(self):
+        """The three lifetime views on the Stats page, in one round trip."""
+        return {
+            # All-time by default: this sits under a "Lifetime" heading, so
+            # nothing here truncates the history or hides a title you read.
+            "streams":  get_title_streams(None),
+            "speeds":   get_title_speed_distributions(5, None),
+            "activity": get_activity_trend(None),
         }
 
     def get_media_shelf(self):
@@ -1204,9 +1177,6 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def get_sessions_dir(self):
-        return str(SESSIONS_DIR)
-
     def get_all_settings(self):
         from ext_server import _get_or_create_token, _get_port
         return {
@@ -1290,7 +1260,6 @@ def main():
 
     init_db()
     catalog.init_catalog_db()
-    scan_existing_files()
     backup.ensure_backup()
     backup.schedule_backups()
 
@@ -1321,12 +1290,6 @@ def main():
     # Answer duplicate launches by raising this window (pings queued during the
     # startup work above are handled as soon as the loop starts).
     lock.serve(win.show)
-
-    # Sessions directory watcher (existing)
-    handler  = SessionHandler(api._notify)
-    observer = Observer()
-    observer.schedule(handler, str(SESSIONS_DIR), recursive=False)
-    observer.start()
 
     # GSM WAL watcher — fires pull when GSM writes to its database
     appdata     = os.getenv("APPDATA") or os.path.expanduser("~/.config")
@@ -1405,8 +1368,6 @@ def main():
             icon=str(app_icon) if app_icon.exists() else None,
         )
     finally:
-        observer.stop()
-        observer.join()
         if gsm_observer:
             gsm_observer.stop()
             gsm_observer.join()

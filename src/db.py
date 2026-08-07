@@ -15,7 +15,6 @@ from pathlib import Path
 # ── Config ────────────────────────────────────────────────────────────────────
 APP_NAME     = "Konseki"
 DATA_DIR     = Path(os.environ.get("IMMERSION_TRACKER_DATA_DIR") or (Path.home() / "immersion-tracker"))
-SESSIONS_DIR = DATA_DIR / "sessions"
 DB_PATH      = DATA_DIR / "tracker.db"
 
 SAFE_METRICS  = {'time_seconds', 'chars_read', 'lines_read'}
@@ -24,7 +23,6 @@ BUILTIN_CATS  = ['Reading', 'Listening', 'Watching', 'Speaking', 'Vocabulary', '
 # ── Database setup ────────────────────────────────────────────────────────────
 def init_db():
     DATA_DIR.mkdir(exist_ok=True)
-    SESSIONS_DIR.mkdir(exist_ok=True)
     con = sqlite3.connect(DB_PATH)
 
     con.execute("""
@@ -60,12 +58,11 @@ def init_db():
         if col_name not in cols:
             con.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
 
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS ingested_files (
-            filepath    TEXT PRIMARY KEY,
-            ingested_at TEXT NOT NULL
-        )
-    """)
+    # Obsolete: the sessions/ drop-folder pipeline is gone. It existed to
+    # de-duplicate JSON files ingested from disk; every import path now writes
+    # to `sessions` directly, so nothing reads or writes this. Dropped on sight,
+    # same as the pre-per-game manual_time_adjust shape below.
+    con.execute("DROP TABLE IF EXISTS ingested_files")
 
     con.execute("""
         CREATE TABLE IF NOT EXISTS settings (
@@ -732,56 +729,6 @@ def get_manual_secs_by_title():
 
 
 # ── Ingestion ─────────────────────────────────────────────────────────────────
-def already_ingested(fp):
-    con = sqlite3.connect(DB_PATH)
-    r   = con.execute("SELECT 1 FROM ingested_files WHERE filepath=?", (fp,)).fetchone()
-    con.close()
-    return r is not None
-
-def mark_ingested(fp):
-    con = sqlite3.connect(DB_PATH)
-    con.execute("INSERT OR IGNORE INTO ingested_files VALUES (?,?)",
-                (fp, datetime.now().isoformat()))
-    con.commit()
-    con.close()
-
-def ingest_session_file(fp):
-    if already_ingested(fp):
-        return False
-    try:
-        data = json.load(open(fp, encoding="utf-8"))
-        con  = sqlite3.connect(DB_PATH)
-        con.execute("""
-            INSERT INTO sessions
-              (source,title,activity_type,session_date,started_at,ended_at,
-               chars_read,lines_read,time_seconds,reading_speed,sentences_read,
-               cards_mined,game_id,raw_file,ingested_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            data.get("source", "unknown"),
-            data.get("title", ""),
-            data.get("activity_type", "Reading"),
-            data.get("session_date", data.get("date", str(date.today()))),
-            data.get("started_at"),
-            data.get("ended_at"),
-            int(data.get("chars_read", data.get("characters_read", 0))),
-            int(data.get("lines_read", 0)),
-            float(data.get("time_seconds", data.get("total_time_seconds", 0))),
-            float(data.get("reading_speed", 0)),
-            int(data.get("sentences_read", 0)),
-            int(data.get("cards_mined", 0)),
-            data.get("game_id"),
-            os.path.basename(fp),
-            datetime.now().isoformat(),
-        ))
-        con.commit()
-        con.close()
-        mark_ingested(fp)
-        return True
-    except Exception as e:
-        print(f"[ingest] {fp}: {e}")
-        return False
-
 def insert_manual_session(atype, minutes, title, session_date, chars=0):
     con = sqlite3.connect(DB_PATH)
     con.execute("""
@@ -855,11 +802,6 @@ def import_csv_file(fp):
     except Exception as e:
         print(f"[csv] {e}")
     return imported, skipped
-
-def scan_existing_files():
-    return sum(1 for f in sorted(SESSIONS_DIR.glob("*.json"))
-               if ingest_session_file(str(f)))
-
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 def _q(sql, *args):
@@ -1503,6 +1445,224 @@ def _title_recent_speed(daily_map, reading_days=7):
     c = sum(daily_map[d][0] for d in active)
     s = sum(daily_map[d][1] for d in active)
     return (c / (s / 3600)) if (s > 0 and c > 0) else 0
+
+
+def _series_grouping():
+    """(title -> group key, group key -> display label) for the lifetime views.
+
+    A series is effectively one work split across volumes, so the lifetime charts
+    treat it as a single entity: one band in the stacked area, one row in the
+    speed distributions. Keeping members separate fragmented a series into
+    near-identical slivers and made a long series dominate the legend.
+
+    Group keys are namespaced (`series:<id>`) so a series can never collide with
+    a real title. Titles not in any series map to themselves."""
+    aliases = _get_aliases()
+    labels = {}
+    to_group = {}
+    for sid, name in _q("SELECT id, COALESCE(name, '') FROM series"):
+        key = f"series:{sid}"
+        members = [t for (t,) in _q(
+            "SELECT title FROM series_members WHERE series_id=? "
+            "ORDER BY position ASC, added_at ASC", sid)]
+        if not members:
+            continue
+        # Series created by dragging one card onto another have name=NULL, and
+        # the whole app names those after their first member (see
+        # get_series_data). Mirror that instead of inventing a placeholder.
+        labels[key] = name or aliases.get(members[0], members[0])
+        for t in members:
+            to_group[t] = key
+    return to_group, labels
+
+
+def _group_title_daily(daily, to_group):
+    """Merge a {title: {date: [chars, secs]}} map onto series group keys.
+
+    Merging happens at the DAY level, before any speed is derived — so a day
+    spent on two volumes of the same series yields one day whose speed is the
+    combined chars over the combined secs. Deriving per volume and averaging
+    would break the totals-first rule."""
+    out = {}
+    for t, m in daily.items():
+        key = to_group.get(t, t)
+        dst = out.setdefault(key, {})
+        for d, (c, s) in m.items():
+            cell = dst.setdefault(d, [0, 0])
+            cell[0] += c
+            cell[1] += s
+    return out
+
+
+def _week_start(iso):
+    """Monday of that date's week, as ISO. Bucketing key for the lifetime views."""
+    d = datetime.strptime(iso, "%Y-%m-%d").date()
+    return (d - timedelta(days=d.weekday())).isoformat()
+
+
+def get_title_streams(days=None, min_share=0.005):
+    """Stacked-area data: characters per title per week over the window.
+
+    {"dates": [...], "series": [{"title", "display_title", "values", "other_count"}]}
+
+    The "story of my immersion" chart — you can watch a title start, dominate,
+    taper and hand off. Weekly buckets: daily would be 1px noise over years, and
+    monthly collapses a title read across a month boundary into one blob.
+
+    Inclusion is by SHARE, not a top-N cap: every title worth at least
+    `min_share` of lifetime characters (default 0.5%) gets its own band, so a
+    chart called "what you were reading" actually shows what you read. Only true
+    dust — a title you sampled once — collapses into "Other", which reports how
+    many titles it covers. An earlier cut kept a flat top 8, which buried real
+    titles you'd spent weeks on. Built on _title_daily, so both overlays apply."""
+    to_group, labels = _series_grouping()
+    daily = _group_title_daily(_title_daily(days), to_group)
+    if not daily:
+        return {"dates": [], "series": []}
+
+    totals = {t: sum(c for c, s in m.values()) for t, m in daily.items()}
+    totals = {t: v for t, v in totals.items() if v > 0}
+    if not totals:
+        return {"dates": [], "series": []}
+
+    grand  = sum(totals.values()) or 1
+    ranked = sorted(totals, key=lambda t: totals[t], reverse=True)
+    keep   = {t for t in ranked if totals[t] / grand >= min_share}
+    if not keep:                      # everything is dust — show the biggest anyway
+        keep = {ranked[0]}
+    rest = set(ranked) - keep
+
+    weeks = {}
+    for t, m in daily.items():
+        for d, (c, s) in m.items():
+            if c <= 0:
+                continue
+            key = t if t in keep else "Other"
+            weeks.setdefault(_week_start(d), {}).setdefault(key, 0)
+            weeks[_week_start(d)][key] += c
+
+    if not weeks:
+        return {"dates": [], "series": []}
+
+    # Dense weekly axis — gaps must render as zero, not as a skipped week, or the
+    # area silently compresses a hiatus into nothing.
+    first = datetime.strptime(min(weeks), "%Y-%m-%d").date()
+    last  = datetime.strptime(max(weeks), "%Y-%m-%d").date()
+    dates, cur = [], first
+    while cur <= last:
+        dates.append(cur.isoformat())
+        cur += timedelta(days=7)
+
+    aliases = _get_aliases()
+    order = [t for t in ranked if t in keep] + (["Other"] if rest else [])
+    series = [
+        {
+            "title":         t,
+            "display_title": (f"Other ({len(rest)} title{'s' if len(rest) != 1 else ''})"
+                              if t == "Other" else labels.get(t, aliases.get(t, t))),
+            "values":        [weeks.get(w, {}).get(t, 0) for w in dates],
+            "other_count":   len(rest) if t == "Other" else 0,
+        }
+        for t in order
+    ]
+    return {"dates": dates, "series": series}
+
+
+def _quantile(sorted_vals, q):
+    """Linear-interpolation quantile, same convention as numpy's default."""
+    if not sorted_vals:
+        return 0.0
+    if len(sorted_vals) == 1:
+        return float(sorted_vals[0])
+    pos = (len(sorted_vals) - 1) * q
+    lo  = int(pos)
+    hi  = min(lo + 1, len(sorted_vals) - 1)
+    frac = pos - lo
+    return float(sorted_vals[lo]) * (1 - frac) + float(sorted_vals[hi]) * frac
+
+
+def get_title_speed_distributions(min_days=5, top=None):
+    """Per-title reading-speed spread, for box plots.
+
+    Per-day speed lines show a title's trend but not its spread; this answers
+    "which titles are actually hard for me" in one view. Each day's speed is that
+    day's chars over that day's secs — totals first, then divide, per day — and
+    `mean` is the title's overall chars over overall secs, NOT the average of the
+    daily speeds (those differ whenever daily durations differ).
+
+    Titles with fewer than `min_days` reading days are excluded: a box plot over
+    two points is noise. Ordered by median, slowest first, so the hard ones lead.
+    `top=None` shows every qualifying title — the chart grows instead of hiding
+    them; the caller sizes the canvas to the row count."""
+    to_group, labels = _series_grouping()
+    daily = _group_title_daily(_title_daily(None), to_group)
+    aliases = _get_aliases()
+    out = []
+    for t, m in daily.items():
+        speeds = sorted(c / (s / 3600) for c, s in m.values() if s > 0 and c > 0)
+        if len(speeds) < min_days:
+            continue
+        tot_c = sum(c for c, s in m.values() if s > 0 and c > 0)
+        tot_s = sum(s for c, s in m.values() if s > 0 and c > 0)
+        out.append({
+            "title":         t,
+            "display_title": labels.get(t, aliases.get(t, t)),
+            "days":          len(speeds),
+            "min":           speeds[0],
+            "q1":            _quantile(speeds, 0.25),
+            "median":        _quantile(speeds, 0.50),
+            "q3":            _quantile(speeds, 0.75),
+            "max":           speeds[-1],
+            "mean":          (tot_c / (tot_s / 3600)) if tot_s > 0 else 0,
+        })
+    out.sort(key=lambda r: r["median"])
+    return out[:top] if top else out
+
+
+def get_activity_trend(months=None):
+    """Activity-type share per month — the donut's question asked over time.
+
+    [{"month": "YYYY-MM", "types": {type: secs}}], oldest first. The donut shows
+    the current range's mix; this shows how the mix has SHIFTED, which is the
+    more interesting question. Built from get_daily_activity_series, which
+    already folds the per-day overlay into the Reading slice, so it can't drift
+    from the donut or the daily bars.
+
+    `months=None` (the default) means the whole history — this sits under a
+    "Lifetime" heading, so it starts at the first session. An earlier cut capped
+    at 24 months via `31 * (months - 1)` days, which both truncated long
+    histories and, because 31-day months overshoot, began on an arbitrary month
+    rather than a meaningful one."""
+    _, today = window_bounds()
+    start = None
+    if months:
+        d = get_today_date().replace(day=1)
+        for _ in range(months - 1):
+            d = (d - timedelta(days=1)).replace(day=1)
+        start = d.isoformat()
+
+    buckets = {}
+    for d, types in get_daily_activity_series(None):
+        if (start and d < start) or d > today:
+            continue
+        b = buckets.setdefault(d[:7], {})
+        for t, s in types.items():
+            b[t] = b.get(t, 0) + s
+
+    if not buckets:
+        return []
+    # Dense month axis: a month with no activity must be an empty column, not a
+    # skipped one, or a gap silently compresses the timeline.
+    first = min(buckets)
+    last  = max(buckets)
+    out, y, m = [], int(first[:4]), int(first[5:7])
+    while f"{y:04d}-{m:02d}" <= last:
+        key = f"{y:04d}-{m:02d}"
+        out.append({"month": key, "types": buckets.get(key, {})})
+        m += 1
+        if m > 12:
+            m, y = 1, y + 1
+    return out
 
 
 def get_media_shelf():

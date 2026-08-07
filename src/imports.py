@@ -16,8 +16,8 @@ import requests
 from urllib.parse import unquote
 from pathlib import Path
 from datetime import datetime, date, timedelta
-from db import (DB_PATH, SESSIONS_DIR, get_today, get_today_date, _q1,
-                ingest_session_file, in_rollover_window, upsert_gsm_attribution,
+from db import (DB_PATH, get_today, get_today_date, _q1,
+                in_rollover_window, upsert_gsm_attribution,
                 refresh_gsm_attribution_tail, get_setting)
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -663,19 +663,19 @@ def pull_gsm_api_only(url=None):
             "cards_mined":   0,
         }
 
-        # One file + one session row PER GAME per real date (matching the
+        # One session row PER GAME per real date (matching the
         # sessions(game_id, session_date) unique index). Scoping by game_id is what
         # lets two different games read on the same real date coexist — the old
-        # date-only file/DELETE kept only the last game pulled, which erased an
+        # date-only DELETE kept only the last game pulled, which erased an
         # earlier game's session (badly so across the rollover boundary; see CLAUDE.md).
-        safe_gid = re.sub(r'[^A-Za-z0-9_.-]', '_', game_id) if game_id else ''
-        out = SESSIONS_DIR / (f"gsm_{real_date}_{safe_gid}.json" if safe_gid
-                              else f"gsm_{real_date}.json")
-        json.dump(s, open(out, "w", encoding="utf-8"), indent=2)
-
-        # Clear old entry so re-pulls always refresh with latest data
+        #
+        # Delete-then-insert, in that order: the unique index is what makes a
+        # racing second pull collide instead of double-counting (see init_db).
+        # This used to round-trip through a JSON file in the sessions folder —
+        # written, then immediately read back by ingest_session_file one line
+        # later. The file was never consulted again, so the pull now inserts
+        # directly. `raw_file` stays NULL, matching the GSM history path.
         con = sqlite3.connect(DB_PATH)
-        con.execute("DELETE FROM ingested_files WHERE filepath=?", (str(out),))
         if game_id:
             con.execute(
                 "DELETE FROM sessions WHERE source='gsm' AND session_date=? AND game_id=?",
@@ -687,10 +687,20 @@ def pull_gsm_api_only(url=None):
                 "AND (game_id IS NULL OR game_id='')",
                 (real_date,)
             )
+        con.execute("""
+            INSERT INTO sessions
+              (source,title,activity_type,session_date,chars_read,lines_read,
+               time_seconds,reading_speed,sentences_read,cards_mined,game_id,
+               raw_file,ingested_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?)
+        """, (
+            s["source"], s["title"], s["activity_type"], s["session_date"],
+            s["chars_read"], s["lines_read"], s["time_seconds"],
+            s["reading_speed"], 0, s["cards_mined"], s["game_id"],
+            datetime.now().isoformat(),
+        ))
         con.commit()
         con.close()
-
-        ingest_session_file(str(out))
 
         # If we're in the rollover window, snapshot today's GSM totals for attribution to
         # yesterday's bucket. Once the rollover hour passes, future pulls fall through to

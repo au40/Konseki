@@ -318,6 +318,27 @@
         <h2>By activity</h2>
         <div class="chart-wrap"><canvas id="chart-donut" height="220"></canvas></div>
       </div>
+
+      <!-- ── Lifetime views ────────────────────────────────────────────────
+           These three ignore the range selector on purpose: they answer
+           all-time questions ("the story so far", "which titles are hard",
+           "how has the mix shifted") that a 30-day window can't. -->
+      <div class="showcase-head">
+        <h2 style="margin:0">Lifetime</h2>
+        <span class="muted" style="font-size:11px">All-time — not affected by the range above</span>
+      </div>
+
+      <h3 class="showcase-sub">What you were reading</h3>
+      <div class="chart-wrap"><canvas id="chart-streams" height="220"></canvas></div>
+
+      <h3 class="showcase-sub">Reading speed by title</h3>
+      <p class="muted showcase-note">Box shows the middle half of your daily speeds; the line inside is the
+        median, whiskers are the slowest and fastest days. Slowest median first.</p>
+      <div class="chart-wrap"><canvas id="chart-speed-dist" height="240"></canvas></div>
+
+      <h3 class="showcase-sub">Activity mix over time</h3>
+      <div class="chart-wrap"><canvas id="chart-activity-trend" height="200"></canvas></div>
+
       <div style="height:24px"></div>
     </div>
 
@@ -837,14 +858,6 @@
             <button class="btn btn-outline btn-sm" onclick="copyExtField('ext-token')">Copy</button>
             <button class="btn btn-outline btn-sm" onclick="rerollExtToken()">Reroll</button>
           </div>
-        </div>
-      </div>
-
-      <div class="settings-section">
-        <div class="card">
-          <h3>Sessions folder</h3>
-          <p id="sessions-dir" style="color:var(--accent);font-size:12px;margin-bottom:8px">…</p>
-          <p class="muted">Drop any *.json session file here and it will be ingested automatically.</p>
         </div>
       </div>
 

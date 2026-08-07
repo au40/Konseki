@@ -39,10 +39,12 @@ real `source_date` — one pre-rollover (displaced to the prior logical day) and
 after. Without per-game keying, the second game's row inherited the first's
 displacement: the deduction zeroed the post-rollover game and the pre-rollover
 game's row (deleted by the old date-only live pull) was stranded on the wrong
-title. The live pull now keeps one file + one session row **per (real_date,
-game_id)** (matching the `sessions(game_id, session_date)` unique index), and every
+title. The live pull now keeps one session row **per (real_date, game_id)**
+(matching the `sessions(game_id, session_date)` unique index), and every
 per-row/per-title consumer keys the deduction and phantom-title lookup on
-`(source_date, game_id)`. The **net-per-day** helpers (`get_gsm_day_adjustment(s)`)
+`(source_date, game_id)`. The pull deletes that row and re-inserts it in one
+transaction — in that order, because the unique index is what makes a racing
+second pull collide instead of double-counting. The **net-per-day** helpers (`get_gsm_day_adjustment(s)`)
 stay game-agnostic — they sum across games per date, so the extra column doesn't
 change their math. `init_db` migrates the pre-`game_id` shape by backfilling each
 old row's `game_id` from the sole GSM session that lived on its `source_date`.
@@ -121,6 +123,15 @@ the shared `_adjusted_day_totals` helper — reuse it rather than re-deriving.
 - The attribution table is GSM-specific. No other source (ttsu, anki, manual,
   ext) needs it because they don't do live incremental pulls during the
   rollover window.
+- **There is no `sessions/` drop-folder.** Every import path — GSM live pull, GSM
+  history, ttsu, manual, CSV, the browser extension — writes to the `sessions`
+  table directly. The live pull used to `json.dump` a file and read it straight
+  back via `ingest_session_file` one line later; that round trip, the folder
+  watcher, the startup scan, the `ingested_files` de-dup table and
+  `tools/gsm_export.py` are all gone (`init_db` drops the table on sight). Don't
+  reintroduce a file hop for a new source — insert directly. `sessions.raw_file`
+  survives for schema compatibility but is written `NULL` and read by nothing,
+  same as `cards_mined`.
 
 ## GSM "reopen catch-up" pull — EXPERIMENTAL
 

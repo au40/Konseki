@@ -259,6 +259,14 @@ select:focus { border-color: var(--accent); }
   background: var(--card); border-radius: var(--radius);
   padding: 16px; position: relative;
 }
+/* Lifetime section on the Stats page — deliberately set apart, because these
+   three charts ignore the range selector above them. */
+.showcase-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+                 margin: 28px 0 4px; padding-top: 18px; border-top: 1px solid var(--grid); }
+.showcase-sub  { font-size: 13px; font-weight: 600; color: var(--text);
+                 margin: 18px 0 6px; }
+.showcase-note { font-size: 11px; margin: -2px 0 8px; }
+
 /* 30-day activity strip. Bars scale to that title's own busiest day, so a
    lightly-read title still shows shape — heights aren't comparable between rows.
    Sits under the shelf progress bar; deliberately NOT on the media cards, where

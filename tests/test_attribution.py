@@ -520,3 +520,293 @@ class TestMediaShelf:
         assert row["pct"] == 100.0
         assert row["remaining"] == 0
         assert row["eta_hours"] == 0
+
+
+# ── M5: the lifetime showcase views ────────────────────────────────────────
+class TestTitleStreams:
+    def test_weekly_buckets_and_dense_axis(self, seed, db):
+        seed.gsm(seed.day(21), chars=1_000, secs=600, game_id="g1", title="A")
+        seed.gsm(seed.day(0),  chars=2_000, secs=600, game_id="g1", title="A")
+        s = db.get_title_streams(None, 8)
+        # Gaps must be present as zero weeks, not skipped, or a hiatus silently
+        # compresses and the area chart lies about the timeline.
+        assert len(s["dates"]) >= 3
+        gaps = [v for v in s["series"][0]["values"] if v == 0]
+        assert gaps, "the quiet weeks between should render as zero"
+        assert sum(s["series"][0]["values"]) == 3_000
+
+    def test_dates_are_mondays_in_order(self, seed, db):
+        seed.gsm(seed.day(10), chars=100, secs=60, game_id="g1", title="A")
+        seed.gsm(seed.day(0), chars=100, secs=60, game_id="g1", title="A")
+        from datetime import datetime as _dt
+        dates = db.get_title_streams(None, 8)["dates"]
+        assert dates == sorted(dates)
+        assert all(_dt.strptime(d, "%Y-%m-%d").weekday() == 0 for d in dates)
+
+    def test_only_true_dust_collapses_into_other(self, seed, db):
+        """Inclusion is by share, not a top-N cap — a title you spent real time
+        on must get its own band however many titles exist."""
+        for i in range(6):
+            seed.gsm(seed.day(3), chars=10_000, secs=600, game_id=f"g{i}", title=f"Big{i}")
+        seed.gsm(seed.day(3), chars=5, secs=60, game_id="gd", title="Dust")
+
+        s = db.get_title_streams(None)
+        names = [x["title"] for x in s["series"]]
+        assert len([n for n in names if n.startswith("Big")]) == 6,             "every substantial title keeps its own band"
+        assert "Other" in names and "Dust" not in names
+        assert next(x for x in s["series"] if x["title"] == "Other")["other_count"] == 1
+        # Nothing may be lost to the residual bucket.
+        assert sum(sum(x["values"]) for x in s["series"]) == 6 * 10_000 + 5
+
+    def test_a_single_dusty_title_still_renders(self, seed, db):
+        seed.gsm(seed.day(3), chars=5, secs=60, game_id="g1", title="Only")
+        assert [x["title"] for x in db.get_title_streams(None)["series"]] == ["Only"]
+
+    def test_applies_attribution(self, seed, db):
+        src, roll = seed.day(10), seed.day(11)
+        seed.gsm(src, chars=10_000, secs=3600, game_id="g1", title="A")
+        before = sum(sum(x["values"]) for x in db.get_title_streams(None, 8)["series"])
+        seed.displace(roll, src, "g1", chars=4_000, secs=1200)
+        after = sum(sum(x["values"]) for x in db.get_title_streams(None, 8)["series"])
+        assert before == after, "a displacement relabels, never creates or destroys"
+
+    def test_empty_db(self, seed, db):
+        assert db.get_title_streams(None, 8) == {"dates": [], "series": []}
+
+
+class TestSpeedDistributions:
+    def test_quantiles_on_a_known_set(self, seed, db):
+        # speeds 1000..5000/h on five days (1h each, chars = the speed)
+        for i, c in enumerate([1000, 2000, 3000, 4000, 5000]):
+            seed.gsm(seed.day(10 + i), chars=c, secs=3600, game_id="g1", title="A")
+        r = db.get_title_speed_distributions(min_days=5)[0]
+        assert r["days"] == 5
+        assert round(r["min"]) == 1000
+        assert round(r["q1"]) == 2000
+        assert round(r["median"]) == 3000
+        assert round(r["q3"]) == 4000
+        assert round(r["max"]) == 5000
+
+    def test_mean_is_totals_not_the_average_of_daily_speeds(self, seed, db):
+        """The distinction that matters: with unequal durations these differ."""
+        seed.gsm(seed.day(10), chars=10_000, secs=3_600, game_id="g1", title="A")
+        for i in range(4):
+            seed.gsm(seed.day(11 + i), chars=1_000, secs=36_000, game_id="g1", title="A")
+        r = db.get_title_speed_distributions(min_days=5)[0]
+        overall = 14_000 / ((3_600 + 4 * 36_000) / 3600)
+        assert round(r["mean"]) == round(overall)
+        assert round(r["mean"]) != round(sum([10_000, 100, 100, 100, 100]) / 5)
+
+    def test_every_qualifying_title_is_returned(self, seed, db):
+        """No top-N cap: the chart grows instead of hiding titles."""
+        for g in range(15):
+            for i in range(5):
+                seed.gsm(seed.day(10 + i), chars=1_000 + g, secs=3600,
+                         game_id=f"g{g}", title=f"T{g}")
+        assert len(db.get_title_speed_distributions(min_days=5)) == 15
+
+    def test_thin_titles_are_excluded(self, seed, db):
+        for i in range(3):
+            seed.gsm(seed.day(10 + i), chars=1_000, secs=3600, game_id="g1", title="A")
+        assert db.get_title_speed_distributions(min_days=5) == []
+        assert len(db.get_title_speed_distributions(min_days=3)) == 1
+
+    def test_sorted_slowest_median_first(self, seed, db):
+        for i in range(5):
+            seed.gsm(seed.day(10 + i), chars=9_000, secs=3600, game_id="g1", title="Fast")
+            seed.gsm(seed.day(10 + i), chars=1_000, secs=3600, game_id="g2", title="Slow")
+        rows = db.get_title_speed_distributions(min_days=5)
+        assert [r["title"] for r in rows] == ["Slow", "Fast"]
+
+    def test_chars_less_days_do_not_enter_the_distribution(self, seed, db):
+        for i in range(5):
+            seed.gsm(seed.day(10 + i), chars=2_000, secs=3600, game_id="g1", title="A")
+        seed.gsm(seed.day(20), chars=0, secs=7200, game_id="g1", title="A")
+        r = db.get_title_speed_distributions(min_days=5)[0]
+        assert r["days"] == 5, "a chars-less day has no speed and must not count"
+
+    def test_quantile_helper_edges(self, seed, db):
+        assert db._quantile([], 0.5) == 0.0
+        assert db._quantile([7], 0.5) == 7.0
+        assert db._quantile([0, 10], 0.5) == 5.0
+
+
+class TestActivityTrend:
+    def test_starts_at_the_first_session_not_a_fixed_window(self, seed, db):
+        """It sits under a "Lifetime" heading. An earlier cut capped at 24
+        months via `31 * (months-1)` days, which truncated long histories and
+        started on an arbitrary month because 31-day months overshoot."""
+        seed.gsm(seed.day(1200), chars=1, secs=60, game_id="g1", title="Old")
+        seed.gsm(seed.day(1), chars=1, secs=60, game_id="g1", title="New")
+        rows = db.get_activity_trend(None)
+        assert rows[0]["month"] == seed.day(1200)[:7], "starts at the first session"
+        assert rows[-1]["month"] == seed.day(1)[:7]
+
+    def test_month_axis_is_dense(self, seed, db):
+        seed.gsm(seed.day(200), chars=1, secs=60, game_id="g1", title="A")
+        seed.gsm(seed.day(1), chars=1, secs=60, game_id="g1", title="A")
+        rows = db.get_activity_trend(None)
+        assert any(not r["types"] for r in rows), "quiet months are empty columns, not gaps"
+        months = [r["month"] for r in rows]
+        assert months == sorted(months) and len(set(months)) == len(months)
+
+    def test_explicit_month_cap_still_works(self, seed, db):
+        seed.gsm(seed.day(400), chars=1, secs=60, game_id="g1", title="A")
+        seed.gsm(seed.day(1), chars=1, secs=60, game_id="g1", title="A")
+        assert len(db.get_activity_trend(3)) <= 3
+
+    def test_groups_by_month_and_keeps_types(self, seed, db):
+        seed.gsm(seed.day(1), chars=1_000, secs=3600, game_id="g1", title="A")
+        seed.session(seed.day(1), chars=0, secs=1800, source="manual",
+                     title="Pod", atype="Listening")
+        rows = db.get_activity_trend(24)
+        assert rows, "should produce at least this month"
+        last = rows[-1]["types"]
+        assert last.get("Reading") == 3600
+        assert last.get("Listening") == 1800
+
+    def test_manual_shave_reaches_the_reading_slice(self, seed, db):
+        seed.gsm(seed.day(1), chars=1_000, secs=3600, game_id="g1", title="A")
+        seed.shave(seed.day(1), "g1", -600)
+        assert db.get_activity_trend(24)[-1]["types"]["Reading"] == 3000
+
+    def test_months_are_ordered_oldest_first(self, seed, db):
+        seed.gsm(seed.day(1), chars=1, secs=60, game_id="g1", title="A")
+        seed.gsm(seed.day(80), chars=1, secs=60, game_id="g1", title="A")
+        months = [r["month"] for r in db.get_activity_trend(24)]
+        assert months == sorted(months)
+
+    def test_empty_db(self, seed, db):
+        assert db.get_activity_trend(24) == []
+
+
+# ── M5 follow-up: series are one entity in the lifetime views ──────────────
+class TestSeriesGrouping:
+    """A series is one work split across volumes. Keeping members separate
+    fragmented it into near-identical slivers and let a long series dominate the
+    legend, so the lifetime charts merge them."""
+
+    def _two_volumes(self, seed):
+        seed.gsm(seed.day(10), chars=6_000, secs=3600, game_id="g1", title="Vol 1")
+        seed.gsm(seed.day(9),  chars=4_000, secs=3600, game_id="g2", title="Vol 2")
+
+    def test_streams_show_one_band_per_series(self, seed, db):
+        self._two_volumes(seed)
+        assert len(db.get_title_streams(None)["series"]) == 2   # ungrouped
+        seed.series("My Series", "Vol 1", "Vol 2")
+        s = db.get_title_streams(None)["series"]
+        assert len(s) == 1
+        assert s[0]["display_title"] == "My Series"
+        assert sum(s[0]["values"]) == 10_000, "both volumes, nothing lost"
+
+    def test_grouping_does_not_change_the_total(self, seed, db):
+        self._two_volumes(seed)
+        before = sum(sum(x["values"]) for x in db.get_title_streams(None)["series"])
+        seed.series("My Series", "Vol 1", "Vol 2")
+        after = sum(sum(x["values"]) for x in db.get_title_streams(None)["series"])
+        assert before == after
+
+    def test_ungrouped_titles_are_untouched(self, seed, db):
+        self._two_volumes(seed)
+        seed.gsm(seed.day(8), chars=5_000, secs=3600, game_id="g3", title="Standalone")
+        seed.series("My Series", "Vol 1", "Vol 2")
+        names = {x["display_title"] for x in db.get_title_streams(None)["series"]}
+        assert names == {"My Series", "Standalone"}
+
+    def test_same_day_volumes_merge_before_speed_is_derived(self, seed, db):
+        """The reason merging happens at the DAY level: a day spent on two
+        volumes must yield ONE day whose speed is combined chars over combined
+        secs, not two days averaged."""
+        # Durations differ deliberately: with equal ones the combined speed and
+        # the mean of the two coincide and the assertion proves nothing.
+        #   Vol 1  9000 chars /  1h  -> 9000/h
+        #   Vol 2  1000 chars / 10h  ->  100/h
+        #   combined 10000 / 11h     ->  909/h   <- the only correct answer
+        #   mean of the two          -> 4550/h   <- what splitting would give
+        d = seed.day(10)
+        seed.gsm(d, chars=9_000, secs=3_600, game_id="g1", title="Vol 1")
+        seed.gsm(d, chars=1_000, secs=36_000, game_id="g2", title="Vol 2")
+        for i in range(1, 5):                       # pad to clear min_days
+            seed.gsm(seed.day(10 + i), chars=5_000, secs=3600, game_id="g1", title="Vol 1")
+        seed.series("My Series", "Vol 1", "Vol 2")
+
+        r = db.get_title_speed_distributions(min_days=5)[0]
+        assert r["days"] == 5, "the shared day counts once, not twice"
+        assert round(r["min"]) == 909, "combined chars over combined secs"
+        assert round(r["min"]) != 4_550, "not the mean of the two volumes' speeds"
+
+    def test_speed_rows_use_the_series_name(self, seed, db):
+        for i in range(5):
+            seed.gsm(seed.day(10 + i), chars=2_000, secs=3600, game_id="g1", title="Vol 1")
+        seed.series("My Series", "Vol 1")
+        assert db.get_title_speed_distributions(min_days=5)[0]["display_title"] == "My Series"
+
+    def test_unnamed_series_takes_its_first_member_name(self, seed, db):
+        """Dragging one card onto another creates a series with name=NULL, and
+        the rest of the app names those after their first member (see
+        get_series_data). The lifetime views must match, not invent a
+        placeholder."""
+        self._two_volumes(seed)
+        seed.series(None, "Vol 1", "Vol 2")
+        s = db.get_title_streams(None)["series"]
+        assert s[0]["display_title"] == "Vol 1"
+        assert "Untitled" not in s[0]["display_title"]
+
+    def test_first_member_is_by_position_not_insertion(self, seed, db):
+        seed.gsm(seed.day(10), chars=1_000, secs=600, game_id="g1", title="Zeta")
+        seed.gsm(seed.day(10), chars=1_000, secs=600, game_id="g2", title="Alpha")
+        seed.series(None, "Zeta", "Alpha")          # position 0 is Zeta
+        assert db.get_title_streams(None)["series"][0]["display_title"] == "Zeta"
+
+    def test_an_explicit_name_still_wins(self, seed, db):
+        self._two_volumes(seed)
+        seed.series("Proper Name", "Vol 1", "Vol 2")
+        assert db.get_title_streams(None)["series"][0]["display_title"] == "Proper Name"
+
+    def test_group_keys_cannot_collide_with_a_real_title(self, seed, db):
+        seed.gsm(seed.day(10), chars=1_000, secs=600, game_id="g1", title="Vol 1")
+        sid = seed.series("My Series", "Vol 1")
+        keys = [x["title"] for x in db.get_title_streams(None)["series"]]
+        assert keys == [f"series:{sid}"]
+
+
+# ── Sessions-folder pipeline removal ───────────────────────────────────────
+class TestIngestedFilesDropped:
+    """The sessions/ drop-folder is gone: the GSM pull used to write a JSON and
+    read it straight back one line later, and nothing else used the folder.
+    `ingested_files` only ever de-duplicated those files, so init_db drops it."""
+
+    def test_init_db_drops_a_pre_existing_table(self, seed, db):
+        con = sqlite3.connect(db.DB_PATH)
+        con.execute("CREATE TABLE IF NOT EXISTS ingested_files "
+                    "(filepath TEXT PRIMARY KEY, ingested_at TEXT NOT NULL)")
+        con.execute("INSERT INTO ingested_files VALUES ('old.json', 'x')")
+        con.commit()
+        con.close()
+
+        db.init_db()
+
+        con = sqlite3.connect(db.DB_PATH)
+        rows = con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='ingested_files'"
+        ).fetchall()
+        con.close()
+        assert rows == [], "the obsolete table should be dropped on sight"
+
+    def test_init_db_is_idempotent_without_it(self, seed, db):
+        db.init_db()
+        db.init_db()
+        con = sqlite3.connect(db.DB_PATH)
+        n = con.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
+        con.close()
+        assert n == 0
+
+    def test_the_file_helpers_are_gone(self, seed, db):
+        for name in ("ingest_session_file", "scan_existing_files",
+                     "already_ingested", "mark_ingested", "SESSIONS_DIR"):
+            assert not hasattr(db, name), f"{name} should have been removed"
+
+    def test_sessions_folder_is_no_longer_created(self, seed, db):
+        import os
+        db.init_db()
+        assert not os.path.isdir(os.path.join(str(db.DATA_DIR), "sessions"))

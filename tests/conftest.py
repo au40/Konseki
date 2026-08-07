@@ -39,6 +39,8 @@ _WIPE = (
     "title_aliases",
     "media_char_counts",
     "media_completions",
+    "series",
+    "series_members",
 )
 
 
@@ -86,6 +88,19 @@ class Seed:
     def shave(self, date, game_id, secs_delta, note=None):
         """Manual time overlay. The UI only ever writes negative deltas."""
         self.db.set_manual_time_adjust(date, game_id, secs_delta, note)
+
+    def series(self, name, *titles):
+        """Group titles into a series, as the media page's drag-to-group does."""
+        con = sqlite3.connect(self.db.DB_PATH)
+        cur = con.execute("INSERT INTO series (name, created_at) VALUES (?, datetime('now'))",
+                          (name,))
+        sid = cur.lastrowid
+        for i, t in enumerate(titles):
+            con.execute("INSERT INTO series_members (series_id, title, position, added_at) "
+                        "VALUES (?,?,?,datetime('now'))", (sid, t, i))
+        con.commit()
+        con.close()
+        return sid
 
     def setting(self, key, value):
         self.db.set_setting(key, str(value))

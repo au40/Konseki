@@ -97,6 +97,10 @@ const CAT_PALETTE = [
 ];
 const PALETTE = ['#5B8CFF','#4ECBA0','#FF9F5B','#C78BFF','#FF7BAC','#5BE8C4','#FFD15B','#6B6B8A'];
 const PORTAL_PALETTE = CAT_PALETTE;    // stat-portal per-title colors; 8-cap keeps them distinct
+// Band colors for the lifetime stacked area. Same hues as the portal so a title
+// keeps its identity across views, minus the grey — the residual "Other" band is
+// grey, and a real title landing on that shade would read as the leftovers.
+const STREAM_PALETTE = CAT_PALETTE.filter(c => c !== '#6B6B8A');
 let HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
 
 // Chart colors, read from the theme's CSS custom properties instead of being
@@ -2097,6 +2101,9 @@ function renderStats(d) {
   renderDailyChart(d.daily);
   renderDowChart(d.daily);
   renderDonutChart(d.activity);
+  // All-time views; independent of the range selector, so fetched once and
+  // cached rather than refetched on every range change.
+  renderShowcase();
 }
 
 // ── Charts ─────────────────────────────────────────────────────────────────
@@ -2590,6 +2597,222 @@ function renderDonutChart(activity) {
         legend: { position:'bottom', labels:{color:CT.dim,padding:10,boxWidth:12,boxHeight:12,usePointStyle:true} },
         tooltip: { callbacks: { label: c => `${c.label}: ${fmtTime(c.raw)}` } }
       }
+    }
+  });
+}
+
+// ── Lifetime showcase charts ───────────────────────────────────────────────
+// Three all-time views that deliberately ignore the range selector. Fetched
+// once per Stats load in a single round trip (Api.get_showcase).
+let showcaseCache = null;
+
+async function renderShowcase() {
+  if (!showcaseCache) showcaseCache = await window.pywebview.api.get_showcase();
+  const d = showcaseCache || {};
+  renderStreamsChart(d.streams || { dates: [], series: [] });
+  renderSpeedDistChart(d.speeds || []);
+  renderActivityTrendChart(d.activity || []);
+}
+
+// #10 — stacked area of characters per title per week. Chart.js has no true
+// streamgraph (wiggle baseline) and vendoring a plugin for one chart isn't worth
+// it; a stacked area answers the same question and reads more cleanly anyway.
+// Titles use the same stable hash colors as the stat portal, so a title is the
+// same color here as it is there.
+function renderStreamsChart(s) {
+  if (!s.dates.length) { destroyChart('streams'); setChartEmpty('chart-streams', 'No reading yet'); return; }
+  const labels = s.dates.map(d => d.slice(2).replace(/-/g, '/'));
+  // Bands are stacked adjacently, so two neighbours sharing a color is worse
+  // than a title changing color between views. Start from the stable portal hash
+  // and walk forward only when it would collide with the band below.
+  let prev = null;
+  const datasets = s.series.map(x => {
+    // "Other" is a residual bucket, not a title — keep it neutral so it never
+    // looks like one of the named bands. STREAM_PALETTE therefore drops the grey
+    // that CAT_PALETTE carries, or a real title could hash onto a shade that
+    // reads as the residual.
+    let color;
+    if (x.title === 'Other') {
+      color = CT.dim;
+    } else {
+      const start = paletteIndex(x.title, STREAM_PALETTE.length);
+      color = STREAM_PALETTE[start];
+      for (let i = 0; i < STREAM_PALETTE.length && color === prev; i++) {
+        color = STREAM_PALETTE[(start + i + 1) % STREAM_PALETTE.length];
+      }
+    }
+    prev = color;
+    return {
+      label: x.display_title,
+      data: x.values,
+      borderColor: color,
+      // Solid, not translucent. Stacked bands don't overlap, so transparency
+      // bought nothing — and it made the legend lie: the swatch carries a
+      // full-opacity 1px border ring that dominates a 12px box, so the key read
+      // vivid while the band read dusty. Solid makes swatch and band identical.
+      backgroundColor: color,
+      borderWidth: 1,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      fill: true,
+      tension: 0.3,
+    };
+  });
+  reserveLegendRoom('chart-streams', 'streams', 220, true);
+  upsertChart('streams', 'chart-streams', {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom',
+                  labels: { color: CT.dim, boxWidth: 12, boxHeight: 12, usePointStyle: true } },
+        tooltip: { callbacks: {
+          title: c => `Week of ${s.dates[c[0].dataIndex]}`,
+          label: c => c.raw > 0 ? `${c.dataset.label}: ${fmtChars(Math.round(c.raw))}` : null,
+          footer: c => `Total: ${fmtChars(Math.round(c.reduce((a, x) => a + x.raw, 0)))}`,
+        } },
+      },
+      scales: {
+        x: { grid: { color: CT.grid }, ticks: { color: CT.dim, maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } },
+        y: { stacked: true, grid: { color: CT.grid },
+             ticks: { color: CT.dim, callback: v => fmtChars(v) },
+             afterFit: sc => { sc.width = 62; } },
+      },
+    }
+  });
+}
+
+// #11 — box plots, hand-rolled. Chart.js core has no boxplot and this is an
+// offline app, so rather than vendor a plugin the box is drawn from three
+// floating-bar datasets stacked on the same category:
+//   whisker  thin bar spanning [min, max]
+//   box      full-width bar spanning [q1, q3]
+//   median   hairline bar at the median
+// Horizontal, because title labels need the room.
+function renderSpeedDistChart(rows) {
+  if (!rows.length) {
+    destroyChart('speed-dist');
+    setChartEmpty('chart-speed-dist', 'Needs a few titles with 5+ reading days');
+    return;
+  }
+  const labels = rows.map(r => r.display_title);
+  const colorOf = r => PORTAL_PALETTE[paletteIndex(r.title, PORTAL_PALETTE.length)];
+  // Every qualifying title is shown, so the canvas grows with the list rather
+  // than cramming rows into a fixed height.
+  const cv = document.getElementById('chart-speed-dist');
+  if (cv) {
+    const want = String(Math.max(160, rows.length * 26 + 40));
+    if (cv.getAttribute('height') !== want) {
+      destroyChart('speed-dist');       // Chart.js caches render height at construction
+      cv.setAttribute('height', want);
+    }
+  }
+  // A median hairline needs non-zero width on a linear axis; scale it to the
+  // spread so it stays visible whatever the units.
+  const span = Math.max(...rows.map(r => r.max)) - Math.min(...rows.map(r => r.min)) || 1;
+  const tick = span * 0.004;
+
+  upsertChart('speed-dist', 'chart-speed-dist', {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Range', data: rows.map(r => [r.min, r.max]),
+          backgroundColor: rows.map(r => ctAlpha(colorOf(r), 0.22)),
+          barPercentage: 0.22, categoryPercentage: 0.8, borderSkipped: false },
+        { label: 'Middle half', data: rows.map(r => [r.q1, r.q3]),
+          backgroundColor: rows.map(r => ctAlpha(colorOf(r), 0.65)),
+          borderColor: rows.map(colorOf), borderWidth: 1, borderRadius: 2,
+          barPercentage: 0.72, categoryPercentage: 0.8, borderSkipped: false },
+        { label: 'Median', data: rows.map(r => [r.median - tick, r.median + tick]),
+          backgroundColor: rows.map(() => CT.text),
+          barPercentage: 0.72, categoryPercentage: 0.8, borderSkipped: false },
+      ],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: c => rows[c[0].dataIndex].display_title,
+          label: () => null,
+          afterBody: c => {
+            const r = rows[c[0].dataIndex];
+            const n = v => fmtChars(Math.round(v)) + '/h';
+            return [
+              `median ${n(r.median)}`,
+              `middle half ${n(r.q1)} – ${n(r.q3)}`,
+              `range ${n(r.min)} – ${n(r.max)}`,
+              `overall ${n(r.mean)} over ${r.days} days`,
+            ];
+          },
+        } },
+      },
+      scales: {
+        x: { grid: { color: CT.grid }, ticks: { color: CT.dim, callback: v => fmtChars(v) },
+             beginAtZero: false },
+        y: { stacked: true, grid: { display: false },
+             ticks: { color: CT.dim, autoSkip: false },
+             afterFit: sc => { sc.width = 130; } },
+      },
+    }
+  });
+}
+
+// #12 — activity mix as a share, per month. The donut says what the mix IS right
+// now; this says how it has moved, which is the more interesting question.
+function renderActivityTrendChart(rows) {
+  if (!rows.length) {
+    destroyChart('activity-trend');
+    setChartEmpty('chart-activity-trend', 'Not enough history yet');
+    return;
+  }
+  const typeSet = new Set();
+  rows.forEach(r => Object.keys(r.types).forEach(t => typeSet.add(t)));
+  const types = orderedTypes(typeSet);
+  const labels = rows.map(r => r.month);
+  // Normalised to 100% per month: the question is share, not volume — volume
+  // already has the daily chart.
+  const totals = rows.map(r => Object.values(r.types).reduce((a, b) => a + b, 0) || 1);
+  const datasets = types.map(t => ({
+    label: t,
+    data: rows.map((r, i) => (r.types[t] || 0) / totals[i] * 100),
+    // Solid for the same reason as the stream bands: the legend swatch carries a
+    // full-opacity border ring, so a translucent fill made the key and the band
+    // look like different colors.
+    backgroundColor: acolor(t),
+    borderColor: acolor(t),
+    borderWidth: 1,
+    pointRadius: 0,
+    fill: true,
+    tension: 0.25,
+  }));
+  reserveLegendRoom('chart-activity-trend', 'activity-trend', 200, true);
+  upsertChart('activity-trend', 'chart-activity-trend', {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom',
+                  labels: { color: CT.dim, boxWidth: 12, boxHeight: 12, usePointStyle: true } },
+        tooltip: { callbacks: {
+          label: c => c.raw > 0.05 ? `${c.dataset.label}: ${c.raw.toFixed(0)}%` : null,
+          footer: c => `Total: ${fmtTime(rows[c[0].dataIndex]
+            ? Object.values(rows[c[0].dataIndex].types).reduce((a, b) => a + b, 0) : 0)}`,
+        } },
+      },
+      scales: {
+        x: { grid: { color: CT.grid }, ticks: { color: CT.dim, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+        y: { stacked: true, max: 100, grid: { color: CT.grid },
+             ticks: { color: CT.dim, callback: v => `${v}%` },
+             afterFit: sc => { sc.width = 62; } },
+      },
     }
   });
 }
@@ -4874,7 +5097,6 @@ async function deleteCatalogEntry(id) {
 async function loadSettings() {
   const s = await window.pywebview.api.get_all_settings();
   appSettings = s;
-  document.getElementById('sessions-dir').textContent  = await window.pywebview.api.get_sessions_dir();
   document.getElementById('gsm-url').value             = s.gsm_url || 'http://localhost:7275/api/stats';
   document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
   document.getElementById('gsm-debounce').value        = s.gsm_debounce_secs || 60;
