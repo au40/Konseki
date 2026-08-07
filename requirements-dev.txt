@@ -1,0 +1,4 @@
+# Test-only dependencies. The app itself needs nothing from this file.
+#   python -m pytest tests/          # Python: attribution + overlay invariants
+#   node tests/verify_ui.js          # JS: load-time + chart helper checks
+pytest

@@ -65,11 +65,12 @@ let currentDetailTitle = null;
 let currentMilestoneId  = null;        // when a milestone detail view is open
 let currentMilestones   = [];          // milestones for the current media detail
 let currentDetailData   = null;        // full payload for the open media detail
-// Split media detail by milestone by default — if a title has milestones at all,
-// the per-milestone breakdown is the more useful default view. The toggle only
-// appears when milestones exist, so this is a no-op for titles without them.
+// Both detail views split by default. If a title has milestones, or a series has
+// more than one book with data, the broken-down view is the more useful default.
+// Each toggle only appears when there's something to split against, so this is a
+// no-op for a title without milestones or a single-book series.
 let splitByMilestone    = true;        // split media detail by milestone
-let splitBySeriesBook   = false;       // split series detail by book
+let splitBySeriesBook   = true;        // split series detail by book
 let currentSeriesChart  = null;        // {daily, byBook, books} for the open series detail
 let _milestoneEditingId = null;        // null = adding, number = editing
 let _milestoneDragId    = null;        // dragged milestone id for reorder
