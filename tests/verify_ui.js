@@ -99,7 +99,7 @@ const PROBE = `
   set portalSelected(v) { portalSelected = v; },
   applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty,
   rollDetailSeries, twRolling, splitBarDatasets, speedSegmentColors, memberLegendLabels,
-  bucketDaily, statsMetricAvail, sparkHTML,
+  bucketDaily, statsMetricAvail, sparkHTML, goalBurnupSeries, dateFromISO,
 };`;
 
 try {
@@ -392,6 +392,93 @@ check('empty series renders the placeholder strip',
       P.sparkHTML([0, 0, 0], '#5B8CFF').includes('spark-empty'), true);
 check('a missing series is tolerated',
       P.sparkHTML(undefined, '#5B8CFF').includes('spark-empty'), true);
+
+console.log('\n--- M6: goal burn-up geometry ---');
+// A 10-day chars goal: start Mar 1, deadline Mar 11 (10 days of pace), target
+// 100k. Four days read at 5k/day, so the run rate is half what's needed.
+// projected_end / projected_days_delta are what db.py derives from that pace —
+// 100k at 5k/day is reached on day index 20, i.e. start + 19 = Mar 20, nine
+// days past the deadline. The fixture has to satisfy db.py's arithmetic or the
+// projection-slope check below is asserting against a pace nobody computed.
+const burnGoal = {
+  metric: 'chars_read', target: 100000,
+  start_date: '2026-03-01', deadline: '2026-03-11',
+  projected_end: '2026-03-20', projected_days_delta: 9,
+};
+const burnDates = ['2026-03-01', '2026-03-02', '2026-03-03', '2026-03-04'];
+const burnCum   = [5000, 10000, 15000, 20000];
+const BU = P.goalBurnupSeries(burnGoal, burnDates, burnCum);
+
+check('axis starts at the goal start', BU.labels[0], '2026-03-01');
+check('axis extends past the deadline to the projected finish',
+      BU.labels[BU.labels.length - 1], '2026-03-20');
+check('axis is dense (one label per day)', BU.labels.length, 20);
+check('actual carries the backend series', BU.actual.slice(0, 4).join(','), '5000,10000,15000,20000');
+// The whole point of the null pad: drawing the actual line to the deadline
+// would claim progress that has not happened.
+check('actual is null past the last real day', BU.actual[4], null);
+check('actual never resumes', BU.actual.slice(4).every(v => v === null), true);
+
+check('pace starts at zero', BU.pace[0], 0);
+check('pace hits the target exactly on the deadline',
+      BU.pace[BU.labels.indexOf('2026-03-11')], 100000);
+check('pace is the same target/total_days the card uses', BU.pace[1], 10000);
+check('pace stops at the deadline', BU.pace[BU.labels.indexOf('2026-03-12')], null);
+check('target line is flat at the target', BU.scope.every(v => v === 100000), true);
+
+// The projection must LEAVE from the last actual point, not from zero or from
+// the pace line, and land on the target on projected_end.
+const pStart = BU.labels.indexOf('2026-03-04'), pEnd = BU.labels.indexOf('2026-03-20');
+check('projection starts at the last actual value', BU.projected[pStart], 20000);
+check('projection is null before today', BU.projected[pStart - 1], null);
+check('projection lands on the target at projected_end', BU.projected[pEnd], 100000);
+check('projection is null after projected_end', BU.projected[pEnd + 1], undefined);
+// Straight line => the implied daily rate matches the observed 5k/day pace
+// db.py extrapolated projected_end from.
+check('projection runs at the observed pace (5k/day)',
+      Math.round(BU.projected[pStart + 1] - BU.projected[pStart]), 5000);
+check('slack is the deadline-relative flip of projected_days_delta', BU.slack, -9);
+
+// The axis plots `short`; `labels` stays ISO so the tooltip can name the day.
+check('short labels are MM-DD', BU.short[0], '03-01');
+check('short labels stay aligned with the ISO ones', BU.short.length, BU.labels.length);
+
+// Ahead of schedule: the axis must NOT stretch past the deadline just because
+// the projection lands early, or the chart grows a meaningless empty tail.
+const early = P.goalBurnupSeries(
+  { ...burnGoal, projected_end: '2026-03-07', projected_days_delta: -4 },
+  burnDates, [15000, 30000, 45000, 60000]);
+check('an early projection leaves the axis at the deadline',
+      early.labels[early.labels.length - 1], '2026-03-11');
+check('slack is positive when finishing early', early.slack, 4);
+
+// Time goals plot in hours; the series arrives in seconds.
+const timeGoal = P.goalBurnupSeries(
+  { metric: 'time_seconds', target: 36000, start_date: '2026-03-01',
+    deadline: '2026-03-11', projected_end: null, projected_days_delta: null },
+  ['2026-03-01', '2026-03-02'], [3600, 9000]);
+check('time series is scaled to hours', timeGoal.actual.slice(0, 2).join(','), '1,2.5');
+check('time target is scaled to hours', timeGoal.scope[0], 10);
+check('no projection without a projected_end', timeGoal.projected, null);
+check('no slack without a delta', timeGoal.slack, null);
+
+// Degenerate + hostile inputs: a same-day goal, and a goal with no reading yet.
+const sameDay = P.goalBurnupSeries(
+  { metric: 'chars_read', target: 5000, start_date: '2026-03-01',
+    deadline: '2026-03-01' }, ['2026-03-01'], [1000]);
+check('a same-day goal is one bucket', sameDay.labels.length, 1);
+check('a same-day pace line sits at the target, not zero', sameDay.pace[0], 5000);
+check('an empty series still draws the pace line',
+      P.goalBurnupSeries(burnGoal, [], []).actual.every(v => v === null), true);
+check('a malformed start date yields no axis',
+      P.goalBurnupSeries({ ...burnGoal, start_date: '' }, [], []), null);
+
+// Local date parsing — `new Date('2026-03-02')` is UTC midnight and reads back
+// a day early west of UTC, which is the bug M3 hit in the week bucketing.
+check('dateFromISO parses local, not UTC', P.dateFromISO('2026-03-02').getDate(), 2);
+check('a 366-day goal spans a leap year without drift',
+      P.goalBurnupSeries({ metric: 'chars_read', target: 1, start_date: '2028-01-01',
+                           deadline: '2028-12-31' }, [], []).labels.length, 366);
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

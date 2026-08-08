@@ -2222,7 +2222,7 @@ def db_get_goal_progress():
 
         results.append({
             **g,
-            "completed":       completed,
+            "completed":       completed,  # db_get_goal_burnup's last point == this
             "remaining":       remaining,
             "pct":             pct,
             "days_left":       days_left,
@@ -2246,6 +2246,79 @@ def db_get_goal_progress():
             "is_overdue":      days_left == 0 and completed < g["target"],
         })
     return results
+
+
+def db_get_goal_burnup(goal_id):
+    """Per-day cumulative progress for one goal — the burn-up chart's actual line.
+
+    The value on day d is exactly db_get_goal_progress's `completed` evaluated
+    with count_up_to=d, so the **last point equals the number on the goal card
+    by construction** rather than by two formulas happening to agree. Same
+    metric column, same activity filter, same attribution rule, same
+    `max(0, ...)` applied to the running total (not per day) — floor the days
+    independently and a single over-displaced day would make the series sum to
+    more than `completed`.
+
+    Net-adjustment-per-day pattern (CLAUDE.md): raw per-day sums plus
+    `get_gsm_day_adjustments()`, which already folds in the manual time overlay,
+    so it must not be re-applied here. The window's upper bound is
+    min(logical today, deadline) — the window_bounds clamp, so GSM's
+    rollover-window writes at a future calendar date can't leak in.
+
+    Only the actual line lives here. The required-pace line, the projection and
+    the days-of-slack figure are drawn in the UI from `target` / `start_date` /
+    `deadline` / `projected_end`, which db_get_goal_progress already computes —
+    duplicating that math would give the card and the chart two different
+    projections.
+    """
+    g = next((x for x in db_get_goals() if x["id"] == int(goal_id)), None)
+    if not g or g["metric"] not in SAFE_METRICS:
+        return None
+
+    today_d = get_today_date()
+    try:
+        deadline_d = datetime.strptime(g["deadline"], "%Y-%m-%d").date()
+    except Exception:
+        deadline_d = today_d
+    try:
+        start_d = datetime.strptime(g["start_date"], "%Y-%m-%d").date()
+    except Exception:
+        start_d = today_d
+
+    end_d = min(today_d, deadline_d)
+    out   = {"id": g["id"], "label": g["label"], "metric": g["metric"],
+             "target": g["target"], "start_date": g["start_date"],
+             "deadline": g["deadline"], "dates": [], "actual": []}
+    if end_d < start_d:
+        return out                      # backdated start in the future: nothing yet
+
+    where  = ["session_date>=?", "session_date<=?"]
+    params = [start_d.isoformat(), end_d.isoformat()]
+    if g["activity_type"]:
+        where.append("activity_type=?")
+        params.append(g["activity_type"])
+    rows = _q(
+        f"SELECT session_date, COALESCE(SUM({g['metric']}),0) FROM sessions "
+        f"WHERE {' AND '.join(where)} GROUP BY session_date", *params
+    )
+    raw = {r[0]: (r[1] or 0.0) for r in rows}
+
+    # GSM is always 'Reading', so attribution applies to Reading goals and to
+    # untyped ones. lines_read has no attribution component and falls to 0.
+    apply_attr = (not g["activity_type"]) or g["activity_type"] == "Reading"
+    adj        = get_gsm_day_adjustments() if apply_attr else {}
+
+    cum = 0.0
+    cur = start_d
+    while cur <= end_d:
+        ds = cur.isoformat()
+        ac, at, ak = adj.get(ds, (0, 0, 0))
+        cum += raw.get(ds, 0.0) + {"chars_read": ac, "time_seconds": at,
+                                   "cards_mined": ak}.get(g["metric"], 0)
+        out["dates"].append(ds)
+        out["actual"].append(max(0.0, cum))
+        cur += timedelta(days=1)
+    return out
 
 
 # ── Custom categories ─────────────────────────────────────────────────────────

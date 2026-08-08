@@ -56,7 +56,8 @@ from db import (
     get_media_stats, get_media_shelf, get_media_titles, get_series_data,
     get_title_streams, get_title_speed_distributions, get_activity_trend,
     get_extra_stats, get_range_extra_stats,
-    db_get_goal_progress, db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
+    db_get_goal_progress, db_get_goal_burnup,
+    db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
     db_get_custom_categories, db_add_custom_category, db_delete_custom_category,
     db_get_dev_notes, db_add_dev_note, db_delete_dev_note, db_set_dev_note_importance,
     db_set_dev_note_tab, db_get_dev_tabs, db_add_dev_tab, db_rename_dev_tab, db_delete_dev_tab,
@@ -422,6 +423,12 @@ class Api:
     # ── Goals ─────────────────────────────────────────────────────────────────
     def get_goals(self):
         return db_get_goal_progress()
+
+    def get_goal_burnup(self, goal_id):
+        # Fetched lazily, per goal, when a card's burn-up is expanded — a
+        # year-long goal is a 365-point series and every goal on the page
+        # would pay for it on every pace-view switch otherwise.
+        return db_get_goal_burnup(goal_id)
 
     def add_goal(self, label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False, start_date=None):
         try:

@@ -41,6 +41,7 @@ _WIPE = (
     "media_completions",
     "series",
     "series_members",
+    "goals",
 )
 
 

@@ -224,6 +224,13 @@ function isoDateFromObj(d) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
 
+// Inverse of isoDateFromObj. `new Date('2026-03-02')` parses as UTC midnight,
+// which reads back a day early west of UTC — always build from parts.
+function dateFromISO(s) {
+  const [y, m, d] = String(s || '').split('-').map(Number);
+  return new Date(y, m - 1, d);
+}
+
 function mediaIcon(source, atype) {
   if (source === 'gsm') return '🎮';
   if (atype === 'Listening') return '🎵';
@@ -3303,6 +3310,7 @@ async function loadGoals() {
   const goals = await window.pywebview.api.get_goals();
   goals.forEach(g => { goalDataCache[g.id] = g; });
   const list  = document.getElementById('goal-list');
+  dropBurnupCharts();
   list.innerHTML = '';
   const active = goals.filter(g => !g.user_finished);
   if (!active.length) {
@@ -3311,6 +3319,7 @@ async function loadGoals() {
   const inProgress = active.filter(g => !g.is_overdue);
   const overdue    = active.filter(g => g.is_overdue);
   [...inProgress, ...overdue].forEach(g => list.appendChild(makeGoalCard(g)));
+  restoreOpenBurnups(active);
 }
 
 let goalPanelMode = 'default';
@@ -3330,21 +3339,26 @@ function setGoalPanelMode(mode) {
 }
 
 async function showCompletedGoals() {
-  if (goalPanelMode === 'completed') { setGoalPanelMode('default'); return; }
+  if (goalPanelMode === 'completed') { hideCompletedGoals(); return; }
   setGoalPanelMode('completed');
   const goals = await window.pywebview.api.get_goals();
   goals.forEach(g => { goalDataCache[g.id] = g; });
   const list  = document.getElementById('goal-completed-list');
+  dropBurnupCharts();
   list.innerHTML = '';
   const finished = goals.filter(g => g.user_finished);
   if (!finished.length) {
     list.innerHTML = '<p class="empty-msg">No completed goals yet.</p>'; return;
   }
   finished.forEach(g => list.appendChild(makeGoalCard(g)));
+  restoreOpenBurnups(finished);
 }
 
 function hideCompletedGoals() {
   setGoalPanelMode('default');
+  // The completed list's render dropped the active list's burn-up charts (their
+  // canvases survive the view switch, the Chart instances don't), so rebuild.
+  loadGoals();
 }
 
 function makeGoalCard(g) {
@@ -3469,14 +3483,12 @@ function makeGoalCard(g) {
     chunkHtml = `<div class="goal-chunk" style="color:#FF6B6B">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
   }
 
-  let projHtml = '';
-  if (g.projected_end && !g.is_complete && !g.is_overdue) {
-    const delta = g.projected_days_delta || 0;
-    const late  = delta > 0;
-    const color = late ? '#FF9F5B' : delta < 0 ? CT.success : 'var(--dim)';
-    const deltaTxt = delta === 0 ? 'on time' : `${Math.abs(delta)}d ${late ? 'late' : 'early'}`;
-    projHtml = `<span style="font-size:10px;color:${color}" title="Finish date extrapolated from your average pace since the goal started">projected finish: ${g.projected_end} (${deltaTxt})</span>`;
-  }
+  // The projected finish used to be a chip on the card, next to a button that
+  // opened a chart of the same projection. It lives in the panel head now — one
+  // place, and the chart is right underneath it showing how it was arrived at.
+  const projHead = g.projected_end
+    ? `projected finish: ${g.projected_end}`
+    : 'cumulative progress vs required pace';
 
   const actLabel = g.activity_type ? ` · ${g.activity_type}` : '';
   const charsLabel = g.track_chars
@@ -3486,6 +3498,8 @@ function makeGoalCard(g) {
   const finishBtn = g.is_complete && !g.user_finished
     ? `<button class="btn btn-xs btn-outline" style="border-color:#4ECBA0;color:#4ECBA0" onclick="doFinishGoal(${g.id})">Mark finished</button>`
     : '';
+
+  const burnupOpen = goalBurnupOpen.has(g.id);
 
   el.innerHTML = `
     <div class="goal-card-header">
@@ -3523,11 +3537,200 @@ function makeGoalCard(g) {
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
       <div style="font-size:10px;color:var(--muted)">deadline: ${g.deadline} · started: ${g.start_date}</div>
       <div style="display:flex;align-items:center;gap:8px">
-        ${projHtml}
+        <button class="btn btn-xs goal-burnup-btn${burnupOpen ? ' active' : ''}" id="goal-burnup-btn-${g.id}"
+                title="Where your current pace lands, against the pace this goal needs"
+                onclick="toggleGoalBurnup(${g.id})">Projection ${burnupOpen ? '▴' : '▾'}</button>
         <button class="btn btn-xs" style="background:none;border:none;color:var(--dim);font-size:11px;padding:0 2px;cursor:pointer;opacity:0.55" title="Edit goal" onclick="openGoalEdit(${g.id})">✎</button>
       </div>
+    </div>
+    <div class="goal-burnup" id="goal-burnup-${g.id}" style="display:${burnupOpen ? '' : 'none'}">
+      <div class="goal-burnup-head">
+        <span title="Finish date extrapolated from your average pace since the goal started">${projHead}</span>
+        <span class="goal-slack" id="goal-slack-${g.id}"></span>
+      </div>
+      <div class="goal-burnup-chart"><canvas id="goal-burnup-canvas-${g.id}" height="190"></canvas></div>
     </div>`;
   return el;
+}
+
+// ── Burn-up chart ──────────────────────────────────────────────────────────
+// Cumulative progress against the straight line the goal needs, plus where the
+// current pace actually lands. Collapsed by default and fetched on expand: a
+// year-long goal is a 365-point series and loadGoals() re-runs on every
+// pace-view switch.
+//
+// "Burn-up" is the chart type's name, kept in the code because it's precise:
+// a burn-DOWN plots work remaining falling to zero, a burn-UP plots work done
+// rising to meet a flat scope line — which is this shape exactly. It's Scrum
+// jargon though, so the button says "Projection", which is what the user
+// actually opens it for.
+const goalBurnupOpen = new Set();
+
+// Build the four series on a dense daily axis running start_date → whichever of
+// the deadline and the projected finish is later. Pure, so verify_ui.js can
+// check the geometry without a DOM.
+//
+// `dates`/`actual` come from db_get_goal_burnup and stop at logical today; the
+// axis carries on to the deadline, so actual is null-padded past its end rather
+// than stretched — a line drawn to the deadline would claim progress that
+// hasn't happened. Every derived number comes off the goal payload the card
+// already rendered (target, deadline, projected_end), so the chart and the card
+// can't project differently.
+function goalBurnupSeries(g, dates, actual) {
+  const axisEnd = (g.projected_end && g.projected_end > g.deadline) ? g.projected_end : g.deadline;
+  const labels  = [];
+  const cur = dateFromISO(g.start_date), stop = dateFromISO(axisEnd);
+  while (cur <= stop) { labels.push(isoDateFromObj(cur)); cur.setDate(cur.getDate() + 1); }
+  if (!labels.length) return null;
+
+  // Time goals plot in hours; the raw series is seconds.
+  const scale  = g.metric === 'time_seconds' ? 1 / 3600 : 1;
+  const target = (g.target || 0) * scale;
+
+  const byDate = {};
+  (dates || []).forEach((d, i) => { byDate[d] = (actual || [])[i]; });
+  const lastDay = (dates && dates.length) ? dates[dates.length - 1] : null;
+  const act = labels.map(l => {
+    if (!lastDay || l > lastDay) return null;
+    const v = byDate[l];
+    return v == null ? null : v * scale;
+  });
+
+  // Straight line from 0 at the start to the target on the deadline — the same
+  // target/total_days daily pace the card's expected-progress marker uses.
+  const dlIdx = Math.max(0, labels.indexOf(g.deadline));
+  const pace  = labels.map((_, i) =>
+    i > dlIdx ? null : (dlIdx === 0 ? target : target * i / dlIdx));
+
+  // Projection: a straight run from today's actual to the target on
+  // projected_end. db.py derived that date from the observed average pace, so
+  // joining the two points reproduces exactly that pace — no second formula.
+  const todayIdx = act.reduce((last, v, i) => (v == null ? last : i), -1);
+  let projected = null;
+  if (g.projected_end && todayIdx >= 0) {
+    const pIdx = labels.indexOf(g.projected_end);
+    if (pIdx > todayIdx) {
+      const v0 = act[todayIdx];
+      projected = labels.map((_, i) => (i < todayIdx || i > pIdx)
+        ? null
+        : v0 + (target - v0) * (i - todayIdx) / (pIdx - todayIdx));
+    }
+  }
+
+  // Days you could skip and still land on the deadline at the current pace —
+  // the deadline-relative flip of the card's "3d early / 3d late" chip, so the
+  // two can never disagree.
+  const slack = (g.projected_days_delta == null) ? null : -g.projected_days_delta;
+
+  // `short` is what the axis plots; `labels` stays ISO for the tooltip title.
+  // Pre-formatted rather than done in a tick callback, matching every other
+  // chart here — under autoSkip a callback's index is the surviving-tick index,
+  // not the label index, so looking labels up by it would misalign them.
+  return { labels, short: labels.map(l => l.slice(5)),
+           actual: act, pace, projected, scope: labels.map(() => target), slack };
+}
+
+function dropBurnupCharts() {
+  Object.keys(charts).filter(k => k.startsWith('goal-burnup-')).forEach(destroyChart);
+}
+
+function restoreOpenBurnups(goals) {
+  goals.filter(g => goalBurnupOpen.has(g.id)).forEach(g => renderGoalBurnup(g.id));
+}
+
+async function toggleGoalBurnup(id) {
+  const box = document.getElementById(`goal-burnup-${id}`);
+  const btn = document.getElementById(`goal-burnup-btn-${id}`);
+  if (!box) return;
+  const open = !goalBurnupOpen.has(id);
+  if (open) goalBurnupOpen.add(id); else goalBurnupOpen.delete(id);
+  box.style.display = open ? '' : 'none';
+  if (btn) {
+    btn.classList.toggle('active', open);
+    btn.textContent = `Projection ${open ? '▴' : '▾'}`;
+  }
+  if (open) await renderGoalBurnup(id);
+  else destroyChart(`goal-burnup-${id}`);
+}
+
+async function renderGoalBurnup(id) {
+  const g        = goalDataCache[id];
+  const key      = `goal-burnup-${id}`;
+  const canvasId = `goal-burnup-canvas-${id}`;
+  if (!g || !document.getElementById(canvasId)) return;
+
+  const data = await window.pywebview.api.get_goal_burnup(id);
+  const s    = data ? goalBurnupSeries(g, data.dates, data.actual) : null;
+  const slackEl = document.getElementById(`goal-slack-${id}`);
+
+  // A goal with no reading yet still draws — a flat zero against the pace line
+  // is the answer to "how far behind am I". This only fires when the backend
+  // returned no days at all, i.e. a start date in the future.
+  if (!s || !s.actual.some(v => v != null)) {
+    destroyChart(key);
+    setChartEmpty(canvasId, "This goal hasn't started yet");
+    if (slackEl) slackEl.textContent = '';
+    return;
+  }
+
+  if (slackEl) {
+    const n = s.slack;
+    slackEl.title = 'Days you could take off and still finish by the deadline at your current pace';
+    if (n == null)      { slackEl.textContent = ''; }
+    else if (n >= 0)    { slackEl.textContent = `${n} day${n === 1 ? '' : 's'} of slack`;
+                          slackEl.style.color = CT.success; }
+    else                { slackEl.textContent = `${-n} day${n === -1 ? '' : 's'} behind`;
+                          slackEl.style.color = '#FF9F5B'; }
+  }
+
+  const isTime  = g.metric === 'time_seconds';
+  const fmtVal  = v => isTime ? fmtTime(v * 3600) : `${fmtChars(Math.round(v))} chars`;
+  const late    = (s.slack ?? 0) < 0;
+
+  // Array order is draw order AND legend order (see the note in
+  // renderDetailMetricChart — `order:` reverses both, so don't reach for it).
+  // Actual leads the key and the thin reference lines draw over its fill.
+  upsertChart(key, canvasId, {
+    type: 'line',
+    data: { labels: s.short, datasets: [
+      // tension 0 on every line here: a cumulative series is monotonic, and
+      // Chart.js's default cubic interpolation overshoots, which would draw a
+      // dip on a flat stretch — reading that never went backwards.
+      { label: 'Actual', data: s.actual, borderColor: CT.accent,
+        backgroundColor: ctAlpha(CT.accent, 0.12), borderWidth: 2.5,
+        pointRadius: 0, pointHoverRadius: 5, pointBackgroundColor: CT.accent,
+        fill: 'origin', tension: 0, spanGaps: false },
+      { label: 'Required pace', data: s.pace, borderColor: CT.dim,
+        borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 4,
+        fill: false, tension: 0, spanGaps: false },
+      ...(s.projected ? [{ label: 'At current pace', data: s.projected,
+        borderColor: late ? '#FF9F5B' : CT.success,
+        borderWidth: 2, borderDash: [3, 3], pointRadius: 0, pointHoverRadius: 4,
+        fill: false, tension: 0, spanGaps: false }] : []),
+      { label: 'Target', data: s.scope, borderColor: ctAlpha(CT.dim, 0.5),
+        borderWidth: 1, borderDash: [2, 4], pointRadius: 0, pointHoverRadius: 0,
+        fill: false, tension: 0 },
+    ] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: true, position: 'bottom',
+                  labels: { color: CT.dim, boxWidth: 12, boxHeight: 12, usePointStyle: true } },
+        tooltip: { callbacks: {
+          title: c => s.labels[c[0].dataIndex],
+          label: c => c.raw == null ? '' : `${c.dataset.label}: ${fmtVal(c.raw)}`,
+        } },
+      },
+      scales: {
+        x: { grid: { color: CT.grid },
+             ticks: { color: CT.dim, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
+        y: { grid: { color: CT.grid }, beginAtZero: true,
+             ticks: { color: CT.dim, callback: v => isTime ? fmtHourTick(v) : fmtChars(v) },
+             afterFit: sc => { sc.width = 62; } },
+      },
+    },
+  });
 }
 
 let editingGoalId = null;

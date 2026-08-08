@@ -454,6 +454,25 @@ select:focus { border-color: var(--accent); }
   transform: translateX(-1px);
   background: var(--bg); opacity: 0.9;
 }
+/* Burn-up chart, collapsed inside the goal card. Deliberately NOT .chart-wrap:
+   that carries a var(--card) background, which is the goal card's own colour. */
+.goal-burnup {
+  margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--inset);
+}
+.goal-burnup-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  font-size: 10px; color: var(--muted); margin-bottom: 4px;
+}
+.goal-slack { font-weight: 600; }
+/* setChartEmpty overlays this element when there is nothing to plot. */
+.goal-burnup-chart { position: relative; }
+.goal-burnup-btn {
+  background: none; border: none; color: var(--dim);
+  font-size: 11px; font-weight: 500; padding: 2px 4px; opacity: 0.7;
+}
+.goal-burnup-btn:hover  { color: var(--text); opacity: 1; }
+.goal-burnup-btn.active { color: var(--accent); opacity: 1; }
+
 .progress-expected {
   position: absolute; top: 100%;
   width: 10px; height: 8px;

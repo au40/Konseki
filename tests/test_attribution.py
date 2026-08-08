@@ -810,3 +810,175 @@ class TestIngestedFilesDropped:
         import os
         db.init_db()
         assert not os.path.isdir(os.path.join(str(db.DATA_DIR), "sessions"))
+
+
+# ── M6: the goals burn-up ──────────────────────────────────────────────────
+_ALL_SCENARIOS = ["plain", "displacement", "two_games_one_date",
+                  "manual_only", "both_overlays", "mixed_sources"]
+
+
+def _add_goal(seed, db, metric="chars_read", target=100_000,
+              start=10, deadline=-10, atype=None):
+    """A goal whose window brackets every date the shared scenarios seed."""
+    db.db_add_goal("G", metric, float(target), seed.day(deadline), "daily",
+                   atype, False, seed.day(start))
+    return db.db_get_goals()[-1]["id"]
+
+
+def _card(db, gid):
+    return next(g for g in db.db_get_goal_progress() if g["id"] == gid)
+
+
+class TestGoalBurnup:
+    """db_get_goal_burnup plots the goal card's `completed` day by day, so the
+    last point IS that number — not a second formula that happens to agree.
+    That is the whole reason the running total is floored rather than each day:
+    per-day floors would let one over-displaced day inflate the sum above the
+    card."""
+
+    @pytest.mark.parametrize("name", _ALL_SCENARIOS)
+    @pytest.mark.parametrize("metric", ["chars_read", "time_seconds"])
+    def test_last_point_equals_the_card(self, seed, db, name, metric):
+        _scenarios(seed)[name]()
+        gid = _add_goal(seed, db, metric=metric)
+        burn = db.db_get_goal_burnup(gid)
+        assert burn["actual"][-1] == pytest.approx(_card(db, gid)["completed"]), \
+            f"{name}/{metric}: the chart and the card disagree"
+
+    @pytest.mark.parametrize("name", _ALL_SCENARIOS)
+    def test_series_never_goes_backwards(self, seed, db, name):
+        """It is a cumulative line. A day whose net adjustment is negative
+        shrinks the increment, never the running total below its last value —
+        except through the zero floor, which can only apply while it is at 0."""
+        _scenarios(seed)[name]()
+        vals = db.db_get_goal_burnup(_add_goal(seed, db))["actual"]
+        assert all(b >= a for a, b in zip(vals, vals[1:])), f"{name}: {vals}"
+
+    def test_axis_is_dense(self, seed, db):
+        """One point per day from the start, including days with no reading —
+        a sparse axis would compress a hiatus and flatter the pace."""
+        seed.gsm(seed.day(3), chars=10_000, secs=3600, game_id="g1")
+        burn = db.db_get_goal_burnup(_add_goal(seed, db, start=5))
+        assert burn["dates"] == [seed.day(i) for i in range(5, -1, -1)]
+        assert burn["actual"][:2] == [0.0, 0.0], "quiet days are zeros, not gaps"
+
+    def test_stops_at_logical_today(self, seed, db):
+        """window_bounds clamp: GSM writes session_date at the real calendar
+        date, which runs ahead of logical today inside the rollover window."""
+        seed.gsm(seed.day(1), chars=1_000, secs=600, game_id="g1")
+        seed.gsm(seed.day(-2), chars=99_999, secs=99_999, game_id="g1")
+        burn = db.db_get_goal_burnup(_add_goal(seed, db))
+        assert burn["dates"][-1] == seed.day(0)
+        assert burn["actual"][-1] == 1_000, "future-dated row leaked past the clamp"
+
+    def test_stops_at_the_deadline_once_it_has_passed(self, seed, db):
+        """Past-deadline goals stop counting, so the line must stop too."""
+        seed.gsm(seed.day(6), chars=1_000, secs=600, game_id="g1")
+        seed.gsm(seed.day(2), chars=5_000, secs=600, game_id="g1")   # after deadline
+        burn = db.db_get_goal_burnup(_add_goal(seed, db, start=10, deadline=4))
+        assert burn["dates"][-1] == seed.day(4)
+        assert burn["actual"][-1] == 1_000
+
+    def test_a_displacement_inside_the_window_only_moves_a_day(self, seed, db):
+        """Both endpoints in range, so the total is untouched and only the shape
+        of the climb changes."""
+        src, roll = seed.day(3), seed.day(4)
+        seed.gsm(src, chars=10_000, secs=3600, game_id="g1")
+        gid = _add_goal(seed, db)
+        before = db.db_get_goal_burnup(gid)["actual"][-1]
+        seed.displace(roll, src, "g1", chars=4_000, secs=1200)
+        after = db.db_get_goal_burnup(gid)
+        i_roll = after["dates"].index(roll)
+        assert after["actual"][-1] == before, "a displacement conserves the total"
+        assert after["actual"][i_roll] == 4_000, "the climb starts a day earlier"
+
+    def test_a_displacement_out_of_the_window_lowers_the_total(self, seed, db):
+        """Chars pushed to a rollover_date before the goal started have left the
+        goal. The card must lose them too — this is the check that would catch
+        the burn-up applying attribution the card doesn't, or vice versa."""
+        gid = _add_goal(seed, db, start=5)
+        src, roll = seed.day(5), seed.day(6)
+        seed.gsm(src, chars=10_000, secs=3600, game_id="g1")
+        seed.displace(roll, src, "g1", chars=4_000, secs=1200)
+        burn = db.db_get_goal_burnup(gid)
+        assert burn["actual"][-1] == 6_000
+        assert burn["actual"][-1] == pytest.approx(_card(db, gid)["completed"])
+
+    def test_manual_shave_reaches_a_time_goal(self, seed, db):
+        d = seed.day(3)
+        seed.gsm(d, chars=10_000, secs=3600, game_id="g1")
+        seed.shave(d, "g1", -600)
+        assert db.db_get_goal_burnup(
+            _add_goal(seed, db, metric="time_seconds", target=360_000))["actual"][-1] == 3000
+
+    def test_manual_shave_is_not_double_applied(self, seed, db):
+        """get_gsm_day_adjustments already folds the manual overlay into
+        secs_delta; re-applying it here would shave twice."""
+        d = seed.day(3)
+        seed.gsm(d, chars=10_000, secs=3600, game_id="g1")
+        gid = _add_goal(seed, db, metric="time_seconds", target=360_000)
+        full = db.db_get_goal_burnup(gid)["actual"][-1]
+        seed.shave(d, "g1", -600)
+        assert db.db_get_goal_burnup(gid)["actual"][-1] == full - 600
+
+    def test_manual_shave_leaves_a_chars_goal_alone(self, seed, db):
+        d = seed.day(3)
+        seed.gsm(d, chars=10_000, secs=3600, game_id="g1")
+        seed.shave(d, "g1", -600)
+        assert db.db_get_goal_burnup(_add_goal(seed, db))["actual"][-1] == 10_000
+
+    def test_activity_filter_excludes_other_types(self, seed, db):
+        d = seed.day(3)
+        seed.gsm(d, chars=10_000, secs=3600, game_id="g1")
+        seed.session(d, chars=0, secs=1800, source="manual",
+                     title="Podcast", atype="Listening")
+        gid = _add_goal(seed, db, metric="time_seconds", target=360_000,
+                        atype="Reading")
+        assert db.db_get_goal_burnup(gid)["actual"][-1] == 3600
+
+    def test_a_non_reading_goal_ignores_gsm_attribution(self, seed, db):
+        """GSM is always 'Reading', so a Listening goal must not pick up the
+        adjustment — mirrors db_get_goal_progress's apply_attr."""
+        src, roll = seed.day(3), seed.day(4)
+        seed.gsm(src, chars=10_000, secs=3600, game_id="g1")
+        seed.session(src, chars=0, secs=1800, source="manual",
+                     title="Podcast", atype="Listening")
+        seed.displace(roll, src, "g1", chars=4_000, secs=1200)
+        gid = _add_goal(seed, db, metric="time_seconds", target=360_000,
+                        atype="Listening")
+        burn = db.db_get_goal_burnup(gid)
+        assert burn["actual"][-1] == 1800
+        # roll (day 4) precedes src (day 3), so an incoming GSM displacement
+        # would show up as a climb before the Listening session even happened.
+        assert burn["actual"][burn["dates"].index(roll)] == 0, "phantom climb"
+
+    def test_the_running_total_floors_at_zero(self, seed, db):
+        seed.gsm(seed.day(3), chars=1_000, secs=600, game_id="g1")
+        seed.shave(seed.day(3), "g1", -99_999)
+        gid = _add_goal(seed, db, metric="time_seconds", target=360_000)
+        burn = db.db_get_goal_burnup(gid)
+        assert all(v >= 0 for v in burn["actual"])
+        assert burn["actual"][-1] == pytest.approx(_card(db, gid)["completed"])
+
+    def test_the_floor_is_on_the_running_total_not_on_each_day(self, seed, db):
+        """The card floors the summed window once. Flooring each day instead
+        would discard the overhang of an over-shaved day and let later days
+        climb from an inflated base — 1200s of "progress" the card says is 0.
+        Two days are needed to tell the two rules apart; one day cannot."""
+        seed.gsm(seed.day(4), chars=1_000, secs=600, game_id="g1")
+        seed.shave(seed.day(4), "g1", -99_999)          # drives day 4 far negative
+        seed.gsm(seed.day(3), chars=2_000, secs=1_200, game_id="g1")
+        gid = _add_goal(seed, db, metric="time_seconds", target=360_000)
+        burn = db.db_get_goal_burnup(gid)
+        assert burn["actual"][-1] == 0, "the overhang must still be owed"
+        assert burn["actual"][-1] != 1_200, "that is what a per-day floor gives"
+        assert burn["actual"][-1] == pytest.approx(_card(db, gid)["completed"])
+
+    def test_a_start_in_the_future_yields_an_empty_series(self, seed, db):
+        gid = _add_goal(seed, db, start=-3, deadline=-10)
+        burn = db.db_get_goal_burnup(gid)
+        assert burn["dates"] == [] and burn["actual"] == []
+        assert burn["target"] == 100_000, "the axis metadata still comes back"
+
+    def test_an_unknown_goal_returns_none(self, seed, db):
+        assert db.db_get_goal_burnup(9999) is None
