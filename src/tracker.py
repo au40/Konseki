@@ -72,6 +72,7 @@ from imports import (pull_gsm_now, import_ttsu_zip_data,
                      import_gsm_history_apply, get_gsm_db_path,
                      list_gsm_sync_anomalies, acknowledge_gsm_sync_anomaly)
 from ext_server import ExtServer
+from drain import DrainLoop
 
 
 # ── Tray icon ─────────────────────────────────────────────────────────────────
@@ -226,6 +227,7 @@ class Api:
     def __init__(self):
         self._window    = None
         self._ext_server = None
+        self._drain      = None
 
     # ── Dashboard ─────────────────────────────────────────────────────────────
     def get_dashboard(self):
@@ -1185,13 +1187,21 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     def get_all_settings(self):
-        from ext_server import _get_or_create_token, _get_port
+        from ext_server import _get_or_create_token, _get_port, get_lan_ip, lan_ingest_enabled
+        lan = lan_ingest_enabled()
         return {
             "rollover_hour":    int(get_setting("rollover_hour", "0")),
             "gsm_url":          get_setting("gsm_url", imports.GSM_API),
             "theme":            get_setting("theme", "dark"),
             "ext_port":         _get_port(),
             "ext_token":        _get_or_create_token(),
+            "lan_ingest":       lan,
+            # The address other devices dial. Reflects the SETTING, not the live
+            # socket: after flipping the toggle the user needs the new address
+            # before the restart that actually rebinds it.
+            "ext_host":         get_lan_ip() if lan else "127.0.0.1",
+            "inbox_url":        get_setting("inbox_url", ""),
+            "inbox_drain_secs": int(get_setting("inbox_drain_secs", "120")),
             "gsm_debounce_secs": int(get_setting("gsm_debounce_secs", "60")),
             "gsm_settle_secs":  int(get_setting("gsm_settle_secs", "180")),
             "gsm_open_gap_secs": int(get_setting("gsm_open_gap_secs", "0")),
@@ -1209,6 +1219,22 @@ class Api:
             new_token = self._ext_server.reroll_token()
             return {"ok": True, "token": new_token}
         return {"ok": False}
+
+    def get_inbox_status(self):
+        """Backlog readout for Settings. A drain that quietly stops working is the
+        failure mode worth surfacing — an unreachable inbox on its own is not."""
+        if not self._drain:
+            return {"enabled": False}
+        return self._drain.status()
+
+    def drain_inbox_now(self):
+        if not self._drain:
+            return {"ok": False, "error": "drain not running"}
+        try:
+            n = self._drain.drain_once()
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "applied": n, **self._drain.status()}
 
     def save_settings(self, data):
         for key, value in data.items():
@@ -1279,6 +1305,11 @@ def main():
     ext_server       = ExtServer(on_import=api._notify)
     api._ext_server  = ext_server
     ext_server.start()
+
+    # Drains the always-on inbox into the DB. No-ops unless inbox_url is set.
+    drain_loop       = DrainLoop(on_applied=api._notify)
+    api._drain       = drain_loop
+    drain_loop.start()
 
     html_dir  = Path(__file__).parent
     html_path = html_dir / "ui.html"
@@ -1380,6 +1411,7 @@ def main():
             gsm_observer.join()
         if tray_icon:
             tray_icon.stop()
+        drain_loop.stop()
         ext_server.stop()
         lock.release()  # before the spawn below, so the replacement can acquire
         if _TRAY_AVAILABLE and _state.get("restarting"):

@@ -1,8 +1,14 @@
 // ── Settings ──────────────────────────────────────────────────────────────────
+// Host defaults to 127.0.0.1 (the tracker on this machine). Point it at the
+// tracker's LAN address — or at the always-on inbox — to sync from a device that
+// isn't the one running Konseki. Both speak the same paths and the same token.
+const hostEl   = document.getElementById("host");
 const portEl   = document.getElementById("port");
 const tokenEl  = document.getElementById("token");
 const saveBtn  = document.getElementById("save");
 const statusEl = document.getElementById("status");
+
+const DEFAULT_HOST = "127.0.0.1";
 
 const FALLBACK_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"];
 
@@ -21,12 +27,13 @@ function populateActivitySelect(types) {
 }
 
 async function fetchActivityTypes() {
-  const cfg   = await browser.storage.local.get(["port", "token"]);
+  const cfg   = await browser.storage.local.get(["host", "port", "token"]);
+  const host  = (cfg.host || "").trim() || DEFAULT_HOST;
   const port  = cfg.port  || 18463;
   const token = (cfg.token || "").trim();
   if (!token) return;
   try {
-    const resp  = await fetch(`http://127.0.0.1:${port}/activity-types`, {
+    const resp  = await fetch(`http://${host}:${port}/activity-types`, {
       headers: { "X-Tracker-Token": token },
     });
     if (resp.ok) {
@@ -38,12 +45,14 @@ async function fetchActivityTypes() {
   }
 }
 
-browser.storage.local.get(["port", "token"]).then(cfg => {
+browser.storage.local.get(["host", "port", "token"]).then(cfg => {
+  hostEl.value  = cfg.host  || DEFAULT_HOST;
   portEl.value  = cfg.port  || 18463;
   tokenEl.value = cfg.token || "";
 });
 
 saveBtn.addEventListener("click", async () => {
+  const host  = hostEl.value.trim() || DEFAULT_HOST;
   const port  = parseInt(portEl.value) || 18463;
   const token = tokenEl.value.trim();
 
@@ -57,8 +66,15 @@ saveBtn.addEventListener("click", async () => {
     statusEl.className   = "err";
     return;
   }
+  // Hostname or IP only — a pasted "http://host:port" would produce a URL like
+  // http://http://host:port/import that fails with a confusing network error.
+  if (/[:/\\ ]/.test(host)) {
+    statusEl.textContent = "Host must be a bare name or IP (no http://, no port).";
+    statusEl.className   = "err";
+    return;
+  }
 
-  await browser.storage.local.set({ port, token });
+  await browser.storage.local.set({ host, port, token });
   browser.action.setBadgeText({ text: "" });
   statusEl.textContent = "Saved.";
   statusEl.className   = "";
@@ -371,7 +387,7 @@ discardBtn.addEventListener("click", async () => {
 // ── Start / Log ───────────────────────────────────────────────────────────────
 startStopBtn.addEventListener("click", async () => {
   const cfg = await browser.storage.local.get(
-    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "port", "token"]
+    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "host", "port", "token"]
   );
 
   if (!cfg.timerRunning && !cfg.timerPaused && !cfg.timerWaiting) {
@@ -498,6 +514,7 @@ startStopBtn.addEventListener("click", async () => {
 
   if (elapsed < 1) return;
 
+  const host  = (cfg.host || "").trim() || "127.0.0.1";
   const port  = cfg.port  || 18463;
   const token = cfg.token || "";
 
@@ -508,7 +525,7 @@ startStopBtn.addEventListener("click", async () => {
   }
 
   try {
-    const resp = await fetch(`http://127.0.0.1:${port}/log-manual`, {
+    const resp = await fetch(`http://${host}:${port}/log-manual`, {
       method:  "POST",
       headers: {
         "Content-Type":    "application/json",
@@ -517,6 +534,10 @@ startStopBtn.addEventListener("click", async () => {
       body: JSON.stringify({
         activity_type: activity,
         time_seconds:  elapsed,
+        // Pins the logical day at capture time. Without it, a session finished
+        // at 01:00 that sits in the always-on inbox until morning would be dated
+        // by whenever the tracker drained it, not by when you actually read.
+        captured_at:   new Date().toISOString(),
       }),
     });
 

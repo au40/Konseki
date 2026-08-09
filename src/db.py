@@ -445,6 +445,23 @@ def get_today_date():
     return datetime.strptime(get_today(), "%Y-%m-%d").date()
 
 
+def logical_date_for(when):
+    """The logical (display) date a given LOCAL timestamp belongs to.
+
+    get_today() is exactly this evaluated at `now`; this variant exists because a
+    payload that sat in the always-on inbox must be dated by when it was
+    CAPTURED, not by when the desktop got around to applying it. Something logged
+    at 01:00 with rollover_hour=4 belongs to the previous logical day, and that
+    stays true whether it's applied a second later or the next morning.
+
+    This is the capture-time trap in plans/SERVER-PLAN.md: the applier must
+    never re-decide a date the capturer already decided."""
+    rollover = int(get_setting("rollover_hour", "0"))
+    if rollover > 0 and when.hour < rollover:
+        return str(when.date() - timedelta(days=1))
+    return str(when.date())
+
+
 def in_rollover_window():
     """True when the rollover hour shifts get_today() to the previous calendar date."""
     return get_today() != str(date.today())

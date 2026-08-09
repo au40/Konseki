@@ -5304,8 +5304,21 @@ async function loadSettings() {
   document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
   document.getElementById('gsm-debounce').value        = s.gsm_debounce_secs || 60;
   document.getElementById('gsm-open-gap').value         = s.gsm_open_gap_secs ?? 0;
+  document.getElementById('ext-host').value            = s.ext_host  || '127.0.0.1';
   document.getElementById('ext-port').value            = s.ext_port  || 18463;
   document.getElementById('ext-token').value           = s.ext_token || '';
+  const lanBox = document.getElementById('lan-ingest');
+  if (lanBox) {
+    lanBox.checked = !!s.lan_ingest;
+    renderLanHint(!!s.lan_ingest, s.ext_port || 18463);
+  }
+  const inboxUrlEl = document.getElementById('inbox-url');
+  if (inboxUrlEl) {
+    inboxUrlEl.value = s.inbox_url || '';
+    document.getElementById('inbox-drain-secs').value = s.inbox_drain_secs || 120;
+    // Status is a network round trip; only pay for it when it's configured.
+    document.getElementById('inbox-status').textContent = s.inbox_url ? '' : 'Not configured.';
+  }
   const gsmTimeBox  = document.getElementById('gsm-history-include-time');
   const ttsuTimeBox = document.getElementById('ttsu-history-include-time');
   if (gsmTimeBox)  gsmTimeBox.checked  = !!s.gsm_history_include_time;
@@ -5374,8 +5387,60 @@ async function maybeShowFirstRunModal() {
 }
 
 function copyExtField(id) {
-  const val = document.getElementById(id).value;
+  const el = document.getElementById(id);
+  if (!el) return;
+  // Inputs expose .value; the firewall command is a <code> block, so fall back
+  // to its text.
+  const val = ('value' in el && el.value !== undefined) ? el.value : el.textContent;
   navigator.clipboard.writeText(val).catch(() => {});
+}
+
+// The firewall rule is only relevant once we're actually binding off loopback,
+// and only on Windows — where a missing inbound rule looks exactly like a broken
+// server from the other device's side.
+function renderLanHint(on, port) {
+  const hint = document.getElementById('lan-firewall-hint');
+  const cmd  = document.getElementById('lan-firewall-cmd');
+  if (!hint || !cmd) return;
+  cmd.textContent = `New-NetFirewallRule -DisplayName "Konseki sync" -Direction Inbound -Protocol TCP -LocalPort ${port} -Action Allow -Profile Private`;
+  hint.style.display = on ? '' : 'none';
+}
+
+async function saveInboxSettings() {
+  const inbox_url = document.getElementById('inbox-url').value.trim().replace(/\/+$/, '');
+  const raw = document.getElementById('inbox-drain-secs').value;
+  const inbox_drain_secs = raw === '' ? 120 : Math.max(15, parseInt(raw) || 120);
+  appSettings = { ...appSettings, inbox_url, inbox_drain_secs };
+  await window.pywebview.api.save_settings({ inbox_url, inbox_drain_secs });
+  refreshInboxStatus();
+}
+
+// Draining is meant to be invisible — an inbox that's merely unreachable is the
+// normal case, not an error. This readout exists so a drain that has quietly
+// stopped working is findable, and so "did my phone's log arrive?" is answerable.
+async function refreshInboxStatus() {
+  const el = document.getElementById('inbox-status');
+  if (!el) return;
+  el.textContent = 'Checking…';
+  const s = await window.pywebview.api.drain_inbox_now();
+  if (!s || s.enabled === false) { el.textContent = 'Not configured.'; return; }
+  if (!s.reachable) {
+    el.textContent = `Can't reach it${s.last_error ? ' — ' + s.last_error : ''}.`;
+    return;
+  }
+  const bits = [];
+  if (s.applied) bits.push(`Collected ${s.applied} session${s.applied === 1 ? '' : 's'}`);
+  bits.push(s.pending ? `${s.pending} still waiting` : 'nothing waiting');
+  el.textContent = bits.join(' · ') + '.';
+}
+
+async function onToggleLanIngest() {
+  const on = document.getElementById('lan-ingest').checked;
+  appSettings = { ...appSettings, lan_ingest: on };
+  await window.pywebview.api.save_settings({ lan_ingest: on });
+  renderLanHint(on, (appSettings && appSettings.ext_port) || 18463);
+  setStatus(on ? 'LAN sync on — restart Konseki to apply'
+               : 'LAN sync off — restart Konseki to apply');
 }
 
 async function rerollExtToken() {

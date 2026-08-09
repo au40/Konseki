@@ -54,13 +54,14 @@ function readTodayEntries() {
 }
 
 async function postToTracker(entries) {
-  const cfg   = await browser.storage.local.get(["port", "token"]);
+  const cfg   = await browser.storage.local.get(["host", "port", "token"]);
+  const host  = (cfg.host || "").trim() || "127.0.0.1";
   const port  = cfg.port  || 18463;
   const token = (cfg.token || "").trim();
-  console.log("[immersion-sync] postToTracker — token set:", !!token, "port:", port, "entries:", entries.length);
+  console.log("[immersion-sync] postToTracker — token set:", !!token, "host:", host, "port:", port, "entries:", entries.length);
   if (!token) return;
 
-  const r = await fetch(`http://127.0.0.1:${port}/import`, {
+  const r = await fetch(`http://${host}:${port}/import`, {
     method: "POST",
     headers: {
       "Content-Type":    "application/json",

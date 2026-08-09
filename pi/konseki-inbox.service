@@ -1,0 +1,31 @@
+[Unit]
+Description=Konseki inbox (store and forward)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=konseki
+Group=konseki
+
+# Same token as Konseki's Settings > Browser extension page. Keep this file
+# 0600 and owned by root — it is the only thing protecting the endpoint.
+EnvironmentFile=/etc/konseki/inbox.env
+
+ExecStart=/usr/bin/python3 /opt/konseki/inbox_server.py \
+    --db /var/lib/konseki/inbox.db \
+    --port 18463
+
+Restart=always
+RestartSec=5
+
+# The service needs nothing but its own state directory.
+StateDirectory=konseki
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/konseki
+
+[Install]
+WantedBy=multi-user.target

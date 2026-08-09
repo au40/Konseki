@@ -190,7 +190,10 @@
   <details>
     <summary>Extension Settings</summary>
 
-    <p class="sub" style="margin-top:10px;">Port and token from your tracker's Settings page.</p>
+    <p class="sub" style="margin-top:10px;">Host, port and token from your tracker's Settings page. Leave the host at 127.0.0.1 if the tracker runs on this machine.</p>
+
+    <label>Host</label>
+    <input id="host" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false">
 
     <label>Port</label>
     <input id="port" type="number" placeholder="18463" min="1024" max="65535">

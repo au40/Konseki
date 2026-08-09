@@ -187,14 +187,15 @@ browser.runtime.onMessage.addListener(async (msg) => {
 
   if (msg.type !== "sync") return;
 
-  const cfg   = await browser.storage.local.get(["port", "token"]);
+  const cfg   = await browser.storage.local.get(["host", "port", "token"]);
+  const host  = (cfg.host || "").trim() || "127.0.0.1";
   const port  = cfg.port  || 18463;
   const token = (cfg.token || "").trim();
 
   if (!token) return; // not configured yet
 
   try {
-    await fetch(`http://127.0.0.1:${port}/import`, {
+    await fetch(`http://${host}:${port}/import`, {
       method: "POST",
       headers: {
         "Content-Type":    "application/json",
