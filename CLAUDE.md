@@ -133,6 +133,43 @@ the shared `_adjusted_day_totals` helper — reuse it rather than re-deriving.
   survives for schema compatibility but is written `NULL` and read by nothing,
   same as `cards_mined`.
 
+# `sessions.client_id` — idempotency for network-delivered sessions
+
+`client_id` is an optional key a *network* client stamps on a session so that
+re-sending it is a no-op instead of a duplicate. Enforced by a **partial** unique
+index (`idx_sessions_client_id ... WHERE client_id IS NOT NULL`, [db.py](src/db.py)).
+
+**Why it exists.** A manual/stopwatch session has no natural key: two separate
+30-minute Listening sessions on one day are byte-identical to one logged twice.
+So a client that retries — the extension after a failed POST, or the drain loop
+replaying an inbox row after a crash landed between the INSERT and its
+high-water-mark write — cannot be told apart from a genuine second session. ttsu
+needs none of this; `import_ttsu_entries` upserts on `(title, session_date)`,
+which *is* a natural key.
+
+**Rules if you touch it:**
+
+- **Locally created rows leave it `NULL`** — in-app logging (`insert_manual_session`),
+  CSV import, GSM, ttsu. NULLs are outside the partial index and can never
+  collide, so nothing about those paths changes.
+- **A partial unique index requires its `WHERE` clause repeated in any
+  `ON CONFLICT` target.** A bare `ON CONFLICT(client_id)` raises *"does not match
+  any PRIMARY KEY or UNIQUE constraint"*. See `log_manual_session` in
+  [imports.py](src/imports.py) for the working form.
+- **Clients must mint a fresh id per session and persist it.** Generating one
+  per *request* gives every retry a new id and buys nothing; reusing one across
+  two genuinely different sessions makes the server silently drop the second —
+  the one way this feature can lose data. `popup.js` mints at freeze time and
+  stores it in `timerClientId` (part of `TIMER_STATE_KEYS`, so it's cleared with
+  the rest of the session).
+- `log_manual_session` returns `{"logged": True, "duplicate": True}` when the key
+  was already stored. **A duplicate is a success, not an error** — the drain must
+  still advance its high-water mark past it or it will replay forever.
+- The Pi inbox knows nothing about this. It stores raw JSON, so the key rides
+  through untouched — no deploy needed there.
+
+Any future producer (the GSM agent) gets idempotency by including a key.
+
 ## GSM "reopen catch-up" pull — EXPERIMENTAL
 
 `GsmWalHandler` in [tracker.py](src/tracker.py) has a third pull trigger

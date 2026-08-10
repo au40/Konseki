@@ -126,10 +126,14 @@ def apply_payload(path, body):
         return import_ttsu_entries(body.get("entries", [])), 200
 
     if path == "/log-manual":
+        # client_id is what makes a retry safe — the stopwatch re-sends the same
+        # one, and so does a drain replaying an inbox row after a crash. Absent
+        # (in-app logging, older extension builds) it behaves as it always did.
         return log_manual_session(
             body.get("activity_type", ""),
             body.get("time_seconds", 0),
             body.get("session_date", "") or _captured_date(body),
+            body.get("client_id"),
         ), 200
 
     return {"error": f"unknown path {path!r}"}, 404

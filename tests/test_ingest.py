@@ -119,6 +119,115 @@ class TestManualCaptureTime:
         assert _last_date() == dbm.get_today()
 
 
+class TestIdempotency:
+    """A manual session has no natural key, so a retry is indistinguishable from
+    a second session without one. These are the guarantees the client relies on."""
+
+    def _log(self, seed, key, secs=600, date="2026-03-01", atype="Reading"):
+        return ext_server.apply_payload("/log-manual", {
+            "activity_type": atype, "time_seconds": secs,
+            "session_date": date, "client_id": key,
+        })[0]
+
+    def test_the_same_key_twice_stores_one_row(self, seed):
+        first  = self._log(seed, "abc-123")
+        second = self._log(seed, "abc-123")
+        assert first == {"logged": True}
+        assert second == {"logged": True, "duplicate": True}
+        assert len(_rows()) == 1
+
+    def test_different_keys_store_separate_rows(self, seed):
+        """Two genuinely separate identical sessions must BOTH be kept — that's
+        why a natural key can't work here."""
+        self._log(seed, "k1")
+        self._log(seed, "k2")
+        assert len(_rows()) == 2
+
+    def test_a_duplicate_does_not_overwrite_the_original(self, seed):
+        self._log(seed, "k1", secs=600)
+        self._log(seed, "k1", secs=99999, date="2099-01-01")
+        rows = _rows("session_date, time_seconds")
+        assert rows == [("2026-03-01", 600.0)]
+
+    def test_rows_without_a_key_never_collide(self, seed):
+        """In-app logging and CSV import pass no key; NULL is outside the partial
+        index, so identical rows must still all be stored."""
+        for _ in range(3):
+            ext_server.apply_payload("/log-manual", {
+                "activity_type": "Reading", "time_seconds": 600,
+                "session_date": "2026-03-01",
+            })
+        assert len(_rows()) == 3
+
+    @pytest.mark.parametrize("blank", ["", "   ", None])
+    def test_a_blank_key_is_treated_as_absent(self, seed, blank):
+        for _ in range(2):
+            ext_server.apply_payload("/log-manual", {
+                "activity_type": "Reading", "time_seconds": 600,
+                "session_date": "2026-03-01", "client_id": blank,
+            })
+        assert len(_rows()) == 2
+
+    def test_a_key_does_not_bypass_validation(self, seed):
+        res, _ = ext_server.apply_payload("/log-manual", {
+            "activity_type": "Reading", "time_seconds": 0, "client_id": "k1",
+        })
+        assert res.get("error") and _rows() == []
+
+    def test_the_key_does_not_leak_into_gsm_rows(self, seed):
+        """The partial index spans the whole table. GSM rows carry NULL, so the
+        one-row-per-(game_id, date) index is the only one that governs them."""
+        seed.gsm(seed.day(0), chars=100, secs=60, game_id="g1")
+        con = sqlite3.connect(dbm.DB_PATH)
+        try:
+            keys = con.execute(
+                "SELECT DISTINCT client_id FROM sessions WHERE source='gsm'").fetchall()
+        finally:
+            con.close()
+        assert keys == [(None,)]
+
+
+class TestDrainReplayIsIdempotent:
+    """The gap this closes: a crash landing between the session INSERT and the
+    high-water-mark write replays one row on restart."""
+
+    def test_replaying_a_manual_row_does_not_double_count(self, loop, monkeypatch):
+        body = {"activity_type": "Reading", "time_seconds": 600,
+                "session_date": "2026-03-01", "client_id": "replay-me"}
+        fake = FakeInbox([_row(1, "/log-manual", body)])
+        _wire(monkeypatch, fake)
+        loop.drain_once()
+
+        # Simulate the crash: the row was applied but the pointer never advanced.
+        dbm.set_setting("last_applied_inbox_id", "0")
+        loop.drain_once()
+
+        assert len(_rows()) == 1
+
+    def test_a_keyless_row_still_double_counts_on_replay(self, loop, monkeypatch):
+        """Documents the remaining exposure honestly: older extension builds send
+        no key, and nothing can dedup those."""
+        body = {"activity_type": "Reading", "time_seconds": 600,
+                "session_date": "2026-03-01"}
+        fake = FakeInbox([_row(1, "/log-manual", body)])
+        _wire(monkeypatch, fake)
+        loop.drain_once()
+        dbm.set_setting("last_applied_inbox_id", "0")
+        loop.drain_once()
+        assert len(_rows()) == 2
+
+    def test_a_duplicate_still_counts_as_applied(self, loop, monkeypatch):
+        """It must not look like a failure, or the drain would stall retrying."""
+        body = {"activity_type": "Reading", "time_seconds": 600,
+                "session_date": "2026-03-01", "client_id": "k1"}
+        fake = FakeInbox([_row(1, "/log-manual", body)])
+        _wire(monkeypatch, fake)
+        loop.drain_once()
+        dbm.set_setting("last_applied_inbox_id", "0")
+        assert loop.drain_once() == 1
+        assert dbm.get_setting("last_applied_inbox_id") == "1"
+
+
 class TestApplyPayloadDispatch:
     def test_ttsu_entries_keep_their_own_datekey(self, seed):
         """ttsu payloads are already date-pinned per entry, so captured_at must

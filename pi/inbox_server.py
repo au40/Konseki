@@ -59,6 +59,25 @@ class Inbox:
     `id` is monotonic and is the high-water mark the desktop tracks. Rows are
     never deleted on ack — only stamped — so restoring a week-old desktop backup
     is a rewind rather than data loss. Pruning happens on a long timer instead.
+
+    ── ONE PERSISTENT CONNECTION, ON PURPOSE ────────────────────────────────
+    This runs off an SD card, and SD cards die of writes. Not from this
+    workload's volume — a few hundred payloads a day is nothing (see README) —
+    but connect-per-request quietly multiplies it for no benefit:
+
+      * The LAST connection to close a WAL database checkpoints it and deletes
+        the -wal/-shm files. Reconnecting per request therefore forces a full
+        checkpoint on *every commit* — reinstating exactly the double-write that
+        WAL exists to defer — and churns four file create/deletes (filesystem
+        metadata, itself journalled) around each one.
+      * Even a pure read creates and removes -shm. `/pending` is unauthenticated
+        so a browser left refreshing it would generate writes while reading
+        nothing.
+
+    Holding one connection open collapses a payload to a single sequential WAL
+    append, with a real checkpoint only every `wal_autocheckpoint` pages.
+    `check_same_thread=False` + the lock, because ThreadingHTTPServer dispatches
+    each request on its own thread. At this request rate the lock never contends.
     """
 
     def __init__(self, path):
@@ -67,34 +86,35 @@ class Inbox:
         d = os.path.dirname(os.path.abspath(path))
         if d:
             os.makedirs(d, exist_ok=True)
-        con = self._connect()
-        try:
-            con.execute("""
-                CREATE TABLE IF NOT EXISTS inbox (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    received_at TEXT NOT NULL,
-                    path        TEXT NOT NULL,
-                    source      TEXT,
-                    device_id   TEXT,
-                    body_json   TEXT NOT NULL,
-                    applied_at  TEXT
-                )
-            """)
-            con.execute("""
-                CREATE INDEX IF NOT EXISTS idx_inbox_unapplied
-                    ON inbox(id) WHERE applied_at IS NULL
-            """)
-            # Survives power loss on a Pi that gets yanked from the wall, which is
-            # the normal way a Pi shuts down.
-            con.execute("PRAGMA journal_mode=WAL")
-            con.commit()
-        finally:
-            con.close()
+        self._con = sqlite3.connect(path, timeout=10.0, check_same_thread=False)
+        self._con.execute("PRAGMA busy_timeout=10000")
+        self._con.execute("PRAGMA journal_mode=WAL")
+        # FULL fsyncs the WAL on each commit. That's one sequential fsync per
+        # payload — irrelevant for wear at this volume — and it's what makes a
+        # yanked power cable lose nothing already acknowledged with a 200. An
+        # inbox that drops the last few sessions on a power cut has failed at the
+        # one job it has, so this is not the knob to turn for card life.
+        self._con.execute("PRAGMA synchronous=FULL")
+        self._con.execute("""
+            CREATE TABLE IF NOT EXISTS inbox (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                received_at TEXT NOT NULL,
+                path        TEXT NOT NULL,
+                source      TEXT,
+                device_id   TEXT,
+                body_json   TEXT NOT NULL,
+                applied_at  TEXT
+            )
+        """)
+        self._con.execute("""
+            CREATE INDEX IF NOT EXISTS idx_inbox_unapplied
+                ON inbox(id) WHERE applied_at IS NULL
+        """)
+        self._con.commit()
 
-    def _connect(self):
-        con = sqlite3.connect(self.path, timeout=10.0)
-        con.execute("PRAGMA busy_timeout=10000")
-        return con
+    def close(self):
+        with self._lock:
+            self._con.close()
 
     def append(self, path, body):
         """Store one payload verbatim. `source`/`device_id` are lifted out for the
@@ -102,32 +122,25 @@ class Inbox:
         source    = body.get("source")    if isinstance(body, dict) else None
         device_id = body.get("device_id") if isinstance(body, dict) else None
         with self._lock:
-            con = self._connect()
-            try:
-                cur = con.execute(
-                    "INSERT INTO inbox (received_at, path, source, device_id, body_json) "
-                    "VALUES (?,?,?,?,?)",
-                    (datetime.now().astimezone().isoformat(), path,
-                     str(source) if source else None,
-                     str(device_id) if device_id else None,
-                     json.dumps(body, ensure_ascii=False)),
-                )
-                con.commit()
-                return cur.lastrowid
-            finally:
-                con.close()
+            cur = self._con.execute(
+                "INSERT INTO inbox (received_at, path, source, device_id, body_json) "
+                "VALUES (?,?,?,?,?)",
+                (datetime.now().astimezone().isoformat(), path,
+                 str(source) if source else None,
+                 str(device_id) if device_id else None,
+                 json.dumps(body, ensure_ascii=False)),
+            )
+            self._con.commit()
+            return cur.lastrowid
 
     def unapplied(self, since=0, limit=500):
-        con = self._connect()
-        try:
-            rows = con.execute(
+        with self._lock:
+            rows = self._con.execute(
                 "SELECT id, received_at, path, source, device_id, body_json "
                 "FROM inbox WHERE id > ? AND applied_at IS NULL "
                 "ORDER BY id ASC LIMIT ?",
                 (int(since), int(limit)),
             ).fetchall()
-        finally:
-            con.close()
         return [
             {"id": r[0], "received_at": r[1], "path": r[2],
              "source": r[3], "device_id": r[4], "body_json": r[5]}
@@ -136,46 +149,41 @@ class Inbox:
 
     def ack(self, through_id):
         with self._lock:
-            con = self._connect()
-            try:
-                cur = con.execute(
-                    "UPDATE inbox SET applied_at=? WHERE id <= ? AND applied_at IS NULL",
-                    (datetime.now().astimezone().isoformat(), int(through_id)),
-                )
-                con.commit()
-                return cur.rowcount
-            finally:
-                con.close()
+            cur = self._con.execute(
+                "UPDATE inbox SET applied_at=? WHERE id <= ? AND applied_at IS NULL",
+                (datetime.now().astimezone().isoformat(), int(through_id)),
+            )
+            self._con.commit()
+            return cur.rowcount
 
     def pending(self):
-        con = self._connect()
-        try:
-            n, oldest = con.execute(
+        with self._lock:
+            n, oldest = self._con.execute(
                 "SELECT COUNT(*), MIN(received_at) FROM inbox WHERE applied_at IS NULL"
             ).fetchone()
-            by_source = dict(con.execute(
+            by_source = dict(self._con.execute(
                 "SELECT COALESCE(source, path), COUNT(*) FROM inbox "
                 "WHERE applied_at IS NULL GROUP BY 1"
             ).fetchall())
-            high = con.execute("SELECT COALESCE(MAX(id), 0) FROM inbox").fetchone()[0]
-        finally:
-            con.close()
+            high = self._con.execute("SELECT COALESCE(MAX(id), 0) FROM inbox").fetchone()[0]
         return {"count": n, "oldest_received_at": oldest,
                 "by_source": by_source, "max_id": high}
 
     def prune(self, retention_days):
         cutoff = (datetime.now().astimezone() - timedelta(days=retention_days)).isoformat()
         with self._lock:
-            con = self._connect()
-            try:
-                cur = con.execute(
-                    "DELETE FROM inbox WHERE applied_at IS NOT NULL AND applied_at < ?",
-                    (cutoff,),
-                )
-                con.commit()
-                return cur.rowcount
-            finally:
-                con.close()
+            cur = self._con.execute(
+                "DELETE FROM inbox WHERE applied_at IS NOT NULL AND applied_at < ?",
+                (cutoff,),
+            )
+            self._con.commit()
+            # A prune is the one place rows leave, so it's the only place the file
+            # can shrink. Checkpoint here rather than leaving a WAL that has
+            # absorbed a month of deletes. No VACUUM: rewriting the whole file to
+            # reclaim a few KB is precisely the write burst we're avoiding.
+            if cur.rowcount:
+                self._con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            return cur.rowcount
 
 
 # ── Activity types cache ──────────────────────────────────────────────────────

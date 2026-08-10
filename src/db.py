@@ -54,6 +54,8 @@ def init_db():
         ("cards_mined",    "INTEGER DEFAULT 0"),
         ("game_id",        "TEXT"),
         ("time_excluded",  "INTEGER DEFAULT 0"),
+        # Idempotency key supplied by a network client (see the index below).
+        ("client_id",      "TEXT"),
     ]:
         if col_name not in cols:
             con.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
@@ -395,6 +397,27 @@ def init_db():
     con.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_gsm_one_row_per_day
             ON sessions(game_id, session_date) WHERE source='gsm'
+    """)
+
+    # Idempotency for network-delivered sessions. A manual/stopwatch session has
+    # NO natural key — two separate 30-minute Listening sessions on one day are
+    # byte-identical to one logged twice — so a client that retries after a lost
+    # response would double-count. ttsu needs none of this: import_ttsu_entries
+    # upserts on (title, session_date), which is a real natural key.
+    #
+    # Partial, so the overwhelming majority of rows (locally created, client_id
+    # NULL) are simply not in the index and can never collide with each other.
+    # NOTE: a partial unique index REQUIRES its WHERE clause to be repeated in
+    # any ON CONFLICT target — a bare `ON CONFLICT(client_id)` raises "does not
+    # match any PRIMARY KEY or UNIQUE constraint". See log_manual_session.
+    #
+    # The safety of this rests entirely on clients minting a FRESH id per
+    # session. An id reused across two genuinely different sessions silently
+    # drops the second — losing data in a new way, which is the one real risk
+    # here.
+    con.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_client_id
+            ON sessions(client_id) WHERE client_id IS NOT NULL
     """)
 
     con.commit()

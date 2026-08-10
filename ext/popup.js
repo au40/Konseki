@@ -146,6 +146,32 @@ function formatTime(totalSeconds) {
   return [h, m, s].map(v => String(v).padStart(2, "0")).join(":");
 }
 
+// Every key a live session owns. Discard and a successful Log both wipe exactly
+// this set; keeping one list means the two can't drift apart and strand a key
+// that would resurrect a dead session.
+const TIMER_STATE_KEYS = [
+  "timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed",
+  "timerActivity", "timerAutoPaused", "timerAudioDetect", "timerTabId",
+  "timerMode", "timerRecovered", "timerLastTick", "timerClientId",
+];
+
+function clearTimerState() {
+  return browser.storage.local.remove(TIMER_STATE_KEYS);
+}
+
+// Idempotency key for /log-manual. A stopwatch session has no natural key on the
+// server — two separate 30-minute sessions on one day look identical to one sent
+// twice — so this is the only thing that lets a retry be distinguished from a
+// second session.
+//
+// It MUST be minted once per session and persisted: generating one per request
+// would give every retry a new id and buy nothing. Equally it must never be
+// reused across sessions, or the server silently drops the second one.
+function newClientId() {
+  if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
+  return `k-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
+
 function getElapsed(cfg) {
   const base = cfg.timerElapsed || 0;
   if (cfg.timerRunning && cfg.timerStart) {
@@ -365,9 +391,7 @@ discardBtn.addEventListener("click", async () => {
   if (trivial || confirming) {
     resetDiscardBtn();
     timerStatus.onclick = null;
-    await browser.storage.local.remove(
-      ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerAutoPaused", "timerAudioDetect", "timerTabId", "timerMode", "timerRecovered", "timerLastTick"]
-    );
+    await clearTimerState();
     applyState({});
     if (elapsed >= 1) {
       timerStatus.textContent = `Discarded ${formatTime(elapsed)}.`;
@@ -387,7 +411,8 @@ discardBtn.addEventListener("click", async () => {
 // ── Start / Log ───────────────────────────────────────────────────────────────
 startStopBtn.addEventListener("click", async () => {
   const cfg = await browser.storage.local.get(
-    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "host", "port", "token"]
+    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed",
+     "timerMode", "timerClientId", "host", "port", "token"]
   );
 
   if (!cfg.timerRunning && !cfg.timerPaused && !cfg.timerWaiting) {
@@ -503,30 +528,71 @@ startStopBtn.addEventListener("click", async () => {
   }
 
   // → Stop (from running, paused, or waiting)
+  //
+  // ORDER MATTERS: freeze, POST, and only discard the session once the server
+  // has actually taken it. The old order cleared the timer FIRST and posted
+  // after, so any failed post — tracker closed, wifi down, the always-on inbox
+  // rebooting — destroyed the session with nothing to retry from. The elapsed
+  // time existed only in storage we'd already deleted.
   timerStatus.onclick = null;
   const elapsed  = getElapsed(cfg);
   const activity = activitySelect.value;
 
-  await browser.storage.local.remove(
-    ["timerRunning", "timerPaused", "timerWaiting", "timerStart", "timerElapsed", "timerActivity", "timerAutoPaused", "timerAudioDetect", "timerTabId", "timerMode", "timerRecovered", "timerLastTick"]
-  );
-  applyState({});
+  if (elapsed < 1) {                       // nothing worth keeping
+    await clearTimerState();
+    applyState({});
+    return;
+  }
 
-  if (elapsed < 1) return;
+  // Reuse the id from a previous failed attempt if there is one — that is what
+  // makes the retry a retry rather than a second session.
+  const clientId = cfg.timerClientId || newClientId();
+
+  // Freeze into the paused state before going near the network. This stops the
+  // clock at the instant Log was pressed (so a retry logs the same duration, not
+  // a longer one) and means a popup closed mid-request leaves a recoverable
+  // session rather than a running timer or a hole.
+  async function freeze() {
+    const frozen = {
+      timerRunning: false, timerWaiting: false, timerAutoPaused: false,
+      timerPaused: true, timerStart: null,
+      timerElapsed: elapsed, timerActivity: activity,
+      timerMode: cfg.timerMode || "manual",
+      timerClientId: clientId,
+    };
+    await browser.storage.local.set(frozen);
+    // timerRecovered would make applyState overwrite our status text, and this
+    // session isn't "recovered" — it was just logged by hand.
+    await browser.storage.local.remove("timerRecovered");
+    applyState(frozen);
+  }
 
   const host  = (cfg.host || "").trim() || "127.0.0.1";
   const port  = cfg.port  || 18463;
   const token = cfg.token || "";
 
   if (!token) {
-    timerStatus.textContent = "No token set — configure in Settings.";
+    await freeze();
+    timerStatus.textContent = "No token set — configure below, then press Log.";
     timerStatus.className   = "err";
     return;
   }
 
+  await freeze();
+  startStopBtn.disabled   = true;
+  timerStatus.textContent = "Logging…";
+  timerStatus.className   = "";
+
+  // Don't sit on "Logging…" indefinitely if the host black-holes packets
+  // (a refused connection fails instantly; an unreachable IP would not).
+  const abort = new AbortController();
+  const abortTimer = setTimeout(() => abort.abort(), 10000);
+
+  let failure = "Couldn't reach the tracker — press Log to retry.";
   try {
     const resp = await fetch(`http://${host}:${port}/log-manual`, {
       method:  "POST",
+      signal:  abort.signal,
       headers: {
         "Content-Type":    "application/json",
         "X-Tracker-Token": token,
@@ -538,19 +604,41 @@ startStopBtn.addEventListener("click", async () => {
         // at 01:00 that sits in the always-on inbox until morning would be dated
         // by whenever the tracker drained it, not by when you actually read.
         captured_at:   new Date().toISOString(),
+        // Stable across retries — see newClientId().
+        client_id:     clientId,
       }),
     });
 
     if (resp.ok) {
-      timerStatus.textContent = `Logged ${formatTime(elapsed)} of ${activity}`;
-      timerStatus.className   = "";
-      setTimeout(() => { timerStatus.textContent = ""; }, 4000);
+      // /log-manual answers 200 with {ok:true, error:"..."} for a rejected
+      // payload, so the status code alone isn't proof it was stored.
+      let body = {};
+      try { body = await resp.json(); } catch {}
+      if (!body.error) {
+        await clearTimerState();
+        applyState({});
+        timerStatus.textContent = `Logged ${formatTime(elapsed)} of ${activity}`;
+        timerStatus.className   = "";
+        setTimeout(() => { timerStatus.textContent = ""; }, 4000);
+        return;
+      }
+      failure = body.error;               // retrying won't help; Discard will
+    } else if (resp.status === 403) {
+      failure = "Rejected — check the token below.";
     } else {
-      timerStatus.textContent = "Failed to log — is the tracker running?";
-      timerStatus.className   = "err";
+      failure = `Tracker returned ${resp.status} — press Log to retry.`;
     }
   } catch {
-    timerStatus.textContent = "Could not connect to tracker.";
-    timerStatus.className   = "err";
+    // Network error or the 10s abort. The session is still frozen in storage.
+  } finally {
+    clearTimeout(abortTimer);
+    startStopBtn.disabled = false;
   }
+
+  // If the server actually stored the session and only the response was lost —
+  // most likely via the 10s abort above firing against a slow-but-working host —
+  // the retry carries the same client_id and is discarded server-side instead of
+  // logged twice.
+  timerStatus.textContent = failure;
+  timerStatus.className   = "err";
 });

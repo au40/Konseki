@@ -116,12 +116,18 @@ class DrainLoop:
            those last-write-wins is the intended semantics and only holds if the
            last write really is last.
         2. `last_applied_inbox_id` advances **after each row**, not after the
-           batch. `import_ttsu_entries` de-dups a replay, but `log_manual_session`
-           does not — a re-applied manual session double-counts. Per-row
-           persistence shrinks the exposure to a crash landing between the session
-           INSERT and the setting write. It does not close it; nothing short of a
-           shared transaction would, and the import functions own their own
-           connections.
+           batch, so a crash mid-batch resumes past what's already applied rather
+           than replaying it.
+
+           That ordering used to be the only thing standing between a crash and a
+           double-count, and it left a real gap: a crash landing between the
+           session INSERT and this setting write would replay one row.
+           `import_ttsu_entries` absorbs a replay (it upserts on
+           `(title, session_date)`), but `log_manual_session` had no natural key
+           to absorb it with. That gap is now closed from the other end — payloads
+           carrying a `client_id` are idempotent at the INSERT, so a replay is a
+           no-op no matter where the crash landed. Per-row persistence stays,
+           because it still saves the pointless re-work.
         3. The `/ack` goes **last**, after everything is applied and persisted. Ack
            marks rather than deletes, so an ack that never lands is harmless — the
            high-water mark already stops us re-fetching. The reverse order is the
@@ -160,6 +166,13 @@ class DrainLoop:
                     elif result.get("error"):
                         print(f"[drain] inbox #{rid} rejected: {result['error']}")
                     else:
+                        # A duplicate is a SUCCESS: the row carried a client_id
+                        # we'd already stored, so this is the replay window below
+                        # closing itself rather than double-counting. Worth
+                        # printing — a steady stream of them means the
+                        # high-water mark isn't advancing.
+                        if result.get("duplicate"):
+                            print(f"[drain] inbox #{rid} already applied (idempotent replay)")
                         applied += 1
                 except Exception as e:
                     print(f"[drain] inbox #{rid} failed to apply: {e}")

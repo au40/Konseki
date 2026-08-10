@@ -756,8 +756,26 @@ pull_gsm_now = pull_gsm_api_only
 
 
 # ── ッツ Reader ────────────────────────────────────────────────────────────────
-def log_manual_session(activity_type, time_seconds, session_date):
-    """Insert a manually timed stopwatch session into the DB."""
+def log_manual_session(activity_type, time_seconds, session_date, client_id=None):
+    """Insert a manually timed stopwatch session into the DB.
+
+    `client_id` makes the insert idempotent. It matters because this row has no
+    natural key — two separate 30-minute Listening sessions on one day are
+    indistinguishable from one logged twice — so any caller that can retry needs
+    a way to say "this is the same session I already sent". Two callers can:
+
+      * the extension's stopwatch, retrying after a failed/timed-out POST;
+      * the drain loop, replaying an inbox row after a crash landed between the
+        INSERT here and its high-water-mark write.
+
+    Both re-send the SAME id, so the second attempt is a no-op rather than a
+    duplicate. Omitting it (in-app logging, CSV import) keeps the old behaviour
+    exactly: client_id NULL is outside the partial unique index, so those rows
+    never collide with each other.
+
+    Returns {"logged": True} — plus "duplicate": True when the key had already
+    been stored, so a caller can tell "accepted" from "accepted again".
+    """
     if not activity_type:
         return {"error": "activity_type is required"}
     if not session_date:
@@ -766,14 +784,27 @@ def log_manual_session(activity_type, time_seconds, session_date):
     if time_secs <= 0:
         return {"error": "time_seconds must be > 0"}
 
+    key = (str(client_id).strip() or None) if client_id else None
+
     con = sqlite3.connect(DB_PATH)
-    con.execute("""
-        INSERT INTO sessions
-          (source, title, activity_type, session_date, time_seconds, ingested_at, time_excluded)
-        VALUES (?,?,?,?,?,?,0)
-    """, ("manual", None, activity_type, session_date, time_secs, datetime.now().isoformat()))
-    con.commit()
-    con.close()
+    try:
+        # The WHERE clause is not optional: a partial unique index requires the
+        # conflict target to repeat it (see the index in init_db).
+        cur = con.execute("""
+            INSERT INTO sessions
+              (source, title, activity_type, session_date, time_seconds,
+               ingested_at, time_excluded, client_id)
+            VALUES (?,?,?,?,?,?,0,?)
+            ON CONFLICT(client_id) WHERE client_id IS NOT NULL DO NOTHING
+        """, ("manual", None, activity_type, session_date, time_secs,
+              datetime.now().isoformat(), key))
+        con.commit()
+        inserted = cur.rowcount
+    finally:
+        con.close()
+
+    if key and not inserted:
+        return {"logged": True, "duplicate": True}
     return {"logged": True}
 
 
