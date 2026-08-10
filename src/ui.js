@@ -559,6 +559,36 @@ async function doDeleteSessionGroup(ids, btn) {
   if (currentPage === 'dashboard') loadDashboard();
 }
 
+// ── Heatmap color ramp ──────────────────────────────────────────────────────
+// HEATMAP_COLORS[0] is the categorical "no reading" shade; stops 1..4 are
+// gradient anchors spread evenly over 0 → HEATMAP_CAP_HOURS, interpolated so
+// brightness climbs with every extra minute instead of snapping at a bucket
+// edge. The anchors are absolute, not window-relative, so the same day reads
+// the same color across years and between the dashboard and Stats.
+const HEATMAP_CAP_HOURS = 3;
+
+function mixHex(a, b, f) {
+  const na = parseInt((a || '').replace('#', ''), 16);
+  const nb = parseInt((b || '').replace('#', ''), 16);
+  if (isNaN(na) || isNaN(nb)) return a;
+  const ch = sh => {
+    const x = (na >> sh) & 255, y = (nb >> sh) & 255;
+    return Math.round(x + (y - x) * f);
+  };
+  return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+}
+
+function heatmapColor(secs) {
+  if (!secs || secs <= 0) return HEATMAP_COLORS[0];
+  const stops = HEATMAP_COLORS.slice(1);
+  // Any reading at all floors at stops[0], so a 2-minute day still reads as
+  // distinct from an empty one.
+  const t   = Math.min(secs / 3600 / HEATMAP_CAP_HOURS, 1);
+  const pos = t * (stops.length - 1);
+  const i   = Math.min(Math.floor(pos), stops.length - 2);
+  return mixHex(stops[i], stops[i + 1], pos - i);
+}
+
 // ── Heatmap renderer ────────────────────────────────────────────────────────
 function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
   const container = document.getElementById(containerId);
@@ -585,21 +615,6 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
       const key = isoDateFromObj(d);
       allDates.push({ date: key, secs: data[key] || 0, d });
     }
-  }
-
-  // Bucket boundaries in hours. The old 0.25/0.75/1.5 ramp saturated at the top
-  // shade for anything past 90 minutes, flattening most of a good year into one
-  // color; 1/2/3 spreads a normal reading day across the full ramp.
-  const HEATMAP_STEPS  = [1, 2, 3];
-  const HEATMAP_LEGEND = ['No reading', 'Under 1h', '1–2h', '2–3h', '3h+'];
-
-  function getColor(secs) {
-    if (!secs) return HEATMAP_COLORS[0];
-    const h = secs / 3600;
-    if (h < HEATMAP_STEPS[0]) return HEATMAP_COLORS[1];
-    if (h < HEATMAP_STEPS[1]) return HEATMAP_COLORS[2];
-    if (h < HEATMAP_STEPS[2]) return HEATMAP_COLORS[3];
-    return HEATMAP_COLORS[4];
   }
 
   const startDow = allDates[0].d.getDay();
@@ -643,7 +658,7 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
       if (!day) {
         html += '<div class="heatmap-cell" style="background:transparent"></div>';
       } else {
-        const color = getColor(day.secs);
+        const color = heatmapColor(day.secs);
         const tip   = `${day.date}  ${fmtTime(day.secs)}`;
         html += `<div class="heatmap-cell" style="background:${color}" title="${tip}"></div>`;
       }
@@ -652,10 +667,14 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
   });
 
   html += '</div>';
+  const legendStops = HEATMAP_COLORS.slice(1);
+  const legendGrad  = legendStops
+    .map((c, i) => `${c} ${Math.round(i / (legendStops.length - 1) * 100)}%`)
+    .join(', ');
   html += '<div class="heatmap-legend"><span>Less</span>';
-  HEATMAP_COLORS.forEach((c, i) => {
-    html += `<div class="heatmap-legend-cell" style="background:${c}" title="${HEATMAP_LEGEND[i]}"></div>`;
-  });
+  html += `<div class="heatmap-legend-cell" style="background:${HEATMAP_COLORS[0]}" title="No reading"></div>`;
+  html += `<div class="heatmap-legend-bar" style="background:linear-gradient(to right, ${legendGrad})"`
+       +  ` title="0 → ${HEATMAP_CAP_HOURS}h+"></div>`;
   html += '<span>More</span></div>';
   html += '</div>';
 

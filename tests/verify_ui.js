@@ -97,7 +97,8 @@ const PROBE = `
   get PORTAL_PALETTE() { return PORTAL_PALETTE; },
   set portalColorMap(v) { portalColorMap = v; },
   set portalSelected(v) { portalSelected = v; },
-  applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty,
+  get HEATMAP_CAP_HOURS() { return HEATMAP_CAP_HOURS; },
+  applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty, heatmapColor,
   rollDetailSeries, twRolling, splitBarDatasets, speedSegmentColors, memberLegendLabels,
   bucketDaily, statsMetricAvail, sparkHTML, goalBurnupSeries, dateFromISO,
 };`;
@@ -144,6 +145,24 @@ check('CT.accent restored', P.CT.accent, '#5B8CFF');
 check('HEATMAP_COLORS dark ramp intact',
       JSON.stringify(P.HEATMAP_COLORS),
       JSON.stringify(['#1E1E30', '#1a3b4a', '#1e6b52', '#26a06e', '#4ECBA0']));
+
+console.log('\n--- heatmap continuous ramp ---');
+const hc = h => P.heatmapColor(h * 3600);
+check('no reading is the categorical empty shade', hc(0), '#1E1E30');
+check('any reading floors at the first ramp stop', P.heatmapColor(1), 'rgb(26,59,74)');
+check('an exact anchor hits that stop',             hc(1),   'rgb(30,107,82)');
+check('the cap hits the top stop',                  hc(3),   'rgb(78,203,160)');
+check('past the cap clamps, it does not wrap',      hc(9),   hc(3));
+check('a negative/garbage value is treated as empty', P.heatmapColor(-5), '#1E1E30');
+// The point of the change: values inside one old bucket must differ.
+const inBucket = new Set([hc(1.1), hc(1.4), hc(1.7), hc(1.9)]);
+check('four values inside the old 1–2h bucket are four colors', inBucket.size, 4);
+// halfway between #1e6b52 (30,107,82) and #26a06e (38,160,110)
+check('a midpoint is between its anchors', hc(1.5), 'rgb(34,134,96)');
+check('the ramp is monotonic in green',
+      [0.5, 1, 1.5, 2, 2.5, 3].map(h => +hc(h).match(/,(\d+),/)[1])
+        .every((g, i, a) => i === 0 || g > a[i - 1]), true);
+check('the cap is the documented 3h', P.HEATMAP_CAP_HOURS, 3);
 
 console.log('\n--- #3 stable per-title colors ---');
 const PP = P.PORTAL_PALETTE;

@@ -404,6 +404,7 @@ select:focus { border-color: var(--accent); }
                   justify-content: flex-end; }
 .heatmap-legend span { font-size: 9px; color: var(--dim); }
 .heatmap-legend-cell { width: 11px; height: 11px; border-radius: 2px; }
+.heatmap-legend-bar  { width: 64px; height: 11px; border-radius: 2px; }
 
 /* ── Goals ───────────────────────────────────────────────────────────────── */
 .goal-list { display: flex; flex-direction: column; gap: 10px; }

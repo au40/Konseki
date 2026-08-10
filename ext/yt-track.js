@@ -309,7 +309,6 @@ function tickAccrual() {
 const FLUSH_MS = 5000;
 let pendingSecs = 0;
 let lastFlush   = 0;
-let dayTotal    = 0;
 
 async function flushAccrual() {
   lastFlush = Date.now();
@@ -318,20 +317,12 @@ async function flushAccrual() {
   const secs  = pendingSecs;
   pendingSecs = 0;
   try {
-    const res = await browser.runtime.sendMessage({ type: "yt-accrue", secs });
-    if (res && typeof res.dayTotal === "number") dayTotal = res.dayTotal;
+    await browser.runtime.sendMessage({ type: "yt-accrue", secs });
   } catch {
     // The page holds the only copy until the background acknowledges it — the
     // same rule the stopwatch learned the hard way. Put it back and retry.
     pendingSecs += secs;
   }
-}
-
-async function refreshDayTotal() {
-  try {
-    const res = await browser.runtime.sendMessage({ type: "yt-day-total" });
-    if (res && typeof res.dayTotal === "number") dayTotal = res.dayTotal;
-  } catch {}
 }
 
 // ── The chip ─────────────────────────────────────────────────────────────────
@@ -430,13 +421,6 @@ function formatTime(total) {
     .map(v => String(v).padStart(2, "0")).join(":");
 }
 
-// Day totals read better coarse — "1h 47m" beside a ticking per-video clock.
-function formatShort(total) {
-  const s = Math.floor(total);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  return h ? `${h}h ${m}m` : `${m}m`;
-}
 
 function render() {
   const el = buildChip();
@@ -470,16 +454,18 @@ function render() {
     return;
   }
 
-  const today = dayTotal >= 60 ? "  ·  today " + formatShort(dayTotal) : "";
-  const gate  = accrualGate();
+  // Tracking: just a stopwatch, matching timer-overlay.js. The announcement
+  // above is what tells you a new video is being tracked; once that's said,
+  // this should be as quiet as the manual timer is.
+  const gate = accrualGate();
   if (gate.ok) {
-    el.textContent   = "▶ 日本語 · " + formatTime(state.secs) + today;
+    el.textContent   = "⏱ " + formatTime(state.secs);
     el.style.opacity = "1";
   } else if (gate.why === "muted") {
-    el.textContent   = "🔇 muted — not counting" + today;
+    el.textContent   = "🔇 muted";
     el.style.opacity = "0.65";
   } else {
-    el.textContent   = "⏸ " + formatTime(state.secs) + today;
+    el.textContent   = "⏸ " + formatTime(state.secs);
     el.style.opacity = "0.65";
   }
 }
@@ -604,7 +590,6 @@ function onNavigate() {
 
 async function start() {
   await loadSettings();
-  await refreshDayTotal();
   onNavigate();
 
   document.addEventListener("yt-navigate-finish", onNavigate, true);
