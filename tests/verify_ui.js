@@ -100,7 +100,7 @@ const PROBE = `
   get HEATMAP_CAP_HOURS() { return HEATMAP_CAP_HOURS; },
   applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty, heatmapColor,
   rollDetailSeries, twRolling, splitBarDatasets, speedSegmentColors, memberLegendLabels,
-  bucketDaily, statsMetricAvail, sparkHTML, goalBurnupSeries, dateFromISO,
+  bucketDaily, statsMetricAvail, statsCumSeries, sparkHTML, goalBurnupSeries, dateFromISO,
 };`;
 
 try {
@@ -397,6 +397,54 @@ check('an empty range offers nothing',
       JSON.stringify(P.statsMetricAvail(empty)), '{"time":false,"chars":false,"speed":false}');
 check('missing spd_* fields default to 0, not NaN',
       P.bucketDaily([{ date: '2026-03-02', seconds: 60, chars: 5 }], 'day').spdChars[0], 0);
+
+console.log('\n--- Stats cumulative view (replaces the dual-axis overlay) ---');
+// The old overlay drew its running total on a second y-axis whose unit followed
+// granularity: minutes at day granularity, hours above it, with the tick
+// formatter dividing by 60 to hide the difference. The single-axis view plots
+// HOURS at every granularity — that's what the axis and the tooltip both claim,
+// so the series has to actually be in them. Same days, three granularities.
+const cumDays = [
+  { date: '2026-03-02', seconds: 3600,  chars: 1000 },   // Mon
+  { date: '2026-03-03', seconds: 1800,  chars:  500 },
+  { date: '2026-03-04', seconds: 0,     chars:    0 },   // idle day, as the backend sends it
+  { date: '2026-03-09', seconds: 7200,  chars: 2500 },   // next Mon
+];
+['day', 'week', 'month'].forEach(g => {
+  const b = P.bucketDaily(cumDays, g);
+  const c = P.statsCumSeries(b, false);
+  check(`${g} granularity: cumulative time is hours, not minutes`,
+        c[c.length - 1], 3.5);
+});
+const cumDay = P.bucketDaily(cumDays, 'day');
+const cumT   = P.statsCumSeries(cumDay, false);
+check('one point per bucket', cumT.length, cumDay.labels.length);
+check('the running total is non-decreasing',
+      cumT.every((v, i) => i === 0 || v >= cumT[i - 1]), true);
+check('an idle day carries the total forward instead of dropping to zero',
+      cumT[cumDay.labels.indexOf('03-04')], 1.5);
+const cumC = P.statsCumSeries(cumDay, true);
+check('chars pass through unscaled', cumC[cumC.length - 1], 4000);
+check('an empty range yields an empty series',
+      P.statsCumSeries(P.bucketDaily([], 'day'), false).length, 0);
+check('a bucket with no secs is tolerated', P.statsCumSeries({}, false).length, 0);
+
+// The media/series panels feed the SAME helper off rollDetailSeries, which rolls
+// long titles up to weekly buckets. The running total has to survive that: one
+// point per week bucket, still ending on the title's real total.
+const longDaily = Array.from({ length: 120 }, (_, i) => ({
+  date: new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10),
+  chars: 1000, seconds: 1800,
+}));
+const cumRolled = P.rollDetailSeries(longDaily, null, 90);
+const rollCum = P.statsCumSeries(cumRolled, false);
+check('weekly rollup still yields one cumulative point per bucket',
+      rollCum.length, cumRolled.labels.length);
+check('rollup does not lose time from the running total',
+      Math.round(rollCum[rollCum.length - 1] * 100) / 100, 60);
+check('the rolled-up total matches the unrolled one',
+      rollCum[rollCum.length - 1],
+      P.statsCumSeries(P.rollDetailSeries(longDaily, null, null), false).slice(-1)[0]);
 
 console.log('\n--- M4: shelf activity strip ---');
 const spark = P.sparkHTML([0, 60, 600, 0, 300], '#5B8CFF');

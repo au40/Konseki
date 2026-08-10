@@ -276,9 +276,10 @@
           <label class="toggle-label" id="split-toggle-label">
             <input type="checkbox" id="split-toggle" onchange="onSplitToggle()"> Split by activity
           </label>
-          <label class="toggle-label" id="cum-toggle-label">
-            <input type="checkbox" id="cum-toggle" onchange="onCumToggle()"> Show cumulative
-          </label>
+          <div class="seg" id="stats-view-seg">
+            <button class="seg-btn active" data-view="daily" onclick="setStatsView('daily')">Daily</button>
+            <button class="seg-btn"        data-view="cum"   onclick="setStatsView('cum')">Cumulative</button>
+          </div>
           <div class="seg" id="stats-metric-seg">
             <button class="seg-btn active" data-metric="time"  onclick="setStatsMetric('time')">Time</button>
             <button class="seg-btn"        data-metric="chars" onclick="setStatsMetric('chars')">Chars</button>
@@ -494,6 +495,10 @@
             <label class="toggle-label" id="series-split-label" style="display:none">
               <input type="checkbox" id="series-split-toggle" onchange="onSeriesSplitToggle()"> Split by book
             </label>
+            <div class="seg" id="series-view-seg">
+              <button class="seg-btn active" data-view="daily" onclick="setDetailView('series','daily')">Daily</button>
+              <button class="seg-btn"        data-view="cum"   onclick="setDetailView('series','cum')">Cumulative</button>
+            </div>
             <div class="seg" id="series-metric-seg">
               <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('series','time')">Time</button>
               <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('series','chars')">Chars</button>
@@ -556,6 +561,10 @@
             <label class="toggle-label" id="ms-split-label" style="display:none">
               <input type="checkbox" id="ms-split-toggle" onchange="onMilestoneSplitToggle()"> Split by milestone
             </label>
+            <div class="seg" id="detail-view-seg">
+              <button class="seg-btn active" data-view="daily" onclick="setDetailView('detail','daily')">Daily</button>
+              <button class="seg-btn"        data-view="cum"   onclick="setDetailView('detail','cum')">Cumulative</button>
+            </div>
             <div class="seg" id="detail-metric-seg">
               <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('detail','time')">Time</button>
               <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('detail','chars')">Chars</button>
@@ -595,6 +604,10 @@
         <div class="detail-chart-head">
           <h2 style="margin:0">Daily activity</h2>
           <div class="detail-chart-ctrl">
+            <div class="seg" id="milestone-view-seg">
+              <button class="seg-btn active" data-view="daily" onclick="setDetailView('milestone','daily')">Daily</button>
+              <button class="seg-btn"        data-view="cum"   onclick="setDetailView('milestone','cum')">Cumulative</button>
+            </div>
             <div class="seg" id="milestone-metric-seg">
               <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('milestone','time')">Time</button>
               <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('milestone','chars')">Chars</button>

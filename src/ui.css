@@ -298,7 +298,9 @@ select:focus { border-color: var(--accent); }
    Time/Chars/Speed switcher and any split toggle on the right. */
 .detail-chart-head { display: flex; align-items: center; justify-content: space-between;
                      gap: 12px; flex-wrap: wrap; margin: 16px 0 8px; }
-.detail-chart-ctrl { display: flex; align-items: center; gap: 14px; }
+/* Wraps because this row now carries a split toggle plus two segs (view +
+   metric); without it a narrow window pushes the metric seg off the card. */
+.detail-chart-ctrl { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 /* A metric with no data for this title (chars on a listening entry, say) is
    greyed rather than hidden, so the control doesn't change width as you browse. */
 .seg-btn:disabled { opacity: .35; cursor: default; }

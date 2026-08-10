@@ -46,6 +46,7 @@ let excludedTypes      = new Set(); // activity types hidden from the Stats view
 let currentGranularity = 'day';
 let splitByActivity    = false;
 let statsMetric        = 'time';       // 'time' | 'chars' | 'speed' — Stats page chart
+let statsCumulative    = false;        // Stats chart shape: per-bucket bars vs running total
 let statsCache    = {};
 let charts        = {};
 let selectedAtype = 'Listening';
@@ -2038,7 +2039,11 @@ async function setGranularity(g) {
   rerenderActiveStats();
 }
 
-function onCumToggle() {
+// Cumulative is a *shape*, not an overlay: it swaps the bars for a running-total
+// line on the same left axis rather than adding a second y-scale. See the note
+// on renderDailyCumChart for why.
+function setStatsView(v) {
+  statsCumulative = (v === 'cum');
   if (statsNeedsClient()) { renderClientStats(); return; }
   if (statsCache[currentRange]) renderDailyChart(statsCache[currentRange].daily);
 }
@@ -2212,9 +2217,9 @@ function morphBars(id, chart, canvas, newConfig) {
 
   // Capture bar-segment geometry for EVERY bar dataset (keyed by label), so a
   // stacked split chart animates all its colored segments — not just dataset 0.
-  // Line datasets (the cumulative overlay) are excluded here; they're hidden
-  // during the morph and restored on finish. Matching by label (not index)
-  // keeps the slide correct when the activity set differs across the change.
+  // Non-bar datasets are excluded here; they're hidden during the morph and
+  // restored on finish. Matching by label (not index) keeps the slide correct
+  // when the activity set differs across the change.
   const grab = datasets => {
     const segs = [];
     datasets.forEach((d, k) => {
@@ -2366,6 +2371,8 @@ function upsertChart(id, ctxId, config) {
 //   • Split by activity — Time only. `by_type` holds SECONDS per type; there is
 //     no per-type chars breakdown, and stacking a rate is meaningless.
 //   • Cumulative — Time and Chars only. A running total of a rate is nonsense.
+//   • Split by activity — additionally off in Cumulative, which draws no bars
+//     for the per-type stack to live in.
 function statsMetricAvail(b) {
   return {
     time:  b.secs.some(v => v > 0),
@@ -2393,8 +2400,13 @@ function syncStatsMetricSeg(avail) {
     const box = lbl.querySelector('input');
     if (box) box.disabled = off;
   };
-  setOff('split-toggle-label', statsMetric !== 'time');
-  setOff('cum-toggle-label',   statsMetric === 'speed');
+  setOff('split-toggle-label', statsMetric !== 'time' || statsCumulative);
+  // The view seg is a seg, not a checkbox — it fades via :disabled, and stays on
+  // whatever it was so switching away to Speed and back doesn't lose the choice.
+  document.querySelectorAll('#stats-view-seg .seg-btn').forEach(b => {
+    b.disabled = statsMetric === 'speed';
+    b.classList.toggle('active', (b.dataset.view === 'cum') === statsCumulative);
+  });
 }
 
 function setStatsMetric(m) {
@@ -2414,7 +2426,8 @@ function renderDailyChart(daily) {
   if (statsMetric === 'speed') return renderDailySpeedChart(bucket);
 
   const isChars = statsMetric === 'chars';
-  const cum     = document.getElementById('cum-toggle').checked;
+  if (statsCumulative) return renderDailyCumChart(bucket, isChars);
+
   const isHours = currentGranularity !== 'day';
   const scale   = isChars ? 1 : (isHours ? 1 / 3600 : 1 / 60);
   const values  = isChars ? chars : secs.map(s => s * scale);
@@ -2435,25 +2448,7 @@ function renderDailyChart(daily) {
          backgroundColor: isChars ? CT.success : CT.accent,
          borderRadius: 3, borderSkipped: false }];
 
-  let cumStepH = 1;
-  if (cum) {
-    let run = 0;
-    const cumVals = values.map(v => (run += v, run));
-    // The cumulative axis ticks at whole hours: pick a "nice" hour step sized
-    // to the running total (~5 ticks). Sub-hour steps exist only so a range
-    // totalling under ~2h doesn't collapse to a single 0h/1h pair of ticks.
-    const maxH = (cumVals[cumVals.length - 1] || 0) * (isChars ? 1 : (isHours ? 1 : 1 / 60));
-    cumStepH = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
-      .find(s => s >= maxH / 5) || Math.ceil(maxH / 5 / 1000) * 1000;
-    datasets.push({
-      label: 'Cumulative', data: cumVals, type: 'line',
-      borderColor: CT.success, backgroundColor: ctAlpha(CT.success, 0.08),
-      borderWidth: 2, pointRadius: 0, fill: true, tension: 0.3,
-      yAxisID: 'y2',
-    });
-  }
-
-  reserveLegendRoom('chart-daily', 'daily', 180, cum || doSplit);
+  reserveLegendRoom('chart-daily', 'daily', 180, doSplit);
   upsertChart('daily', 'chart-daily', {
     type: 'bar',
     data: { labels, datasets },
@@ -2462,14 +2457,14 @@ function renderDailyChart(daily) {
       onResize: () => positionDailyBrush(),
       interaction: doSplit ? { mode: 'index', intersect: false } : undefined,
       plugins: {
-        legend: { display: cum || doSplit, position: 'bottom',
+        legend: { display: doSplit, position: 'bottom',
                   labels: { color:CT.dim, boxWidth:12, boxHeight:12, usePointStyle:true } },
         tooltip: {
           callbacks: {
             title: c => labels[c[0].dataIndex],
             label: c => `${c.dataset.label}: ${fmt(c.raw)}`,
             footer: doSplit
-              ? c => `Total: ${fmt(c.reduce((a, x) => x.dataset.type === 'line' ? a : a + x.raw, 0))}`
+              ? c => `Total: ${fmt(c.reduce((a, x) => a + x.raw, 0))}`
               : undefined,
           }
         }
@@ -2477,16 +2472,79 @@ function renderDailyChart(daily) {
       scales: {
         x: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
         y: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
-        ...(cum ? {y2:{position:'right',grid:{display:false},
-          ticks:{color:CT.success,
-                 ...(isChars ? { callback: v => fmtChars(v) }
-                             : { stepSize: cumStepH * (isHours ? 1 : 60),
-                                 callback: v => fmtHourTick(isHours ? v : v / 60) })}}} : {})
       }
     }
   });
 
   // Keep the range-selector handles aligned with the (re)laid-out plot area.
+  requestAnimationFrame(positionDailyBrush);
+}
+
+// Running total of a bucketed series in DISPLAY units. Chars pass through; time
+// is HOURS at every granularity — deliberately not the bar view's granularity-
+// dependent scale, which would plot a range total in minutes at day granularity.
+function statsCumSeries(bucket, isChars) {
+  let run = 0;
+  const vals = isChars ? (bucket.chars || []) : (bucket.secs || []).map(s => s / 3600);
+  return vals.map(v => (run += v, run));
+}
+
+// Cumulative view — the same Time/Chars data as a running total. It REPLACES the
+// bars rather than riding above them on a second y-axis, which is what the old
+// "Show cumulative" checkbox did. That overlay had three problems, all of them
+// the second scale's fault: its forced stepSize rounded the axis max up to a
+// step boundary (a 106h total picked step 50, so the axis ran to 150 and the
+// curve used two thirds of the plot), its ticks never landed on the left axis's
+// gridlines, and — unlike the left axis, pinned at 62px — its width followed its
+// tick text, so flipping the toggle or changing range shifted the plot edge and
+// dragged the brush along with it. One axis, one series, none of that.
+//
+// Always hours, regardless of granularity. A running total is a range-sized
+// number, so the day-granularity "minutes" unit the bar view uses would read
+// 6,360 min for a total the goal burn-up already calls 106h. Same treatment as
+// that chart (renderGoalChart), deliberately — including tension 0, because a
+// cumulative series is monotonic and Chart.js's cubic interpolation dips on a
+// flat stretch, drawing reading that went backwards.
+function renderDailyCumChart(bucket, isChars) {
+  const { labels } = bucket;
+  const cumVals = statsCumSeries(bucket, isChars);
+  const fmt   = isChars ? v => `${fmtChars(Math.round(v))} chars` : v => fmtTime(v * 3600);
+  // Identity follows the metric, not the shape — same colors the bars use, so
+  // switching view doesn't repaint the series.
+  const color = isChars ? CT.success : CT.accent;
+
+  // Single series: no legend, so the canvas keeps its base height and the card
+  // no longer jumps 31px when you switch view.
+  reserveLegendRoom('chart-daily', 'daily', 180, false);
+  upsertChart('daily', 'chart-daily', {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: isChars ? 'Characters' : 'Time', data: cumVals,
+      borderColor: color, backgroundColor: ctAlpha(color, 0.12),
+      borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 5,
+      pointBackgroundColor: color, pointBorderColor: CT.card, pointBorderWidth: 2,
+      fill: 'origin', tension: 0,
+    }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      onResize: () => positionDailyBrush(),
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: c => labels[c[0].dataIndex],
+          label: c => `Total: ${fmt(c.raw)}`,
+        } },
+      },
+      scales: {
+        x: { grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
+        y: { grid:{color:CT.grid}, beginAtZero: true,
+             ticks:{color:CT.dim, callback: v => isChars ? fmtChars(v) : fmtHourTick(v)},
+             afterFit: s => { s.width = 62; } },
+      },
+    }
+  });
+
   requestAnimationFrame(positionDailyBrush);
 }
 
@@ -4467,6 +4525,7 @@ function renderSeriesCharts() {
   const byBook = cs ? cs.byBook : [];
   detailChartCfg.series = {
     key: 'series', canvasId: 'chart-series-main', segId: 'series-metric-seg',
+    viewSegId: 'series-view-seg',
     splitLabelId: 'series-split-label',
     daily,
     // Series keep per-day resolution (unchanged from before the merge); only
@@ -4797,6 +4856,7 @@ function renderMediaDetail(d) {
 // over a time total. `sessions.reading_speed` is never consulted.
 
 let detailMetric = 'time';        // 'time' | 'chars' | 'speed' — shared by all three views
+let detailCumulative = false;     // chart shape: per-bucket bars vs running total, likewise shared
 const detailChartCfg = {};        // view -> config, set by that view's render fn
 
 // Roll a daily series up to weekly buckets past `weeklyOver` days, so a long
@@ -4913,17 +4973,34 @@ function memberLegendLabels(items) {
 // Grey out Chars/Speed for a title that has no character data (listening, say)
 // and fall back to Time so the view never lands on an empty metric.
 function syncDetailMetricSeg(view, avail) {
-  const seg = document.getElementById(detailChartCfg[view]?.segId);
-  if (!seg) return;
-  seg.querySelectorAll('.seg-btn').forEach(b => {
-    const ok = avail[b.dataset.metric];
-    b.disabled = !ok;
-    b.classList.toggle('active', ok && b.dataset.metric === detailMetric);
-  });
+  const cfg = detailChartCfg[view];
+  const seg = document.getElementById(cfg?.segId);
+  if (seg) {
+    seg.querySelectorAll('.seg-btn').forEach(b => {
+      const ok = avail[b.dataset.metric];
+      b.disabled = !ok;
+      b.classList.toggle('active', ok && b.dataset.metric === detailMetric);
+    });
+  }
+  // Cumulative is off the table for Speed (a running total of a rate is
+  // nonsense) — the seg fades but keeps its choice, so switching away to Speed
+  // and back doesn't silently drop you into Daily.
+  const vseg = document.getElementById(cfg?.viewSegId);
+  if (vseg) {
+    vseg.querySelectorAll('.seg-btn').forEach(b => {
+      b.disabled = detailMetric === 'speed';
+      b.classList.toggle('active', (b.dataset.view === 'cum') === detailCumulative);
+    });
+  }
 }
 
 function setDetailMetric(view, metric) {
   detailMetric = metric;
+  renderDetailMetricChart(view);
+}
+
+function setDetailView(view, v) {
+  detailCumulative = (v === 'cum');
   renderDetailMetricChart(view);
 }
 
@@ -4951,8 +5028,9 @@ function renderDetailMetricChart(view) {
   syncDetailMetricSeg(view, avail);
 
   const metric  = detailMetric;
-  // Splitting applies to every metric. Time and chars stack into segments;
-  // speed can't stack (it's a rate) so it becomes one line per member instead.
+  // Splitting applies to every metric. Time and chars stack into bar segments;
+  // Speed and Cumulative are single curves that can't stack, so for those the
+  // split recolors the one line per bucket instead (see the `seg` note below).
   const members = splitMembers ? splitMembers() : null;
   const doSplit = !!splitOn && !!members && split.some(s => Object.keys(s).length);
 
@@ -4961,7 +5039,55 @@ function renderDetailMetricChart(view) {
     return;
   }
 
+  // Cumulative is a shape, not a metric — it re-plots Time/Chars as a running
+  // total. Speed opts out (see syncDetailMetricSeg).
+  const cum = detailCumulative && metric !== 'speed';
+
   reserveLegendRoom(canvasId, key, 180, doSplit || metric === 'speed');
+
+  // One color per bucket for whichever member dominated it. Shared by split
+  // Speed and split Cumulative: both are single curves that can't stack, so the
+  // split ANNOTATES the line rather than dividing it, and the curve is identical
+  // whether the toggle is on or off. `segC(a)` paints a line's segments from it.
+  const seg  = doSplit ? speedSegmentColors(split, members) : null;
+  const segC = (a) => seg
+    ? { segment: { borderColor: ctx => {
+          const c = seg.colors[ctx.p1DataIndex];
+          return c ? (a < 1 ? ctAlpha(c, a) : c) : undefined;
+        } } }
+    : {};
+
+  // Same shape decision as the Stats chart (renderDailyCumChart): the running
+  // total REPLACES the bars on the one axis, and time is HOURS at every rollup —
+  // not the bar view's minutes, which a title-sized total would read in the
+  // thousands of.
+  const cumCfg = () => {
+    const asChars = metric === 'chars';
+    const color   = asChars ? CT.success : CT.accent;
+    return {
+      type: 'line',
+      legendItems: seg ? seg.active : null,
+      datasets: [{
+        label: asChars ? 'Characters' : 'Time',
+        data: statsCumSeries({ chars, secs }, asChars),
+        borderColor: color,
+        // No area fill under a segmented line — one flat tint would contradict
+        // the colors the line is shifting through. Unsplit, it fills like Stats.
+        backgroundColor: seg ? 'transparent' : ctAlpha(color, 0.12),
+        fill: seg ? false : 'origin',
+        borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 5,
+        pointBackgroundColor: seg ? (ctx => seg.colors[ctx.dataIndex] || color) : color,
+        pointBorderColor: CT.card, pointBorderWidth: 2,
+        // tension 0: a running total is monotonic, and cubic interpolation
+        // overshoots into a dip on a flat stretch — reading that went backwards.
+        tension: 0, ...segC(1),
+      }],
+      yTick: asChars ? (v => fmtChars(v)) : (v => fmtHourTick(v)),
+      tip:   asChars ? (c => `Total: ${fmtChars(Math.round(c.raw))} chars`)
+                     : (c => `Total: ${fmtTime(c.raw * 3600)}`),
+      foot:  undefined,
+    };
+  };
 
   const cfgByMetric = {
     time: () => ({
@@ -4999,13 +5125,6 @@ function renderDetailMetricChart(view) {
       //
       // No area fill: speed is a rate, so the region under the line isn't a
       // quantity that means anything.
-      const seg  = doSplit ? speedSegmentColors(split, members) : null;
-      const segC = (a) => seg
-        ? { segment: { borderColor: ctx => {
-              const c = seg.colors[ctx.p1DataIndex];
-              return c ? (a < 1 ? ctAlpha(c, a) : c) : undefined;
-            } } }
-        : {};
       return {
       type: 'line',
       legendItems: seg ? seg.active : null,
@@ -5029,7 +5148,7 @@ function renderDetailMetricChart(view) {
     },
   };
 
-  const m       = cfgByMetric[metric]();
+  const m       = cum ? cumCfg() : cfgByMetric[metric]();
   const stacked = doSplit && m.type === 'bar';
   const legend  = doSplit || metric === 'speed';
 
@@ -5038,7 +5157,7 @@ function renderDetailMetricChart(view) {
     data: { labels, datasets: m.datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
-      interaction: (stacked || metric === 'speed') ? { mode: 'index', intersect: false } : undefined,
+      interaction: (stacked || metric === 'speed' || cum) ? { mode: 'index', intersect: false } : undefined,
       plugins: {
         legend: {
           display: legend, position: 'bottom',
@@ -5077,6 +5196,7 @@ function renderDetailMetricChart(view) {
 function renderDetailChart(daily, isGSM) {
   detailChartCfg.detail = {
     key: 'detail', canvasId: 'chart-detail-main', segId: 'detail-metric-seg',
+    viewSegId: 'detail-view-seg',
     splitLabelId: 'ms-split-label',
     daily,
     // Media detail is the one view that rolls up to weeks past ~3 months; a
@@ -6338,6 +6458,7 @@ function renderMilestoneDetail(d) {
 function renderMilestoneCharts(daily) {
   detailChartCfg.milestone = {
     key: 'milestone', canvasId: 'chart-milestone-main', segId: 'milestone-metric-seg',
+    viewSegId: 'milestone-view-seg',
     splitLabelId: null,
     daily: daily || [],
     weeklyOver: null,
