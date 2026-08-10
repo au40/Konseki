@@ -11,7 +11,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from db import get_setting, set_setting, db_get_custom_categories
-from imports import import_ttsu_entries, log_manual_session
+from imports import import_ttsu_entries, import_youtube_day, log_manual_session
 
 BUILTIN_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"]
 
@@ -87,12 +87,19 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reject(403)
         if not self._token_ok():
             return self._reject(403)
-        if self.path != "/activity-types":
+        if self.path == "/activity-types":
+            custom  = [c["name"] for c in db_get_custom_categories()]
+            payload = BUILTIN_ACTIVITY_TYPES + [c for c in custom if c not in BUILTIN_ACTIVITY_TYPES]
+        elif self.path == "/config":
+            # Settings a capturing device can't derive on its own. The YouTube
+            # tracker needs rollover_hour to bucket accrual into the right
+            # LOGICAL day before it posts — the capturer decides the date, so it
+            # has to know where the boundary is.
+            payload = {"rollover_hour": int(get_setting("rollover_hour", "0") or 0)}
+        else:
             return self._reject(404)
 
-        custom = [c["name"] for c in db_get_custom_categories()]
-        types  = BUILTIN_ACTIVITY_TYPES + [c for c in custom if c not in BUILTIN_ACTIVITY_TYPES]
-        resp   = json.dumps(types).encode()
+        resp = json.dumps(payload).encode()
 
         self.send_response(200)
         self._send_cors(origin)
@@ -126,6 +133,17 @@ class _Handler(BaseHTTPRequestHandler):
                 if source == "ttsureader":
                     result = import_ttsu_entries(entries)
                     if self._on_import and result.get("imported", 0) > 0:
+                        self._on_import()
+                    resp = json.dumps({"ok": True, **result}).encode()
+                elif source == "youtube":
+                    # Cumulative total for one logical day, dated by the
+                    # capturer. Idempotent on (source, session_date), so a
+                    # replay is a rewrite rather than a second row.
+                    result = import_youtube_day(
+                        body.get("session_date", ""),
+                        body.get("time_seconds", 0),
+                    )
+                    if self._on_import and result.get("logged"):
                         self._on_import()
                     resp = json.dumps({"ok": True, **result}).encode()
                 else:

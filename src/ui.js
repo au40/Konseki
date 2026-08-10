@@ -3892,6 +3892,16 @@ function showMediaView(name) {
   }
 }
 
+// Sources that never get a media card. get_media_stats groups by title across
+// EVERY source (no source filter in SQL), so anything with a title lands on the
+// grid unless it's excluded here.
+//   'manual'  — quick-log stopwatch rows, untitled by design
+//   'youtube' — the passive tracker pools all its time under one 'YouTube'
+//               title so the data stays queryable later; it is deliberately not
+//               a media entry (see plans/YOUTUBE-PLAN.md)
+const GRID_HIDDEN_SOURCES = new Set(['manual', 'youtube']);
+const isGridHidden = (m) => GRID_HIDDEN_SOURCES.has(m.source);
+
 async function loadMedia() {
   destroyChart('detail');
   destroyPortalCharts();
@@ -3905,8 +3915,8 @@ async function loadMedia() {
     window.pywebview.api.get_media_order(),
   ]);
   mediaOrderMap = mediaOrderMap || {};
-  const nonManualCount = mediaAllData.filter(m => m.source !== 'manual').length;
-  document.getElementById('media-count').textContent = `${nonManualCount} titles`;
+  const visibleCount = mediaAllData.filter(m => !isGridHidden(m)).length;
+  document.getElementById('media-count').textContent = `${visibleCount} titles`;
   renderMediaGrid();
 }
 
@@ -3915,7 +3925,7 @@ function renderMediaGrid() {
 
   // Titles that belong to a series — hidden as standalone cards
   const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
-  const filtered = mediaAllData.filter(m => m.source !== 'manual');
+  const filtered = mediaAllData.filter(m => !isGridHidden(m));
   const ungrouped = filtered.filter(m => !inSeries.has(m.title));
 
   grid.innerHTML = '';
@@ -3972,7 +3982,7 @@ function makeReorderControls(key, canLeft, canRight) {
 async function shiftMediaCard(key, delta) {
   // Rebuild the current visible order, swap, persist, re-render.
   const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
-  const ungrouped = mediaAllData.filter(m => m.source !== 'manual' && !inSeries.has(m.title));
+  const ungrouped = mediaAllData.filter(m => !isGridHidden(m) && !inSeries.has(m.title));
   const natural = [
     ...seriesData.map(s => `s:${s.id}`),
     ...ungrouped.map(m => `t:${m.title}`),
@@ -6481,7 +6491,7 @@ function portalSplitSeries() {
 }
 
 function portalEntries() {
-  const titles = mediaAllData.filter(m => m.source !== 'manual');
+  const titles = mediaAllData.filter(m => !isGridHidden(m));
   const out = [];
   if (portalSplitSeries()) {
     titles.forEach(m => out.push({
