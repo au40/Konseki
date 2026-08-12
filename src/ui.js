@@ -46,6 +46,7 @@ let excludedTypes      = new Set(); // activity types hidden from the Stats view
 let currentGranularity = 'day';
 let splitByActivity    = false;
 let statsMetric        = 'time';       // 'time' | 'chars' | 'speed' — Stats page chart
+let statsCumulative    = false;        // Stats chart shape: per-bucket bars vs running total
 let statsCache    = {};
 let charts        = {};
 let selectedAtype = 'Listening';
@@ -559,6 +560,36 @@ async function doDeleteSessionGroup(ids, btn) {
   if (currentPage === 'dashboard') loadDashboard();
 }
 
+// ── Heatmap color ramp ──────────────────────────────────────────────────────
+// HEATMAP_COLORS[0] is the categorical "no reading" shade; stops 1..4 are
+// gradient anchors spread evenly over 0 → HEATMAP_CAP_HOURS, interpolated so
+// brightness climbs with every extra minute instead of snapping at a bucket
+// edge. The anchors are absolute, not window-relative, so the same day reads
+// the same color across years and between the dashboard and Stats.
+const HEATMAP_CAP_HOURS = 3;
+
+function mixHex(a, b, f) {
+  const na = parseInt((a || '').replace('#', ''), 16);
+  const nb = parseInt((b || '').replace('#', ''), 16);
+  if (isNaN(na) || isNaN(nb)) return a;
+  const ch = sh => {
+    const x = (na >> sh) & 255, y = (nb >> sh) & 255;
+    return Math.round(x + (y - x) * f);
+  };
+  return `rgb(${ch(16)},${ch(8)},${ch(0)})`;
+}
+
+function heatmapColor(secs) {
+  if (!secs || secs <= 0) return HEATMAP_COLORS[0];
+  const stops = HEATMAP_COLORS.slice(1);
+  // Any reading at all floors at stops[0], so a 2-minute day still reads as
+  // distinct from an empty one.
+  const t   = Math.min(secs / 3600 / HEATMAP_CAP_HOURS, 1);
+  const pos = t * (stops.length - 1);
+  const i   = Math.min(Math.floor(pos), stops.length - 2);
+  return mixHex(stops[i], stops[i + 1], pos - i);
+}
+
 // ── Heatmap renderer ────────────────────────────────────────────────────────
 function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
   const container = document.getElementById(containerId);
@@ -585,21 +616,6 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
       const key = isoDateFromObj(d);
       allDates.push({ date: key, secs: data[key] || 0, d });
     }
-  }
-
-  // Bucket boundaries in hours. The old 0.25/0.75/1.5 ramp saturated at the top
-  // shade for anything past 90 minutes, flattening most of a good year into one
-  // color; 1/2/3 spreads a normal reading day across the full ramp.
-  const HEATMAP_STEPS  = [1, 2, 3];
-  const HEATMAP_LEGEND = ['No reading', 'Under 1h', '1–2h', '2–3h', '3h+'];
-
-  function getColor(secs) {
-    if (!secs) return HEATMAP_COLORS[0];
-    const h = secs / 3600;
-    if (h < HEATMAP_STEPS[0]) return HEATMAP_COLORS[1];
-    if (h < HEATMAP_STEPS[1]) return HEATMAP_COLORS[2];
-    if (h < HEATMAP_STEPS[2]) return HEATMAP_COLORS[3];
-    return HEATMAP_COLORS[4];
   }
 
   const startDow = allDates[0].d.getDay();
@@ -643,7 +659,7 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
       if (!day) {
         html += '<div class="heatmap-cell" style="background:transparent"></div>';
       } else {
-        const color = getColor(day.secs);
+        const color = heatmapColor(day.secs);
         const tip   = `${day.date}  ${fmtTime(day.secs)}`;
         html += `<div class="heatmap-cell" style="background:${color}" title="${tip}"></div>`;
       }
@@ -652,10 +668,14 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
   });
 
   html += '</div>';
+  const legendStops = HEATMAP_COLORS.slice(1);
+  const legendGrad  = legendStops
+    .map((c, i) => `${c} ${Math.round(i / (legendStops.length - 1) * 100)}%`)
+    .join(', ');
   html += '<div class="heatmap-legend"><span>Less</span>';
-  HEATMAP_COLORS.forEach((c, i) => {
-    html += `<div class="heatmap-legend-cell" style="background:${c}" title="${HEATMAP_LEGEND[i]}"></div>`;
-  });
+  html += `<div class="heatmap-legend-cell" style="background:${HEATMAP_COLORS[0]}" title="No reading"></div>`;
+  html += `<div class="heatmap-legend-bar" style="background:linear-gradient(to right, ${legendGrad})"`
+       +  ` title="0 → ${HEATMAP_CAP_HOURS}h+"></div>`;
   html += '<span>More</span></div>';
   html += '</div>';
 
@@ -2019,7 +2039,11 @@ async function setGranularity(g) {
   rerenderActiveStats();
 }
 
-function onCumToggle() {
+// Cumulative is a *shape*, not an overlay: it swaps the bars for a running-total
+// line on the same left axis rather than adding a second y-scale. See the note
+// on renderDailyCumChart for why.
+function setStatsView(v) {
+  statsCumulative = (v === 'cum');
   if (statsNeedsClient()) { renderClientStats(); return; }
   if (statsCache[currentRange]) renderDailyChart(statsCache[currentRange].daily);
 }
@@ -2193,9 +2217,9 @@ function morphBars(id, chart, canvas, newConfig) {
 
   // Capture bar-segment geometry for EVERY bar dataset (keyed by label), so a
   // stacked split chart animates all its colored segments — not just dataset 0.
-  // Line datasets (the cumulative overlay) are excluded here; they're hidden
-  // during the morph and restored on finish. Matching by label (not index)
-  // keeps the slide correct when the activity set differs across the change.
+  // Non-bar datasets are excluded here; they're hidden during the morph and
+  // restored on finish. Matching by label (not index) keeps the slide correct
+  // when the activity set differs across the change.
   const grab = datasets => {
     const segs = [];
     datasets.forEach((d, k) => {
@@ -2347,6 +2371,8 @@ function upsertChart(id, ctxId, config) {
 //   • Split by activity — Time only. `by_type` holds SECONDS per type; there is
 //     no per-type chars breakdown, and stacking a rate is meaningless.
 //   • Cumulative — Time and Chars only. A running total of a rate is nonsense.
+//   • Split by activity — additionally off in Cumulative, which draws no bars
+//     for the per-type stack to live in.
 function statsMetricAvail(b) {
   return {
     time:  b.secs.some(v => v > 0),
@@ -2374,8 +2400,13 @@ function syncStatsMetricSeg(avail) {
     const box = lbl.querySelector('input');
     if (box) box.disabled = off;
   };
-  setOff('split-toggle-label', statsMetric !== 'time');
-  setOff('cum-toggle-label',   statsMetric === 'speed');
+  setOff('split-toggle-label', statsMetric !== 'time' || statsCumulative);
+  // The view seg is a seg, not a checkbox — it fades via :disabled, and stays on
+  // whatever it was so switching away to Speed and back doesn't lose the choice.
+  document.querySelectorAll('#stats-view-seg .seg-btn').forEach(b => {
+    b.disabled = statsMetric === 'speed';
+    b.classList.toggle('active', (b.dataset.view === 'cum') === statsCumulative);
+  });
 }
 
 function setStatsMetric(m) {
@@ -2395,7 +2426,8 @@ function renderDailyChart(daily) {
   if (statsMetric === 'speed') return renderDailySpeedChart(bucket);
 
   const isChars = statsMetric === 'chars';
-  const cum     = document.getElementById('cum-toggle').checked;
+  if (statsCumulative) return renderDailyCumChart(bucket, isChars);
+
   const isHours = currentGranularity !== 'day';
   const scale   = isChars ? 1 : (isHours ? 1 / 3600 : 1 / 60);
   const values  = isChars ? chars : secs.map(s => s * scale);
@@ -2416,25 +2448,7 @@ function renderDailyChart(daily) {
          backgroundColor: isChars ? CT.success : CT.accent,
          borderRadius: 3, borderSkipped: false }];
 
-  let cumStepH = 1;
-  if (cum) {
-    let run = 0;
-    const cumVals = values.map(v => (run += v, run));
-    // The cumulative axis ticks at whole hours: pick a "nice" hour step sized
-    // to the running total (~5 ticks). Sub-hour steps exist only so a range
-    // totalling under ~2h doesn't collapse to a single 0h/1h pair of ticks.
-    const maxH = (cumVals[cumVals.length - 1] || 0) * (isChars ? 1 : (isHours ? 1 : 1 / 60));
-    cumStepH = [0.25, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000]
-      .find(s => s >= maxH / 5) || Math.ceil(maxH / 5 / 1000) * 1000;
-    datasets.push({
-      label: 'Cumulative', data: cumVals, type: 'line',
-      borderColor: CT.success, backgroundColor: ctAlpha(CT.success, 0.08),
-      borderWidth: 2, pointRadius: 0, fill: true, tension: 0.3,
-      yAxisID: 'y2',
-    });
-  }
-
-  reserveLegendRoom('chart-daily', 'daily', 180, cum || doSplit);
+  reserveLegendRoom('chart-daily', 'daily', 180, doSplit);
   upsertChart('daily', 'chart-daily', {
     type: 'bar',
     data: { labels, datasets },
@@ -2443,14 +2457,14 @@ function renderDailyChart(daily) {
       onResize: () => positionDailyBrush(),
       interaction: doSplit ? { mode: 'index', intersect: false } : undefined,
       plugins: {
-        legend: { display: cum || doSplit, position: 'bottom',
+        legend: { display: doSplit, position: 'bottom',
                   labels: { color:CT.dim, boxWidth:12, boxHeight:12, usePointStyle:true } },
         tooltip: {
           callbacks: {
             title: c => labels[c[0].dataIndex],
             label: c => `${c.dataset.label}: ${fmt(c.raw)}`,
             footer: doSplit
-              ? c => `Total: ${fmt(c.reduce((a, x) => x.dataset.type === 'line' ? a : a + x.raw, 0))}`
+              ? c => `Total: ${fmt(c.reduce((a, x) => a + x.raw, 0))}`
               : undefined,
           }
         }
@@ -2458,16 +2472,79 @@ function renderDailyChart(daily) {
       scales: {
         x: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
         y: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
-        ...(cum ? {y2:{position:'right',grid:{display:false},
-          ticks:{color:CT.success,
-                 ...(isChars ? { callback: v => fmtChars(v) }
-                             : { stepSize: cumStepH * (isHours ? 1 : 60),
-                                 callback: v => fmtHourTick(isHours ? v : v / 60) })}}} : {})
       }
     }
   });
 
   // Keep the range-selector handles aligned with the (re)laid-out plot area.
+  requestAnimationFrame(positionDailyBrush);
+}
+
+// Running total of a bucketed series in DISPLAY units. Chars pass through; time
+// is HOURS at every granularity — deliberately not the bar view's granularity-
+// dependent scale, which would plot a range total in minutes at day granularity.
+function statsCumSeries(bucket, isChars) {
+  let run = 0;
+  const vals = isChars ? (bucket.chars || []) : (bucket.secs || []).map(s => s / 3600);
+  return vals.map(v => (run += v, run));
+}
+
+// Cumulative view — the same Time/Chars data as a running total. It REPLACES the
+// bars rather than riding above them on a second y-axis, which is what the old
+// "Show cumulative" checkbox did. That overlay had three problems, all of them
+// the second scale's fault: its forced stepSize rounded the axis max up to a
+// step boundary (a 106h total picked step 50, so the axis ran to 150 and the
+// curve used two thirds of the plot), its ticks never landed on the left axis's
+// gridlines, and — unlike the left axis, pinned at 62px — its width followed its
+// tick text, so flipping the toggle or changing range shifted the plot edge and
+// dragged the brush along with it. One axis, one series, none of that.
+//
+// Always hours, regardless of granularity. A running total is a range-sized
+// number, so the day-granularity "minutes" unit the bar view uses would read
+// 6,360 min for a total the goal burn-up already calls 106h. Same treatment as
+// that chart (renderGoalChart), deliberately — including tension 0, because a
+// cumulative series is monotonic and Chart.js's cubic interpolation dips on a
+// flat stretch, drawing reading that went backwards.
+function renderDailyCumChart(bucket, isChars) {
+  const { labels } = bucket;
+  const cumVals = statsCumSeries(bucket, isChars);
+  const fmt   = isChars ? v => `${fmtChars(Math.round(v))} chars` : v => fmtTime(v * 3600);
+  // Identity follows the metric, not the shape — same colors the bars use, so
+  // switching view doesn't repaint the series.
+  const color = isChars ? CT.success : CT.accent;
+
+  // Single series: no legend, so the canvas keeps its base height and the card
+  // no longer jumps 31px when you switch view.
+  reserveLegendRoom('chart-daily', 'daily', 180, false);
+  upsertChart('daily', 'chart-daily', {
+    type: 'line',
+    data: { labels, datasets: [{
+      label: isChars ? 'Characters' : 'Time', data: cumVals,
+      borderColor: color, backgroundColor: ctAlpha(color, 0.12),
+      borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 5,
+      pointBackgroundColor: color, pointBorderColor: CT.card, pointBorderWidth: 2,
+      fill: 'origin', tension: 0,
+    }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      onResize: () => positionDailyBrush(),
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: c => labels[c[0].dataIndex],
+          label: c => `Total: ${fmt(c.raw)}`,
+        } },
+      },
+      scales: {
+        x: { grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
+        y: { grid:{color:CT.grid}, beginAtZero: true,
+             ticks:{color:CT.dim, callback: v => isChars ? fmtChars(v) : fmtHourTick(v)},
+             afterFit: s => { s.width = 62; } },
+      },
+    }
+  });
+
   requestAnimationFrame(positionDailyBrush);
 }
 
@@ -3892,6 +3969,16 @@ function showMediaView(name) {
   }
 }
 
+// Sources that never get a media card. get_media_stats groups by title across
+// EVERY source (no source filter in SQL), so anything with a title lands on the
+// grid unless it's excluded here.
+//   'manual'  — quick-log stopwatch rows, untitled by design
+//   'youtube' — the passive tracker pools all its time under one 'YouTube'
+//               title so the data stays queryable later; it is deliberately not
+//               a media entry (see plans/YOUTUBE-PLAN.md)
+const GRID_HIDDEN_SOURCES = new Set(['manual', 'youtube']);
+const isGridHidden = (m) => GRID_HIDDEN_SOURCES.has(m.source);
+
 async function loadMedia() {
   destroyChart('detail');
   destroyPortalCharts();
@@ -3905,8 +3992,8 @@ async function loadMedia() {
     window.pywebview.api.get_media_order(),
   ]);
   mediaOrderMap = mediaOrderMap || {};
-  const nonManualCount = mediaAllData.filter(m => m.source !== 'manual').length;
-  document.getElementById('media-count').textContent = `${nonManualCount} titles`;
+  const visibleCount = mediaAllData.filter(m => !isGridHidden(m)).length;
+  document.getElementById('media-count').textContent = `${visibleCount} titles`;
   renderMediaGrid();
 }
 
@@ -3915,7 +4002,7 @@ function renderMediaGrid() {
 
   // Titles that belong to a series — hidden as standalone cards
   const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
-  const filtered = mediaAllData.filter(m => m.source !== 'manual');
+  const filtered = mediaAllData.filter(m => !isGridHidden(m));
   const ungrouped = filtered.filter(m => !inSeries.has(m.title));
 
   grid.innerHTML = '';
@@ -3972,7 +4059,7 @@ function makeReorderControls(key, canLeft, canRight) {
 async function shiftMediaCard(key, delta) {
   // Rebuild the current visible order, swap, persist, re-render.
   const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
-  const ungrouped = mediaAllData.filter(m => m.source !== 'manual' && !inSeries.has(m.title));
+  const ungrouped = mediaAllData.filter(m => !isGridHidden(m) && !inSeries.has(m.title));
   const natural = [
     ...seriesData.map(s => `s:${s.id}`),
     ...ungrouped.map(m => `t:${m.title}`),
@@ -4438,6 +4525,7 @@ function renderSeriesCharts() {
   const byBook = cs ? cs.byBook : [];
   detailChartCfg.series = {
     key: 'series', canvasId: 'chart-series-main', segId: 'series-metric-seg',
+    viewSegId: 'series-view-seg',
     splitLabelId: 'series-split-label',
     daily,
     // Series keep per-day resolution (unchanged from before the merge); only
@@ -4751,7 +4839,7 @@ function renderMediaDetail(d) {
   // Session list
   const countEl = document.getElementById('detail-session-count');
   countEl.textContent = `(${d.days_count})`;
-  renderDetailSessions(d.daily, isGSM);
+  setDetailSessions('detail', d.daily);
 }
 
 // ── Detail charts (shared) ─────────────────────────────────────────────────
@@ -4768,6 +4856,7 @@ function renderMediaDetail(d) {
 // over a time total. `sessions.reading_speed` is never consulted.
 
 let detailMetric = 'time';        // 'time' | 'chars' | 'speed' — shared by all three views
+let detailCumulative = false;     // chart shape: per-bucket bars vs running total, likewise shared
 const detailChartCfg = {};        // view -> config, set by that view's render fn
 
 // Roll a daily series up to weekly buckets past `weeklyOver` days, so a long
@@ -4884,17 +4973,34 @@ function memberLegendLabels(items) {
 // Grey out Chars/Speed for a title that has no character data (listening, say)
 // and fall back to Time so the view never lands on an empty metric.
 function syncDetailMetricSeg(view, avail) {
-  const seg = document.getElementById(detailChartCfg[view]?.segId);
-  if (!seg) return;
-  seg.querySelectorAll('.seg-btn').forEach(b => {
-    const ok = avail[b.dataset.metric];
-    b.disabled = !ok;
-    b.classList.toggle('active', ok && b.dataset.metric === detailMetric);
-  });
+  const cfg = detailChartCfg[view];
+  const seg = document.getElementById(cfg?.segId);
+  if (seg) {
+    seg.querySelectorAll('.seg-btn').forEach(b => {
+      const ok = avail[b.dataset.metric];
+      b.disabled = !ok;
+      b.classList.toggle('active', ok && b.dataset.metric === detailMetric);
+    });
+  }
+  // Cumulative is off the table for Speed (a running total of a rate is
+  // nonsense) — the seg fades but keeps its choice, so switching away to Speed
+  // and back doesn't silently drop you into Daily.
+  const vseg = document.getElementById(cfg?.viewSegId);
+  if (vseg) {
+    vseg.querySelectorAll('.seg-btn').forEach(b => {
+      b.disabled = detailMetric === 'speed';
+      b.classList.toggle('active', (b.dataset.view === 'cum') === detailCumulative);
+    });
+  }
 }
 
 function setDetailMetric(view, metric) {
   detailMetric = metric;
+  renderDetailMetricChart(view);
+}
+
+function setDetailView(view, v) {
+  detailCumulative = (v === 'cum');
   renderDetailMetricChart(view);
 }
 
@@ -4922,8 +5028,9 @@ function renderDetailMetricChart(view) {
   syncDetailMetricSeg(view, avail);
 
   const metric  = detailMetric;
-  // Splitting applies to every metric. Time and chars stack into segments;
-  // speed can't stack (it's a rate) so it becomes one line per member instead.
+  // Splitting applies to every metric. Time and chars stack into bar segments;
+  // Speed and Cumulative are single curves that can't stack, so for those the
+  // split recolors the one line per bucket instead (see the `seg` note below).
   const members = splitMembers ? splitMembers() : null;
   const doSplit = !!splitOn && !!members && split.some(s => Object.keys(s).length);
 
@@ -4932,7 +5039,55 @@ function renderDetailMetricChart(view) {
     return;
   }
 
+  // Cumulative is a shape, not a metric — it re-plots Time/Chars as a running
+  // total. Speed opts out (see syncDetailMetricSeg).
+  const cum = detailCumulative && metric !== 'speed';
+
   reserveLegendRoom(canvasId, key, 180, doSplit || metric === 'speed');
+
+  // One color per bucket for whichever member dominated it. Shared by split
+  // Speed and split Cumulative: both are single curves that can't stack, so the
+  // split ANNOTATES the line rather than dividing it, and the curve is identical
+  // whether the toggle is on or off. `segC(a)` paints a line's segments from it.
+  const seg  = doSplit ? speedSegmentColors(split, members) : null;
+  const segC = (a) => seg
+    ? { segment: { borderColor: ctx => {
+          const c = seg.colors[ctx.p1DataIndex];
+          return c ? (a < 1 ? ctAlpha(c, a) : c) : undefined;
+        } } }
+    : {};
+
+  // Same shape decision as the Stats chart (renderDailyCumChart): the running
+  // total REPLACES the bars on the one axis, and time is HOURS at every rollup —
+  // not the bar view's minutes, which a title-sized total would read in the
+  // thousands of.
+  const cumCfg = () => {
+    const asChars = metric === 'chars';
+    const color   = asChars ? CT.success : CT.accent;
+    return {
+      type: 'line',
+      legendItems: seg ? seg.active : null,
+      datasets: [{
+        label: asChars ? 'Characters' : 'Time',
+        data: statsCumSeries({ chars, secs }, asChars),
+        borderColor: color,
+        // No area fill under a segmented line — one flat tint would contradict
+        // the colors the line is shifting through. Unsplit, it fills like Stats.
+        backgroundColor: seg ? 'transparent' : ctAlpha(color, 0.12),
+        fill: seg ? false : 'origin',
+        borderWidth: 2.5, pointRadius: 0, pointHoverRadius: 5,
+        pointBackgroundColor: seg ? (ctx => seg.colors[ctx.dataIndex] || color) : color,
+        pointBorderColor: CT.card, pointBorderWidth: 2,
+        // tension 0: a running total is monotonic, and cubic interpolation
+        // overshoots into a dip on a flat stretch — reading that went backwards.
+        tension: 0, ...segC(1),
+      }],
+      yTick: asChars ? (v => fmtChars(v)) : (v => fmtHourTick(v)),
+      tip:   asChars ? (c => `Total: ${fmtChars(Math.round(c.raw))} chars`)
+                     : (c => `Total: ${fmtTime(c.raw * 3600)}`),
+      foot:  undefined,
+    };
+  };
 
   const cfgByMetric = {
     time: () => ({
@@ -4970,13 +5125,6 @@ function renderDetailMetricChart(view) {
       //
       // No area fill: speed is a rate, so the region under the line isn't a
       // quantity that means anything.
-      const seg  = doSplit ? speedSegmentColors(split, members) : null;
-      const segC = (a) => seg
-        ? { segment: { borderColor: ctx => {
-              const c = seg.colors[ctx.p1DataIndex];
-              return c ? (a < 1 ? ctAlpha(c, a) : c) : undefined;
-            } } }
-        : {};
       return {
       type: 'line',
       legendItems: seg ? seg.active : null,
@@ -5000,7 +5148,7 @@ function renderDetailMetricChart(view) {
     },
   };
 
-  const m       = cfgByMetric[metric]();
+  const m       = cum ? cumCfg() : cfgByMetric[metric]();
   const stacked = doSplit && m.type === 'bar';
   const legend  = doSplit || metric === 'speed';
 
@@ -5009,7 +5157,7 @@ function renderDetailMetricChart(view) {
     data: { labels, datasets: m.datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
-      interaction: (stacked || metric === 'speed') ? { mode: 'index', intersect: false } : undefined,
+      interaction: (stacked || metric === 'speed' || cum) ? { mode: 'index', intersect: false } : undefined,
       plugins: {
         legend: {
           display: legend, position: 'bottom',
@@ -5048,6 +5196,7 @@ function renderDetailMetricChart(view) {
 function renderDetailChart(daily, isGSM) {
   detailChartCfg.detail = {
     key: 'detail', canvasId: 'chart-detail-main', segId: 'detail-metric-seg',
+    viewSegId: 'detail-view-seg',
     splitLabelId: 'ms-split-label',
     daily,
     // Media detail is the one view that rolls up to weeks past ~3 months; a
@@ -5061,19 +5210,55 @@ function renderDetailChart(daily, isGSM) {
   renderDetailMetricChart('detail');
 }
 
-function renderDetailSessions(daily, isGSM) {
-  const el = document.getElementById('detail-session-list');
-  el.innerHTML = '';
+// ── Detail session lists (collapsible) ─────────────────────────────────────
+// Media detail and milestone detail each end in a day-by-day list that runs to
+// hundreds of rows on a long title, burying the charts above it. Both lists now
+// start collapsed behind their own heading and build their rows on first
+// expand; opening a different title resets them to collapsed.
+const detailSessionCfg = {
+  detail:    { listId: 'detail-session-list',    caretId: 'detail-session-caret',
+               empty: 'No session data.' },
+  milestone: { listId: 'milestone-session-list', caretId: 'milestone-session-caret',
+               empty: 'No session data in this milestone yet.' },
+};
+const detailSessionRows  = { detail: [], milestone: [] };
+const detailSessionsOpen = { detail: false, milestone: false };
 
-  if (!daily.length) {
-    el.innerHTML = '<p class="empty-msg">No session data.</p>';
+// Stash the data for a view's list and reset it to collapsed + empty.
+function setDetailSessions(key, daily) {
+  detailSessionRows[key]  = [...(daily || [])].reverse();   // newest first
+  detailSessionsOpen[key] = false;
+  const el = document.getElementById(detailSessionCfg[key].listId);
+  if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+  syncDetailSessionCaret(key);
+}
+
+function syncDetailSessionCaret(key) {
+  const caret = document.getElementById(detailSessionCfg[key].caretId);
+  if (caret) caret.textContent = detailSessionsOpen[key] ? '▴' : '▾';
+}
+
+function toggleDetailSessions(key) {
+  const el = document.getElementById(detailSessionCfg[key].listId);
+  if (!el) return;
+  const open = !detailSessionsOpen[key];
+  detailSessionsOpen[key] = open;
+  if (open && !el.childElementCount) buildDetailSessionRows(key);
+  el.style.display = open ? '' : 'none';
+  syncDetailSessionCaret(key);
+}
+
+function buildDetailSessionRows(key) {
+  const el   = document.getElementById(detailSessionCfg[key].listId);
+  const rows = detailSessionRows[key];
+
+  if (!rows.length) {
+    el.innerHTML = `<p class="empty-msg">${detailSessionCfg[key].empty}</p>`;
     return;
   }
 
-  // Show newest first
-  const reversed = [...daily].reverse();
-
-  reversed.forEach(s => {
+  const frag = document.createDocumentFragment();
+  rows.forEach(s => {
     const row = document.createElement('div');
     row.className = 'detail-session-row';
 
@@ -5087,8 +5272,9 @@ function renderDetailSessions(daily, isGSM) {
       <span class="dsr-chars">${s.chars > 0 ? fmtChars(s.chars) + ' chars' : ''}</span>
       ${speedHTML}
     `;
-    el.appendChild(row);
+    frag.appendChild(row);
   });
+  el.appendChild(frag);
 }
 
 // ── Title alias editing ────────────────────────────────────────────────────
@@ -6368,12 +6554,13 @@ function renderMilestoneDetail(d) {
 
   renderMilestoneCharts(d.daily || []);
   document.getElementById('milestone-session-count').textContent = `(${d.session_count})`;
-  renderMilestoneSessions(d.daily || []);
+  setDetailSessions('milestone', d.daily || []);
 }
 
 function renderMilestoneCharts(daily) {
   detailChartCfg.milestone = {
     key: 'milestone', canvasId: 'chart-milestone-main', segId: 'milestone-metric-seg',
+    viewSegId: 'milestone-view-seg',
     splitLabelId: null,
     daily: daily || [],
     weeklyOver: null,
@@ -6383,29 +6570,6 @@ function renderMilestoneCharts(daily) {
     stackName: null,
   };
   renderDetailMetricChart('milestone');
-}
-
-function renderMilestoneSessions(daily) {
-  const el = document.getElementById('milestone-session-list');
-  el.innerHTML = '';
-  if (!daily.length) {
-    el.innerHTML = '<p class="empty-msg">No session data in this milestone yet.</p>';
-    return;
-  }
-  [...daily].reverse().forEach(s => {
-    const row = document.createElement('div');
-    row.className = 'detail-session-row';
-    const speedHTML = s.speed > 0
-      ? `<span class="dsr-speed">${fmtChars(Math.round(s.speed))}/h</span>`
-      : '';
-    row.innerHTML = `
-      <span class="dsr-date">${s.date}</span>
-      <span class="dsr-time">${fmtTime(s.seconds)}</span>
-      <span class="dsr-chars">${s.chars > 0 ? fmtChars(s.chars) + ' chars' : ''}</span>
-      ${speedHTML}
-    `;
-    el.appendChild(row);
-  });
 }
 
 async function endCurrentMilestone() {
@@ -6546,7 +6710,7 @@ function portalSplitSeries() {
 }
 
 function portalEntries() {
-  const titles = mediaAllData.filter(m => m.source !== 'manual');
+  const titles = mediaAllData.filter(m => !isGridHidden(m));
   const out = [];
   if (portalSplitSeries()) {
     titles.forEach(m => out.push({

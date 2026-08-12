@@ -271,6 +271,39 @@ browser.storage.onChanged.addListener((changes, area) => {
 populateActivitySelect(FALLBACK_ACTIVITY_TYPES);
 fetchActivityTypes();
 
+// ── Passive YouTube tracking (read-only) ──────────────────────────────────────
+// The stopwatch above is manual and unrelated, so without this the popup looks
+// idle while YouTube tracking is quietly running. The on-page chip is the live
+// indicator; this is just today's total so the popup isn't silent about it.
+//
+// Deliberately placed here rather than at the end of the file: the `server`
+// branch rewrites everything from ~line 487 down, and this region is untouched
+// by it (see plans/YOUTUBE-PLAN.md).
+const ytTodayEl = document.getElementById("yt-today");
+
+function formatYtShort(total) {
+  const s = Math.floor(total);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return h ? `${h}h ${m}m` : `${m}m`;
+}
+
+async function refreshYtToday() {
+  if (!ytTodayEl) return;
+  try {
+    const res  = await browser.runtime.sendMessage({ type: "yt-day-total" });
+    const secs = (res && res.dayTotal) || 0;
+    if (secs < 60) { ytTodayEl.style.display = "none"; return; }
+    ytTodayEl.textContent   = `YouTube today — ${formatYtShort(secs)}`;
+    ytTodayEl.style.display = "";
+  } catch {
+    ytTodayEl.style.display = "none";
+  }
+}
+
+refreshYtToday();
+setInterval(refreshYtToday, 5000);
+
 // ── Pause / Resume ────────────────────────────────────────────────────────────
 pauseBtn.addEventListener("click", async () => {
   const cfg = await browser.storage.local.get(

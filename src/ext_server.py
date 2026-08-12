@@ -18,7 +18,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from db import get_setting, set_setting, db_get_custom_categories, logical_date_for
-from imports import import_ttsu_entries, log_manual_session
+from imports import import_ttsu_entries, import_youtube_day, log_manual_session
 
 BUILTIN_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"]
 
@@ -114,16 +114,28 @@ def apply_payload(path, body):
     seconds after capture or the next morning, and it must land identically.
 
     ttsu entries carry an explicit per-entry `dateKey`, so they're already
-    pinned. A manual log is not — the extension's timer posts elapsed seconds
-    with no date — so `captured_at` is what pins it. Falling back to "now" would
-    silently move a 01:00 session onto the wrong logical day whenever the drain
-    ran after the rollover hour.
+    pinned. YouTube posts an explicit `session_date` for the same reason — the
+    tracker reads `rollover_hour` from GET /config and buckets its accrual into
+    the logical day itself before posting. A manual log is not — the extension's
+    timer posts elapsed seconds with no date — so `captured_at` is what pins it.
+    Falling back to "now" would silently move a 01:00 session onto the wrong
+    logical day whenever the drain ran after the rollover hour.
     """
     if path == "/import":
         source = body.get("source", "")
-        if source != "ttsureader":
-            return {"error": f"unknown source {source!r}"}, 400
-        return import_ttsu_entries(body.get("entries", [])), 200
+        if source == "ttsureader":
+            return import_ttsu_entries(body.get("entries", [])), 200
+        if source == "youtube":
+            # Cumulative total for one logical day, dated by the capturer.
+            # Idempotent on (source, session_date), so a replay is a rewrite
+            # rather than a second row — which is exactly what makes it safe to
+            # queue: an inbox row applied hours late rewrites that day's total
+            # instead of adding to it, and needs no client_id to do so.
+            return import_youtube_day(
+                body.get("session_date", ""),
+                body.get("time_seconds", 0),
+            ), 200
+        return {"error": f"unknown source {source!r}"}, 400
 
     if path == "/log-manual":
         # client_id is what makes a retry safe — the stopwatch re-sends the same
@@ -219,10 +231,18 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reject(403)
         if not self._token_ok():
             return self._reject(403)
-        if self.path != "/activity-types":
+        if self.path == "/activity-types":
+            payload = activity_types()
+        elif self.path == "/config":
+            # Settings a capturing device can't derive on its own. The YouTube
+            # tracker needs rollover_hour to bucket accrual into the right
+            # LOGICAL day before it posts — the capturer decides the date, so it
+            # has to know where the boundary is.
+            payload = {"rollover_hour": int(get_setting("rollover_hour", "0") or 0)}
+        else:
             return self._reject(404)
 
-        resp = json.dumps(activity_types()).encode()
+        resp = json.dumps(payload).encode()
 
         self.send_response(200)
         self._send_cors(origin)

@@ -915,6 +915,69 @@ def import_ttsu_zip_data(zip_bytes):
     return import_ttsu_entries(all_entries)
 
 
+# ── YouTube passive tracker ────────────────────────────────────────────────────
+_YT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def import_youtube_day(session_date, time_seconds):
+    """Upsert one logical day's passive YouTube listening time.
+
+    The extension accrues a cumulative total per LOGICAL day and re-posts that
+    total every couple of minutes, so this is last-write-wins on the natural key
+    (source='youtube', session_date). That makes it idempotent: a drain
+    replaying an inbox row rewrites the same row with the same total instead of
+    adding a second one — the property that makes `import_ttsu_entries` safe to
+    replay and `log_manual_session` not. It's also why this source needs no
+    `client_id`; the natural key already does that job. Adding a second device
+    later is what would need one (see plans/YOUTUBE-PLAN.md).
+
+    There is deliberately NO monotonic guard. ttsu skips when the incoming total
+    is lower, because IndexedDB can report stale values and tabs can race.
+    Neither applies here — the extension's background script is a single
+    instance and the sole authority for this row — and a guard would reject the
+    one thing it must accept: the user's correction lowering the total.
+
+    Rows carry title='YouTube' so all YouTube time pools under one entry, and
+    **no game_id**. That column is what makes a row eligible for the GSM
+    rollover-attribution and manual_time_adjust rails in CLAUDE.md; leaving it
+    NULL is what keeps this source outside those cross-cutting concerns. The
+    extension pins the logical date itself, so attribution is never needed.
+    """
+    session_date = (session_date or "").strip()
+    if not _YT_DATE_RE.match(session_date):
+        return {"error": "session_date must be YYYY-MM-DD"}
+
+    secs = float(time_seconds or 0)
+    if secs <= 0:
+        return {"error": "time_seconds must be > 0"}
+
+    con = sqlite3.connect(DB_PATH)
+    try:
+        row = con.execute(
+            "SELECT rowid FROM sessions WHERE source='youtube' AND session_date=?",
+            (session_date,),
+        ).fetchone()
+        now = datetime.now().isoformat()
+        if row:
+            con.execute(
+                "UPDATE sessions SET time_seconds=?, ingested_at=? WHERE rowid=?",
+                (secs, now, row[0]),
+            )
+        else:
+            con.execute(
+                "INSERT INTO sessions "
+                "(source, title, activity_type, session_date, time_seconds, "
+                " ingested_at, time_excluded) "
+                "VALUES ('youtube','YouTube','Listening',?,?,?,0)",
+                (session_date, secs, now),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    return {"logged": True, "session_date": session_date, "time_seconds": secs}
+
+
 # ── EPUB extraction ────────────────────────────────────────────────────────────
 # Dropping an EPUB on a media entry's cover box fills two display-only fields in
 # one go: the cover image (book_covers) and the progress-bar length

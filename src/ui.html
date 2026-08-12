@@ -271,14 +271,15 @@
       </div>
 
       <div class="detail-chart-head" style="margin:20px 0 8px">
-        <h2 style="margin:0">Daily activity</h2>
+        <h2 style="margin:0">Over time</h2>
         <div class="detail-chart-ctrl">
           <label class="toggle-label" id="split-toggle-label">
             <input type="checkbox" id="split-toggle" onchange="onSplitToggle()"> Split by activity
           </label>
-          <label class="toggle-label" id="cum-toggle-label">
-            <input type="checkbox" id="cum-toggle" onchange="onCumToggle()"> Show cumulative
-          </label>
+          <div class="seg" id="stats-view-seg">
+            <button class="seg-btn active" data-view="daily" onclick="setStatsView('daily')">Daily</button>
+            <button class="seg-btn"        data-view="cum"   onclick="setStatsView('cum')">Cumulative</button>
+          </div>
           <div class="seg" id="stats-metric-seg">
             <button class="seg-btn active" data-metric="time"  onclick="setStatsMetric('time')">Time</button>
             <button class="seg-btn"        data-metric="chars" onclick="setStatsMetric('chars')">Chars</button>
@@ -487,13 +488,17 @@
           <div id="series-progress-nolen" class="muted" style="font-size:11px"></div>
         </div>
 
-        <!-- Daily activity: one chart, Time / Chars / Speed -->
+        <!-- Over time: one chart, Time / Chars / Speed -->
         <div class="detail-chart-head">
-          <h2 style="margin:0">Daily activity</h2>
+          <h2 style="margin:0">Over time</h2>
           <div class="detail-chart-ctrl">
             <label class="toggle-label" id="series-split-label" style="display:none">
               <input type="checkbox" id="series-split-toggle" onchange="onSeriesSplitToggle()"> Split by book
             </label>
+            <div class="seg" id="series-view-seg">
+              <button class="seg-btn active" data-view="daily" onclick="setDetailView('series','daily')">Daily</button>
+              <button class="seg-btn"        data-view="cum"   onclick="setDetailView('series','cum')">Cumulative</button>
+            </div>
             <div class="seg" id="series-metric-seg">
               <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('series','time')">Time</button>
               <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('series','chars')">Chars</button>
@@ -549,13 +554,17 @@
           </div>
         </div>
 
-        <!-- Daily activity chart -->
+        <!-- Over time chart -->
         <div class="detail-chart-head">
-          <h2 style="margin:0">Daily activity</h2>
+          <h2 style="margin:0">Over time</h2>
           <div class="detail-chart-ctrl">
             <label class="toggle-label" id="ms-split-label" style="display:none">
               <input type="checkbox" id="ms-split-toggle" onchange="onMilestoneSplitToggle()"> Split by milestone
             </label>
+            <div class="seg" id="detail-view-seg">
+              <button class="seg-btn active" data-view="daily" onclick="setDetailView('detail','daily')">Daily</button>
+              <button class="seg-btn"        data-view="cum"   onclick="setDetailView('detail','cum')">Cumulative</button>
+            </div>
             <div class="seg" id="detail-metric-seg">
               <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('detail','time')">Time</button>
               <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('detail','chars')">Chars</button>
@@ -565,9 +574,12 @@
         </div>
         <div class="chart-wrap"><canvas id="chart-detail-main" height="180"></canvas></div>
 
-        <!-- Session list -->
-        <h2 style="margin-top:20px">Days read <span id="detail-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
-        <div class="detail-sessions" id="detail-session-list"></div>
+        <!-- Session list (collapsed by default — see setDetailSessions in ui.js) -->
+        <h2 class="collapse-head" style="margin-top:20px" onclick="toggleDetailSessions('detail')">
+          <span class="collapse-caret" id="detail-session-caret">▾</span>
+          Days read <span id="detail-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span>
+        </h2>
+        <div class="detail-sessions" id="detail-session-list" style="display:none"></div>
         <div style="height:24px"></div>
       </div>
 
@@ -593,8 +605,12 @@
         <div class="stat-grid" id="milestone-stats-grid"></div>
 
         <div class="detail-chart-head">
-          <h2 style="margin:0">Daily activity</h2>
+          <h2 style="margin:0">Over time</h2>
           <div class="detail-chart-ctrl">
+            <div class="seg" id="milestone-view-seg">
+              <button class="seg-btn active" data-view="daily" onclick="setDetailView('milestone','daily')">Daily</button>
+              <button class="seg-btn"        data-view="cum"   onclick="setDetailView('milestone','cum')">Cumulative</button>
+            </div>
             <div class="seg" id="milestone-metric-seg">
               <button class="seg-btn active" data-metric="time"  onclick="setDetailMetric('milestone','time')">Time</button>
               <button class="seg-btn"        data-metric="chars" onclick="setDetailMetric('milestone','chars')">Chars</button>
@@ -604,8 +620,11 @@
         </div>
         <div class="chart-wrap"><canvas id="chart-milestone-main" height="180"></canvas></div>
 
-        <h2 style="margin-top:20px">Sessions <span id="milestone-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
-        <div class="detail-sessions" id="milestone-session-list"></div>
+        <h2 class="collapse-head" style="margin-top:20px" onclick="toggleDetailSessions('milestone')">
+          <span class="collapse-caret" id="milestone-session-caret">▾</span>
+          Sessions <span id="milestone-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span>
+        </h2>
+        <div class="detail-sessions" id="milestone-session-list" style="display:none"></div>
         <div style="height:24px"></div>
       </div>
 
