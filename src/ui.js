@@ -4839,7 +4839,7 @@ function renderMediaDetail(d) {
   // Session list
   const countEl = document.getElementById('detail-session-count');
   countEl.textContent = `(${d.days_count})`;
-  renderDetailSessions(d.daily, isGSM);
+  setDetailSessions('detail', d.daily);
 }
 
 // ── Detail charts (shared) ─────────────────────────────────────────────────
@@ -5210,19 +5210,55 @@ function renderDetailChart(daily, isGSM) {
   renderDetailMetricChart('detail');
 }
 
-function renderDetailSessions(daily, isGSM) {
-  const el = document.getElementById('detail-session-list');
-  el.innerHTML = '';
+// ── Detail session lists (collapsible) ─────────────────────────────────────
+// Media detail and milestone detail each end in a day-by-day list that runs to
+// hundreds of rows on a long title, burying the charts above it. Both lists now
+// start collapsed behind their own heading and build their rows on first
+// expand; opening a different title resets them to collapsed.
+const detailSessionCfg = {
+  detail:    { listId: 'detail-session-list',    caretId: 'detail-session-caret',
+               empty: 'No session data.' },
+  milestone: { listId: 'milestone-session-list', caretId: 'milestone-session-caret',
+               empty: 'No session data in this milestone yet.' },
+};
+const detailSessionRows  = { detail: [], milestone: [] };
+const detailSessionsOpen = { detail: false, milestone: false };
 
-  if (!daily.length) {
-    el.innerHTML = '<p class="empty-msg">No session data.</p>';
+// Stash the data for a view's list and reset it to collapsed + empty.
+function setDetailSessions(key, daily) {
+  detailSessionRows[key]  = [...(daily || [])].reverse();   // newest first
+  detailSessionsOpen[key] = false;
+  const el = document.getElementById(detailSessionCfg[key].listId);
+  if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+  syncDetailSessionCaret(key);
+}
+
+function syncDetailSessionCaret(key) {
+  const caret = document.getElementById(detailSessionCfg[key].caretId);
+  if (caret) caret.textContent = detailSessionsOpen[key] ? '▴' : '▾';
+}
+
+function toggleDetailSessions(key) {
+  const el = document.getElementById(detailSessionCfg[key].listId);
+  if (!el) return;
+  const open = !detailSessionsOpen[key];
+  detailSessionsOpen[key] = open;
+  if (open && !el.childElementCount) buildDetailSessionRows(key);
+  el.style.display = open ? '' : 'none';
+  syncDetailSessionCaret(key);
+}
+
+function buildDetailSessionRows(key) {
+  const el   = document.getElementById(detailSessionCfg[key].listId);
+  const rows = detailSessionRows[key];
+
+  if (!rows.length) {
+    el.innerHTML = `<p class="empty-msg">${detailSessionCfg[key].empty}</p>`;
     return;
   }
 
-  // Show newest first
-  const reversed = [...daily].reverse();
-
-  reversed.forEach(s => {
+  const frag = document.createDocumentFragment();
+  rows.forEach(s => {
     const row = document.createElement('div');
     row.className = 'detail-session-row';
 
@@ -5236,8 +5272,9 @@ function renderDetailSessions(daily, isGSM) {
       <span class="dsr-chars">${s.chars > 0 ? fmtChars(s.chars) + ' chars' : ''}</span>
       ${speedHTML}
     `;
-    el.appendChild(row);
+    frag.appendChild(row);
   });
+  el.appendChild(frag);
 }
 
 // ── Title alias editing ────────────────────────────────────────────────────
@@ -6452,7 +6489,7 @@ function renderMilestoneDetail(d) {
 
   renderMilestoneCharts(d.daily || []);
   document.getElementById('milestone-session-count').textContent = `(${d.session_count})`;
-  renderMilestoneSessions(d.daily || []);
+  setDetailSessions('milestone', d.daily || []);
 }
 
 function renderMilestoneCharts(daily) {
@@ -6468,29 +6505,6 @@ function renderMilestoneCharts(daily) {
     stackName: null,
   };
   renderDetailMetricChart('milestone');
-}
-
-function renderMilestoneSessions(daily) {
-  const el = document.getElementById('milestone-session-list');
-  el.innerHTML = '';
-  if (!daily.length) {
-    el.innerHTML = '<p class="empty-msg">No session data in this milestone yet.</p>';
-    return;
-  }
-  [...daily].reverse().forEach(s => {
-    const row = document.createElement('div');
-    row.className = 'detail-session-row';
-    const speedHTML = s.speed > 0
-      ? `<span class="dsr-speed">${fmtChars(Math.round(s.speed))}/h</span>`
-      : '';
-    row.innerHTML = `
-      <span class="dsr-date">${s.date}</span>
-      <span class="dsr-time">${fmtTime(s.seconds)}</span>
-      <span class="dsr-chars">${s.chars > 0 ? fmtChars(s.chars) + ' chars' : ''}</span>
-      ${speedHTML}
-    `;
-    el.appendChild(row);
-  });
 }
 
 async function endCurrentMilestone() {

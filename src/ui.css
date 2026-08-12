@@ -944,6 +944,15 @@ select:focus { border-color: var(--accent); }
 .detail-desc::-webkit-scrollbar-thumb { background: var(--grid); border-radius: 2px; }
 
 /* ── Detail session rows ─────────────────────────────────────────────────── */
+/* The heading doubles as the expand/collapse control for the list below it. */
+.collapse-head {
+  display: flex; align-items: center; gap: 7px;
+  cursor: pointer; user-select: none; width: fit-content;
+}
+.collapse-head:hover { color: var(--accent); }
+.collapse-caret { color: var(--dim); font-size: 11px; line-height: 1; }
+.collapse-head:hover .collapse-caret { color: var(--accent); }
+
 .detail-sessions { display: flex; flex-direction: column; gap: 5px; margin-top: 4px; }
 .detail-session-row {
   display: flex; align-items: center; gap: 8px;
