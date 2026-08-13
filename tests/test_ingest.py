@@ -268,6 +268,8 @@ class FakeInbox:
         self.rows = rows
         self.acked = []
         self.pushed_types = None
+        self.pushed_config = None
+        self.push_count = 0         # how many times the caches were written
         self.fail_after = None      # apply this many rows, then raise on ack
 
     def get(self, url, params=None, headers=None, timeout=None):
@@ -285,6 +287,9 @@ class FakeInbox:
             self.acked.append(json["through_id"])
         elif url.endswith("/activity-types"):
             self.pushed_types = json["types"]
+            self.push_count += 1
+        elif url.endswith("/config"):
+            self.pushed_config = json["config"]
         return _Resp({"ok": True})
 
 
@@ -396,15 +401,54 @@ class TestDrain:
         monkeypatch.setattr(drainm.requests, "get", boom)
         assert drainm.DrainLoop().drain_once() == 0
 
-    def test_activity_types_are_pushed_only_after_a_real_apply(self, loop, monkeypatch):
+    def test_settings_are_pushed_even_when_nothing_was_applied(self, loop, monkeypatch):
+        """This used to be gated on `applied > 0`, and that was circular once
+        `rollover_hour` joined the payload: a device needs the rollover hour
+        BEFORE its first post, because the capturer decides the date it sends.
+        Waiting for a post to arrive means the value only lands after the
+        payload that needed it."""
         fake = FakeInbox([])
         _wire(monkeypatch, fake)
         loop.drain_once()
-        assert fake.pushed_types is None
-
-        fake.rows = [_row(1, "/log-manual", _manual(60, "2026-03-01"))]
-        loop.drain_once()
         assert "Reading" in fake.pushed_types
+        assert fake.pushed_config == {"rollover_hour": 0}
+
+    def test_unchanged_settings_are_not_repushed(self, loop, monkeypatch):
+        """Deduped against the last acknowledged copy, so draining every two
+        minutes forever is one comparison and no traffic."""
+        fake = FakeInbox([])
+        _wire(monkeypatch, fake)
+        loop.drain_once()
+        loop.drain_once()
+        loop.drain_once()
+        assert fake.push_count == 1
+
+    def test_a_changed_setting_is_pushed_again(self, loop, seed, monkeypatch):
+        fake = FakeInbox([])
+        _wire(monkeypatch, fake)
+        loop.drain_once()
+        seed.setting("rollover_hour", "4")
+        loop.drain_once()
+        assert fake.push_count == 2
+        assert fake.pushed_config == {"rollover_hour": 4}
+
+    def test_an_unreachable_inbox_retries_the_push(self, loop, monkeypatch):
+        """A failed push must not record itself as done, or the inbox would sit
+        on stale settings until the next time one of them changed."""
+        fake = FakeInbox([])
+        _wire(monkeypatch, fake)
+
+        real_post = fake.post
+        def flaky(url, **kw):
+            if url.endswith("/config"):
+                raise drainm.requests.exceptions.ConnectionError("no route")
+            return real_post(url, **kw)
+        fake.post = flaky
+        loop.drain_once()
+
+        fake.post = real_post
+        loop.drain_once()
+        assert fake.pushed_config == {"rollover_hour": 0}
 
     def test_status_reports_backlog_when_reachable(self, loop, monkeypatch):
         fake = FakeInbox([_row(1, "/log-manual", _manual(60, "2026-03-01"))])

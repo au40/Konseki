@@ -919,23 +919,40 @@ def import_ttsu_zip_data(zip_bytes):
 _YT_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def import_youtube_day(session_date, time_seconds):
-    """Upsert one logical day's passive YouTube listening time.
+def import_youtube_day(session_date, time_seconds, client_id=None):
+    """Upsert one logical day's passive YouTube listening time, per device.
 
     The extension accrues a cumulative total per LOGICAL day and re-posts that
-    total every couple of minutes, so this is last-write-wins on the natural key
-    (source='youtube', session_date). That makes it idempotent: a drain
-    replaying an inbox row rewrites the same row with the same total instead of
-    adding a second one — the property that makes `import_ttsu_entries` safe to
-    replay and `log_manual_session` not. It's also why this source needs no
-    `client_id`; the natural key already does that job. Adding a second device
-    later is what would need one (see plans/YOUTUBE-PLAN.md).
+    total every couple of minutes, so this is last-write-wins on the row it
+    finds. That makes it idempotent: a drain replaying an inbox row rewrites the
+    same row with the same total instead of adding a second one — the property
+    that makes `import_ttsu_entries` safe to replay and `log_manual_session`
+    not.
+
+    `client_id` (`youtube:<device>:<date>`) is what makes that safe with more
+    than one machine watching. Keyed on the date alone, a second device's post
+    would *overwrite* the first's total rather than add to it — silently, and
+    looking exactly like a quiet day. Keyed per device, each machine owns its
+    own row and the day's total is their sum, which every aggregate downstream
+    already computes by summing rows.
+
+    Absent (older extension builds) it falls back to the date-only key it always
+    used, and — importantly — only ever matches a row that is *itself* keyless.
+    A keyed row belongs to a device that will keep rewriting it; letting an
+    unkeyed post land on it would hand one device's total to another.
+
+    **Adoption.** The first keyed post from a machine that used to post keyless
+    claims that date's existing keyless row instead of inserting alongside it.
+    Without that, the changeover day would carry two rows for one machine and
+    double-count. plans/YOUTUBE-PLAN.md proposed a one-shot backfill migration
+    for this; doing it at write time instead needs no guess about which device
+    name the old rows belonged to, and is correct whether or not any exist.
 
     There is deliberately NO monotonic guard. ttsu skips when the incoming total
     is lower, because IndexedDB can report stale values and tabs can race.
-    Neither applies here — the extension's background script is a single
-    instance and the sole authority for this row — and a guard would reject the
-    one thing it must accept: the user's correction lowering the total.
+    Neither applies here — each device's background script is a single instance
+    and the sole authority for its own row — and a guard would reject the one
+    thing it must accept: the user's correction lowering the total.
 
     Rows carry title='YouTube' so all YouTube time pools under one entry, and
     **no game_id**. That column is what makes a row eligible for the GSM
@@ -951,13 +968,37 @@ def import_youtube_day(session_date, time_seconds):
     if secs <= 0:
         return {"error": "time_seconds must be > 0"}
 
+    key = (client_id or "").strip() or None
+
     con = sqlite3.connect(DB_PATH)
     try:
-        row = con.execute(
-            "SELECT rowid FROM sessions WHERE source='youtube' AND session_date=?",
-            (session_date,),
-        ).fetchone()
         now = datetime.now().isoformat()
+
+        if key:
+            # Looked up on the key alone, not (source, key): the partial unique
+            # index on client_id is already global, so a second row with this
+            # key cannot exist to be missed by a narrower WHERE.
+            row = con.execute(
+                "SELECT rowid FROM sessions WHERE client_id=?", (key,)
+            ).fetchone()
+            if not row:
+                row = con.execute(
+                    "SELECT rowid FROM sessions WHERE source='youtube' "
+                    "AND session_date=? AND client_id IS NULL",
+                    (session_date,),
+                ).fetchone()
+                if row:                       # adopt, don't duplicate
+                    con.execute(
+                        "UPDATE sessions SET client_id=? WHERE rowid=?",
+                        (key, row[0]),
+                    )
+        else:
+            row = con.execute(
+                "SELECT rowid FROM sessions WHERE source='youtube' "
+                "AND session_date=? AND client_id IS NULL",
+                (session_date,),
+            ).fetchone()
+
         if row:
             con.execute(
                 "UPDATE sessions SET time_seconds=?, ingested_at=? WHERE rowid=?",
@@ -967,9 +1008,9 @@ def import_youtube_day(session_date, time_seconds):
             con.execute(
                 "INSERT INTO sessions "
                 "(source, title, activity_type, session_date, time_seconds, "
-                " ingested_at, time_excluded) "
-                "VALUES ('youtube','YouTube','Listening',?,?,?,0)",
-                (session_date, secs, now),
+                " ingested_at, time_excluded, client_id) "
+                "VALUES ('youtube','YouTube','Listening',?,?,?,0,?)",
+                (session_date, secs, now, key),
             )
         con.commit()
     finally:

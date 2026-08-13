@@ -4,10 +4,9 @@ The extension accrues a cumulative total per LOGICAL day and re-posts that whole
 total every couple of minutes. Two properties fall out of that and are what
 these tests pin:
 
-  * **Replay-safe by construction.** The natural key (source='youtube',
-    session_date) makes a re-applied payload a rewrite, not a second row. This
-    is why the source needs no `client_id` — the property `log_manual_session`
-    had to buy with one, this gets for free.
+  * **Replay-safe by construction.** The key makes a re-applied payload a
+    rewrite, not a second row — per device once `client_id` is in play, on
+    (source='youtube', session_date) for a build that sends none.
   * **No monotonic guard.** A lower total must be accepted, because that is
     exactly what the user's correction control sends.
 
@@ -19,6 +18,15 @@ import sqlite3
 import pytest
 
 import imports as im
+
+
+def _keys(db, date):
+    con = sqlite3.connect(db.DB_PATH)
+    r = [row[0] for row in con.execute(
+        "SELECT client_id FROM sessions WHERE source='youtube' AND session_date=? "
+        "ORDER BY rowid", (date,))]
+    con.close()
+    return r
 
 
 def _rows(db, date=None):
@@ -124,6 +132,90 @@ class TestValidation:
         im.import_youtube_day(d, 1500)
         im.import_youtube_day(d, 0)        # rejected
         assert _rows(db, d)[0][3] == 1500.0
+
+
+class TestMultiDevice:
+    """`client_id` = `youtube:<device>:<date>`. One row per device per logical
+    day; the day's total is their sum, which every aggregate downstream already
+    computes by summing rows."""
+
+    def test_two_devices_sum_rather_than_overwrite(self, seed, db):
+        """The whole reason the key exists. Keyed on the date alone, the second
+        post would replace the first's total and look like a quiet day."""
+        d = seed.day(1)
+        im.import_youtube_day(d, 3600, f"youtube:desktop:{d}")
+        im.import_youtube_day(d, 1800, f"youtube:laptop:{d}")
+
+        assert len(_rows(db, d)) == 2
+        assert seed.raw_secs(d) == 5400
+
+    def test_each_device_replays_onto_its_own_row(self, seed, db):
+        """A drain replaying an inbox row rewrites that device's total. The
+        other device's row must not move."""
+        d = seed.day(1)
+        im.import_youtube_day(d, 3600, f"youtube:desktop:{d}")
+        im.import_youtube_day(d, 1800, f"youtube:laptop:{d}")
+        im.import_youtube_day(d, 3600, f"youtube:desktop:{d}")   # replay
+        im.import_youtube_day(d, 2400, f"youtube:laptop:{d}")    # laptop grew
+
+        assert len(_rows(db, d)) == 2
+        assert seed.raw_secs(d) == 6000
+
+    def test_first_keyed_post_adopts_the_keyless_row(self, seed, db):
+        """The changeover day. A machine that posted keyless and now sends a key
+        must claim its existing row, not insert a second one beside it — that
+        would double-count the day it was named on."""
+        d = seed.day(1)
+        im.import_youtube_day(d, 600)                            # older build
+        im.import_youtube_day(d, 900, f"youtube:desktop:{d}")    # now named
+
+        assert len(_rows(db, d)) == 1
+        assert seed.raw_secs(d) == 900
+        assert _keys(db, d) == [f"youtube:desktop:{d}"]
+
+    def test_adoption_claims_only_one_row(self, seed, db):
+        """A second device naming itself on the same changeover day finds the
+        keyless row already claimed, so it gets its own."""
+        d = seed.day(1)
+        im.import_youtube_day(d, 600)
+        im.import_youtube_day(d, 900, f"youtube:desktop:{d}")
+        im.import_youtube_day(d, 300, f"youtube:laptop:{d}")
+
+        assert len(_rows(db, d)) == 2
+        assert seed.raw_secs(d) == 1200
+
+    def test_a_keyless_post_never_lands_on_a_keyed_row(self, seed, db):
+        """A keyed row belongs to a device that keeps rewriting it. Letting an
+        unkeyed post overwrite it would hand one machine's total to another."""
+        d = seed.day(1)
+        im.import_youtube_day(d, 3600, f"youtube:desktop:{d}")
+        im.import_youtube_day(d, 600)                            # older build
+
+        assert _keys(db, d) == [f"youtube:desktop:{d}", None]
+        assert seed.raw_secs(d) == 4200
+
+    def test_the_same_device_keeps_one_row_across_days(self, seed, db):
+        """The key carries the date, so consecutive days are separate rows —
+        the same shape a single-device build produces."""
+        d1, d2 = seed.day(1), seed.day(2)
+        im.import_youtube_day(d1, 3600, f"youtube:desktop:{d1}")
+        im.import_youtube_day(d2, 1800, f"youtube:desktop:{d2}")
+
+        assert len(_rows(db, d1)) == 1
+        assert len(_rows(db, d2)) == 1
+        assert seed.raw_secs(d1) == 3600
+        assert seed.raw_secs(d2) == 1800
+
+    def test_a_blank_key_behaves_like_no_key(self, seed, db):
+        """The extension sends null when no device name is set; an empty string
+        from a hand-rolled client must not become a distinct key."""
+        d = seed.day(1)
+        im.import_youtube_day(d, 600, "")
+        im.import_youtube_day(d, 900, "   ")
+
+        assert len(_rows(db, d)) == 1
+        assert _keys(db, d) == [None]
+        assert seed.raw_secs(d) == 900
 
 
 class TestCoexistence:

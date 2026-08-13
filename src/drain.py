@@ -62,6 +62,7 @@ class DrainLoop:
         self._stop       = threading.Event()
         self._thread     = None
         self._lock       = threading.Lock()
+        self._pushed     = None     # last settings copy the inbox acknowledged
         self.last_error  = ""
         self.last_ok     = ""
         self.last_applied_count = 0
@@ -190,19 +191,44 @@ class DrainLoop:
             self.last_ok    = _now()
             self.last_applied_count = applied
 
+        self._push_settings(base, hdrs)
+
         if applied:
             print(f"[drain] Applied {applied} queued session payload(s)")
-            self._push_activity_types(base, hdrs)
             if self._on_applied:
                 self._on_applied()
         return applied
 
-    def _push_activity_types(self, base, hdrs):
-        """Keep the inbox's /activity-types cache in step with our categories, so
-        the extension's dropdown is identical whichever host it points at."""
+    def _push_settings(self, base, hdrs):
+        """Keep the inbox's read-only caches in step with ours, so a client
+        behaves identically whichever host it points at.
+
+        This desktop is the sole source of both — the inbox only ever parrots
+        back what we last sent it.
+
+        Runs on every successful drain, NOT only one that applied something. A
+        device that has never posted still needs `rollover_hour` *before* its
+        first post, because the capturer decides the date it sends. Gating this
+        on `applied > 0` would make that circular: the value a payload needed to
+        be correct would only arrive after that payload had already been sent.
+
+        Deduped against the last acknowledged copy, so the steady state is one
+        comparison and no traffic. A failed push leaves `_pushed` untouched and
+        is simply retried next tick — the inbox being down is the ordinary case
+        here, same as everywhere else in this file.
+        """
+        payload = {
+            "types":  activity_types(),
+            "config": {"rollover_hour": int(get_setting("rollover_hour", "0") or 0)},
+        }
+        if payload == self._pushed:
+            return
         try:
-            requests.post(f"{base}/activity-types", json={"types": activity_types()},
+            requests.post(f"{base}/activity-types", json={"types": payload["types"]},
                           headers=hdrs, timeout=TIMEOUT)
+            requests.post(f"{base}/config", json={"config": payload["config"]},
+                          headers=hdrs, timeout=TIMEOUT)
+            self._pushed = payload
         except requests.exceptions.RequestException:
             pass
 

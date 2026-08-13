@@ -215,23 +215,45 @@ async function ytCredit(secs) {
 // an inbox row rewrites the same row instead of adding a second.
 
 const YT_POSTED_KEY = "ytPosted";     // {date: secs} the tracker has confirmed
+const YT_DEVICE_KEY = "deviceName";   // names THIS machine's rows; set in the popup
 const YT_MIN_SECS   = 60;             // don't mint a row for a stray click
 const YT_POST_MS    = 120000;
 
+// Each machine owns its own row per logical day, and the day's total is their
+// sum. Without a per-device key, a second machine's post would land on the same
+// row and OVERWRITE the first's total rather than add to it — silently, and
+// looking exactly like a quiet day.
+//
+// Blank device name means no key, which is the pre-multi-device behaviour and
+// stays correct for a single machine. The tracker adopts those keyless rows the
+// first time a named post arrives, so naming a machine later doesn't double-count.
+function ytClientId(device, date) {
+  return device ? `youtube:${device}:${date}` : null;
+}
+
 let ytLastPost = 0;
 
+// The HOST matters here, not just the port. This used to be hardcoded to
+// 127.0.0.1, which was right when the desktop was the only place a post could
+// go — but it meant a machine that isn't running Konseki could never deliver
+// its YouTube time at all. Pointed at the always-on inbox, it can.
 async function ytAuth() {
-  const cfg = await browser.storage.local.get(["port", "token"]);
-  return { port: cfg.port || 18463, token: (cfg.token || "").trim() };
+  const cfg = await browser.storage.local.get(["host", "port", "token", YT_DEVICE_KEY]);
+  return {
+    host:   (cfg.host || "").trim() || "127.0.0.1",
+    port:   cfg.port || 18463,
+    token:  (cfg.token || "").trim(),
+    device: (cfg[YT_DEVICE_KEY] || "").trim(),
+  };
 }
 
 // rollover_hour is the one setting this device can't derive on its own, and
 // without it the extension buckets accrual into the wrong logical day.
 async function ytFetchConfig() {
-  const { port, token } = await ytAuth();
+  const { host, port, token } = await ytAuth();
   if (!token) return;
   try {
-    const r = await fetch(`http://127.0.0.1:${port}/config`, {
+    const r = await fetch(`http://${host}:${port}/config`, {
       headers: { "X-Tracker-Token": token },
     });
     if (!r.ok) return;
@@ -249,7 +271,7 @@ async function ytPostPending() {
   const cfg    = await browser.storage.local.get([YT_DAYS_KEY, YT_POSTED_KEY]);
   const days   = cfg[YT_DAYS_KEY]   || {};
   const posted = cfg[YT_POSTED_KEY] || {};
-  const { port, token } = await ytAuth();
+  const { host, port, token, device } = await ytAuth();
   if (!token) return;
 
   let changed = false;
@@ -258,10 +280,15 @@ async function ytPostPending() {
     if (secs < YT_MIN_SECS)      continue;
     if (posted[date] === secs)   continue;
     try {
-      const r = await fetch(`http://127.0.0.1:${port}/import`, {
+      const r = await fetch(`http://${host}:${port}/import`, {
         method:  "POST",
         headers: { "Content-Type": "application/json", "X-Tracker-Token": token },
-        body: JSON.stringify({ source: "youtube", session_date: date, time_seconds: secs }),
+        body: JSON.stringify({
+          source:       "youtube",
+          session_date: date,
+          time_seconds: secs,
+          client_id:    ytClientId(device, date),
+        }),
       });
       if (!r.ok) continue;
       const body = await r.json().catch(() => ({}));

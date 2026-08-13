@@ -186,13 +186,25 @@ class Inbox:
             return cur.rowcount
 
 
-# ── Activity types cache ──────────────────────────────────────────────────────
-# The extension's popup GETs /activity-types to fill its dropdown, and it must
-# behave the same whether it's pointed at the desktop or here. This box can't know
-# the user's custom categories, so the desktop pushes its list after each drain
-# and we serve the last copy. Falls back to the builtins before the first push.
+# ── Desktop-pushed caches ─────────────────────────────────────────────────────
+# Two things a client needs that this box has no way to work out for itself. The
+# desktop pushes both after each drain and we serve the last copy, so a client
+# behaves identically whether it's pointed at the desktop or here.
+#
+# Held in memory, not the db, and deliberately so: this file stores payload bytes
+# and nothing else (see the module docstring). Losing them on restart is
+# harmless — the next drain repopulates within a couple of minutes, and clients
+# cache their last known value rather than resetting to the default.
 BUILTIN_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"]
 _activity_types = list(BUILTIN_ACTIVITY_TYPES)
+
+# rollover_hour decides which LOGICAL day a device's accrual belongs to. A
+# capturing device must know it BEFORE it posts, because the capturer owns the
+# date — see apply_payload() in src/ext_server.py. Serving 0 before the first
+# push matches the app's own default, so a client that reads this early behaves
+# like a machine with no rollover set rather than getting nonsense.
+DEFAULT_CONFIG = {"rollover_hour": 0}
+_config = dict(DEFAULT_CONFIG)
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -266,10 +278,13 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/activity-types":
             return self._json(_activity_types)
 
+        if path == "/config":
+            return self._json(_config)
+
         return self._reject(404)
 
     def do_POST(self):
-        global _activity_types
+        global _activity_types, _config
         path = urlparse(self.path).path
 
         if not self._token_ok():
@@ -300,6 +315,15 @@ class _Handler(BaseHTTPRequestHandler):
             if isinstance(types, list) and types:
                 _activity_types = [str(t) for t in types]
             return self._json({"ok": True, "count": len(_activity_types)})
+
+        if path == "/config":
+            # Replace wholesale rather than merging: the desktop sends the
+            # complete set it wants served, so a setting it stops sending should
+            # stop being served rather than linger here as a stale override.
+            cfg = body.get("config")
+            if isinstance(cfg, dict) and cfg:
+                _config = dict(cfg)
+            return self._json({"ok": True, **_config})
 
         return self._reject(404)
 

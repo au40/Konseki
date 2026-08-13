@@ -187,7 +187,10 @@ function reset(rollover) {
   await ytPostPending();
   assert.strictEqual(fetchCalls.length, 1, 'should post once');
   assert.deepStrictEqual(fetchCalls[0].body,
-    { source: 'youtube', session_date: '2026-09-01', time_seconds: 3600 });
+    { source: 'youtube', session_date: '2026-09-01', time_seconds: 3600,
+      client_id: null });
+  assert.ok(fetchCalls[0].url.startsWith('http://127.0.0.1:'),
+    'an unset host should still fall back to loopback');
   assert.strictEqual(store.ytPosted['2026-09-01'], 3600, 'confirmed total should be recorded');
   console.log('  ok  posts the cumulative total and records the confirmation');
 
@@ -257,6 +260,53 @@ function reset(rollover) {
   await ytPrunePosted();
   assert.strictEqual(store.ytDays['2026-06-01'], 500, 'a day that grew since posting must survive');
   console.log('  ok  a day that grew since its last post is not pruned');
+
+  // --- 12. multi-device: configured host + per-device key ----------------------
+  // Both fetches used to be hardcoded to 127.0.0.1, which meant a machine not
+  // running Konseki could never deliver its YouTube time at all. Pointed at the
+  // always-on inbox, it can — and the key is what stops two machines' totals
+  // from overwriting each other once they both can.
+  reset(0);
+  store.token      = 'tok';
+  store.host       = 'konsekiserv.local';
+  store.port       = 18463;
+  store.deviceName = 'laptop';
+  store.ytDays     = { '2026-09-01': 3600 };
+  fetchImpl  = () => ({ ok: true, json: () => Promise.resolve({ ok: true, logged: true }) });
+  fetchCalls = [];
+  await ytPostPending();
+  assert.strictEqual(fetchCalls[0].url, 'http://konsekiserv.local:18463/import',
+    'posts must go to the configured host, not loopback');
+  assert.strictEqual(fetchCalls[0].body.client_id, 'youtube:laptop:2026-09-01',
+    'the key must name the device and the logical day');
+  console.log('  ok  posts to the configured host with a per-device key');
+
+  // The config fetch has to follow the same host, or a machine with no local
+  // tracker can never learn the rollover hour it needs to date its own posts.
+  reset(0);
+  store.token = 'tok';
+  store.host  = 'konsekiserv.local';
+  store.port  = 18463;
+  fetchCalls  = [];
+  fetchImpl   = () => ({ ok: true, json: () => Promise.resolve({ rollover_hour: 4 }) });
+  await ytFetchConfig();
+  assert.strictEqual(fetchCalls[0].url, 'http://konsekiserv.local:18463/config',
+    'the config fetch must follow the configured host too');
+  assert.strictEqual(store.rolloverHour, '4');
+  console.log('  ok  the rollover fetch follows the configured host');
+
+  // A blank device name is the single-machine case and must stay keyless —
+  // that is what the tracker adopts when the machine is named later.
+  reset(0);
+  store.token      = 'tok';
+  store.deviceName = '';
+  store.ytDays     = { '2026-09-01': 3600 };
+  fetchImpl  = () => ({ ok: true, json: () => Promise.resolve({ ok: true, logged: true }) });
+  fetchCalls = [];
+  await ytPostPending();
+  assert.strictEqual(fetchCalls[0].body.client_id, null,
+    'an unnamed device must send no key');
+  console.log('  ok  an unnamed device posts without a key');
 
   console.log('\nbackground.js YouTube day counter + posting: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });

@@ -127,13 +127,16 @@ def apply_payload(path, body):
             return import_ttsu_entries(body.get("entries", [])), 200
         if source == "youtube":
             # Cumulative total for one logical day, dated by the capturer.
-            # Idempotent on (source, session_date), so a replay is a rewrite
-            # rather than a second row — which is exactly what makes it safe to
-            # queue: an inbox row applied hours late rewrites that day's total
-            # instead of adding to it, and needs no client_id to do so.
+            # Idempotent on its `client_id` (`youtube:<device>:<date>`), so a
+            # replay is a rewrite rather than a second row — which is what makes
+            # it safe to queue: an inbox row applied hours late rewrites that
+            # device's total for the day instead of adding to it. The key is
+            # per-device because two machines watching on the same day must sum,
+            # not overwrite each other.
             return import_youtube_day(
                 body.get("session_date", ""),
                 body.get("time_seconds", 0),
+                body.get("client_id"),
             ), 200
         return {"error": f"unknown source {source!r}"}, 400
 

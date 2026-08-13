@@ -32,10 +32,20 @@ belongs in `apply_payload()` in [src/ext_server.py](../src/ext_server.py).
 | POST | `/ack` `{"through_id":n}` | token | Stamp rows `applied_at` |
 | GET | `/pending` | **none** | Backlog count + oldest timestamp |
 | GET/POST | `/activity-types` | token | Desktop-pushed category cache |
+| GET/POST | `/config` | token | Desktop-pushed settings cache (`rollover_hour`) |
 
 `/pending` is intentionally open so you can check the backlog from a phone browser
 with nothing configured. It returns counts and timestamps only — never payload
 contents.
+
+`/activity-types` and `/config` are **caches, not sources**. The desktop pushes
+them after each drain and this box serves back the last copy verbatim — it never
+reads inside them or acts on them, so they cost this file no knowledge of the
+schema. They exist so a client behaves identically whichever host it points at.
+`/config` carries `rollover_hour`, which a capturing device has to know *before*
+it posts, because the capturer decides the date (see `apply_payload()` in
+[src/ext_server.py](../src/ext_server.py)). Both are held in memory and repopulate
+on the next drain after a restart.
 
 ## Deploy
 

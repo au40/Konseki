@@ -5,8 +5,10 @@
 const hostEl   = document.getElementById("host");
 const portEl   = document.getElementById("port");
 const tokenEl  = document.getElementById("token");
+const deviceEl = document.getElementById("device");
 const saveBtn  = document.getElementById("save");
 const statusEl = document.getElementById("status");
+const rolloverHintEl = document.getElementById("rollover-hint");
 
 const DEFAULT_HOST = "127.0.0.1";
 
@@ -45,16 +47,32 @@ async function fetchActivityTypes() {
   }
 }
 
-browser.storage.local.get(["host", "port", "token"]).then(cfg => {
-  hostEl.value  = cfg.host  || DEFAULT_HOST;
-  portEl.value  = cfg.port  || 18463;
-  tokenEl.value = cfg.token || "";
+browser.storage.local.get(["host", "port", "token", "deviceName"]).then(cfg => {
+  hostEl.value   = cfg.host  || DEFAULT_HOST;
+  portEl.value   = cfg.port  || 18463;
+  tokenEl.value  = cfg.token || "";
+  deviceEl.value = cfg.deviceName || "";
 });
 
+// The rollover hour is fetched from whichever host this device points at, never
+// typed here — one source of truth, in the tracker's Settings. It's shown
+// read-only because a stale copy is otherwise invisible: it silently files
+// late-night viewing under the wrong logical day, and looks like nothing at all.
+function showRolloverHint() {
+  browser.storage.local.get(["rolloverHour"]).then(cfg => {
+    const rh = parseInt(cfg.rolloverHour, 10);
+    rolloverHintEl.textContent = Number.isFinite(rh)
+      ? `Day rolls over at ${rh}:00 (from the tracker).`
+      : "Day rollover not fetched yet — save a token and give it a minute.";
+  });
+}
+showRolloverHint();
+
 saveBtn.addEventListener("click", async () => {
-  const host  = hostEl.value.trim() || DEFAULT_HOST;
-  const port  = parseInt(portEl.value) || 18463;
-  const token = tokenEl.value.trim();
+  const host   = hostEl.value.trim() || DEFAULT_HOST;
+  const port   = parseInt(portEl.value) || 18463;
+  const token  = tokenEl.value.trim();
+  const device = deviceEl.value.trim();
 
   if (!token) {
     statusEl.textContent = "Token cannot be empty.";
@@ -73,8 +91,15 @@ saveBtn.addEventListener("click", async () => {
     statusEl.className   = "err";
     return;
   }
+  // The name is embedded in a `youtube:<device>:<date>` key, so keep it to
+  // characters that stay readable in the row it produces.
+  if (device && !/^[A-Za-z0-9_-]+$/.test(device)) {
+    statusEl.textContent = "Device name: letters, numbers, dashes and underscores only.";
+    statusEl.className   = "err";
+    return;
+  }
 
-  await browser.storage.local.set({ host, port, token });
+  await browser.storage.local.set({ host, port, token, deviceName: device });
   browser.action.setBadgeText({ text: "" });
   statusEl.textContent = "Saved.";
   statusEl.className   = "";
@@ -86,6 +111,7 @@ saveBtn.addEventListener("click", async () => {
   }
 
   fetchActivityTypes();
+  showRolloverHint();
   setTimeout(() => { statusEl.textContent = ""; }, 2000);
 });
 

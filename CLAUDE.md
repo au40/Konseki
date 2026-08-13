@@ -170,6 +170,41 @@ which *is* a natural key.
 
 Any future producer (the GSM agent) gets idempotency by including a key.
 
+### Two flavours of key — don't apply the stopwatch's rule to a cumulative source
+
+The stopwatch mints a key **per session** because each session is a distinct
+event that must not be stored twice. The YouTube tracker does the opposite: its
+key, `youtube:<device>:<date>`, is **stable and deliberately reused** for the
+whole day, because every post carries the day's *cumulative* total and is
+supposed to rewrite the previous one. Both are idempotent; they differ in what
+"the same thing" means.
+
+Which means the "mint a fresh id per session" rule above is specific to
+event-shaped sources. For a cumulative source the equivalent rule is: the key
+must name the thing being accumulated (here, one device's viewing on one logical
+day), and a *second device must not share it* — that's the entire reason the
+device name is in there. Two machines on one date without it means the second's
+post silently replaces the first's total instead of adding to it.
+
+`import_youtube_day` ([imports.py](src/imports.py)) also **adopts** a keyless row
+for its date on the first keyed post, rather than inserting beside it, so naming
+a machine that previously posted keyless doesn't double-count the changeover day.
+That replaces the one-shot backfill migration proposed in
+[plans/YOUTUBE-PLAN.md](plans/YOUTUBE-PLAN.md) — it needs no guess about which
+device the old rows belonged to, and is correct whether or not any exist.
+
+### The inbox distributes settings, it doesn't hold them
+
+The desktop is the sole source of anything a capturing device needs to know, and
+the inbox is a dumb relay for it. `/activity-types` and `/config` on
+[pi/inbox_server.py](pi/inbox_server.py) are in-memory caches the desktop
+overwrites from `_push_settings` in [drain.py](src/drain.py) on every successful
+drain — **not** only on one that applied something. That gating was circular
+once `rollover_hour` joined the payload: a device needs it *before* its first
+post, since the capturer decides the date. Pushes are deduped by value, so the
+steady state is silent. Adding a setting a device needs means adding it to that
+one dict; the inbox never learns what any of it means.
+
 ## GSM "reopen catch-up" pull — EXPERIMENTAL
 
 `GsmWalHandler` in [tracker.py](src/tracker.py) has a third pull trigger

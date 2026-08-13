@@ -204,10 +204,19 @@
     <label>Token</label>
     <input id="token" type="text" placeholder="paste token here" autocomplete="off" spellcheck="false">
 
+    <label>Device name</label>
+    <input id="device" type="text" placeholder="desktop" autocomplete="off" spellcheck="false">
+    <p class="hint">
+      Give each machine that tracks YouTube its own name, so their viewing time
+      adds up instead of overwriting each other. One machine only? Leave it blank.
+    </p>
+
     <div class="btn-row">
       <button id="save">Save</button>
     </div>
     <div id="status"></div>
+
+    <p class="hint" id="rollover-hint"></p>
 
     <p class="hint">
       Also syncs automatically while you read on reader.ttsu.app.<br>
