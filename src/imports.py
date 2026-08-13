@@ -1019,6 +1019,106 @@ def import_youtube_day(session_date, time_seconds, client_id=None):
     return {"logged": True, "session_date": session_date, "time_seconds": secs}
 
 
+def import_mangawari_day(title, session_date, time_seconds, client_id=None):
+    """Upsert one title's manga reading for one logical day, per device.
+
+    Same shape as `import_youtube_day` — cumulative total, last-write-wins,
+    idempotent on a stable reused `client_id` — but keyed per *title* so each
+    volume gets its own media entry, and its own cover via `/cover`.
+
+    **Why this exists rather than reusing the ttsu shape.** A manga reader has no
+    character count, so it posts `charactersRead: 0`, and `import_ttsu_entries`
+    guards its update with `chars <= existing_chars`. With chars pinned at 0 that
+    guard trips on every post after the first, so the second sitting of a day is
+    skipped and its time never lands. That guard is right for ttsu (IndexedDB can
+    report stale values, tabs race) and wrong here: the reader is a single
+    instance and the sole authority for its own row, exactly like the YouTube
+    background script. So, deliberately, **no monotonic guard** — the incoming
+    total replaces whatever is stored, including a correction downward.
+
+    `chars_read` stays 0 and `activity_type` is 'Reading', which is what keeps
+    manga hours out of the chars/hour figures: every cph denominator filters on
+    `chars_read>0` (see CLAUDE.md, reading-speed invariant). The time still counts
+    everywhere else, because `time_excluded` is 0 — a sitting drained a week late
+    was read, and dating it correctly is the client's job, already done.
+
+    `client_id` (`mangawari:<device>:<title>:<date>`) is what makes two readers
+    safe: keyed on title and date alone, a second device's post would *replace*
+    the first's total rather than add to it. Absent, it falls back to the
+    keyless (title, date) row and only ever matches a row that is itself keyless,
+    so a keyed device's row can never be hijacked by an unkeyed post.
+
+    No `game_id`, like every non-GSM source — that column is what opts a row into
+    the rollover-attribution and manual-overlay rails, and this source pins its
+    own logical date before posting, so it needs neither.
+    """
+    title = (title or "").strip()
+    if not title:
+        return {"error": "title is required"}
+
+    session_date = (session_date or "").strip()
+    if not _YT_DATE_RE.match(session_date):
+        return {"error": "session_date must be YYYY-MM-DD"}
+
+    secs = float(time_seconds or 0)
+    if secs <= 0:
+        return {"error": "time_seconds must be > 0"}
+
+    key = (client_id or "").strip() or None
+
+    con = sqlite3.connect(DB_PATH)
+    try:
+        now = datetime.now().isoformat()
+
+        if key:
+            # By key alone: the partial unique index on client_id is global, so
+            # a second row carrying this key cannot exist to be missed.
+            row = con.execute(
+                "SELECT rowid FROM sessions WHERE client_id=?", (key,)
+            ).fetchone()
+            if not row:
+                row = con.execute(
+                    "SELECT rowid FROM sessions WHERE source='mangawari' "
+                    "AND title=? AND session_date=? AND client_id IS NULL",
+                    (title, session_date),
+                ).fetchone()
+                if row:                       # adopt, don't duplicate
+                    con.execute(
+                        "UPDATE sessions SET client_id=? WHERE rowid=?",
+                        (key, row[0]),
+                    )
+        else:
+            row = con.execute(
+                "SELECT rowid FROM sessions WHERE source='mangawari' "
+                "AND title=? AND session_date=? AND client_id IS NULL",
+                (title, session_date),
+            ).fetchone()
+
+        if row:
+            con.execute(
+                "UPDATE sessions SET time_seconds=?, ingested_at=? WHERE rowid=?",
+                (secs, now, row[0]),
+            )
+        else:
+            con.execute(
+                "INSERT INTO sessions "
+                "(source, title, activity_type, session_date, chars_read, "
+                " time_seconds, ingested_at, time_excluded, client_id) "
+                "VALUES ('mangawari',?,'Reading',?,0,?,?,0,?)",
+                (title, session_date, secs, now, key),
+            )
+        con.commit()
+    finally:
+        con.close()
+
+    return {
+        "logged": True,
+        "title": title,
+        "session_date": session_date,
+        "time_seconds": secs,
+    }
+
+
 # ── Book-cover downscaling ────────────────────────────────────────────────────
 # Covers are never displayed larger than ~250px anywhere in the UI (the media
 # grid cards and the 160px detail box). A dropped book cover, though, is stored

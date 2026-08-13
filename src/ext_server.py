@@ -18,8 +18,8 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from db import get_setting, set_setting, db_get_custom_categories, logical_date_for
-from imports import (import_cover, import_ttsu_entries, import_youtube_day,
-                     log_manual_session)
+from imports import (import_cover, import_mangawari_day, import_ttsu_entries,
+                     import_youtube_day, log_manual_session)
 
 BUILTIN_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"]
 
@@ -135,6 +135,21 @@ def apply_payload(path, body):
             # per-device because two machines watching on the same day must sum,
             # not overwrite each other.
             return import_youtube_day(
+                body.get("session_date", ""),
+                body.get("time_seconds", 0),
+                body.get("client_id"),
+            ), 200
+        if source == "mangawari":
+            # Cumulative total for one title on one logical day, dated by the
+            # reader. Same last-write-wins contract as youtube — the e-reader
+            # re-posts a growing total per (title, day) — but keyed per title so
+            # each volume gets its own row, and therefore its own cover.
+            #
+            # NOT the ttsu path, deliberately: manga has no character count, and
+            # `import_ttsu_entries` only updates when chars grow, so a second
+            # sitting on one day would be skipped and its time lost.
+            return import_mangawari_day(
+                body.get("title", ""),
                 body.get("session_date", ""),
                 body.get("time_seconds", 0),
                 body.get("client_id"),

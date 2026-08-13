@@ -121,8 +121,9 @@ the shared `_adjusted_day_totals` helper — reuse it rather than re-deriving.
   during the rollover window, so any unbounded `WHERE session_date >= ?` query
   will leak future-dated rows. Use `window_bounds` or replicate its clamping.
 - The attribution table is GSM-specific. No other source (ttsu, anki, manual,
-  ext) needs it because they don't do live incremental pulls during the
-  rollover window.
+  ext, youtube, mangawari) needs it because they don't do live incremental pulls
+  during the rollover window — the network sources pin their own logical date
+  before posting.
 - **There is no `sessions/` drop-folder.** Every import path — GSM live pull, GSM
   history, ttsu, manual, CSV, the browser extension — writes to the `sessions`
   table directly. The live pull used to `json.dump` a file and read it straight
@@ -185,6 +186,14 @@ must name the thing being accumulated (here, one device's viewing on one logical
 day), and a *second device must not share it* — that's the entire reason the
 device name is in there. Two machines on one date without it means the second's
 post silently replaces the first's total instead of adding to it.
+
+`import_mangawari_day` ([imports.py](src/imports.py)) is the second cumulative
+source, keyed `mangawari:<device>:<title>:<date>` — same contract, one row per
+title per logical day. It exists **because** the ttsu shape could not carry it:
+`import_ttsu_entries` only updates when the character count grows, and a manga
+reader has no characters to count, so posing as ttsu meant every sitting after
+the first each day was skipped and its time dropped. If you ever add another
+chars-less source, copy that function, not the ttsu one.
 
 `import_youtube_day` ([imports.py](src/imports.py)) also **adopts** a keyless row
 for its date on the first keyed post, rather than inserting beside it, so naming

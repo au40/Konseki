@@ -31,7 +31,7 @@ against the desktop and the inbox; that is deliberate, so one config serves both
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/import` | A source-tagged content session (has a title) |
+| POST | `/import` | A source-tagged content session (has a title) — `ttsureader`, `mangawari`, `youtube` |
 | POST | `/log-manual` | A time-only session (no title) |
 | POST | `/cover` | A cover image for a title — metadata, sent once |
 | GET | `/activity-types` | String list for a category picker |
@@ -93,7 +93,8 @@ first's total instead of adding to it.
 
 **If your payload already has a natural key** — the ttsu shape below upserts on
 `(title, session_date)` — you need no `client_id` at all. A replay rewrites the
-same row by construction.
+same row by construction. The `mangawari` shape has one too, so its key is
+optional and buys you only the second-device case.
 
 ### 3. A `200` carrying `{"error": "..."}` is a failure
 
@@ -116,6 +117,9 @@ How rejection is reported differs by endpoint, so read the one you're using:
   "skipped": M, "titles": [...]}`. There's no `error` key; a **non-zero
   `skipped`** is how it tells you entries were dropped. Treat `imported == 0`
   with entries sent as a failure to investigate, not a success.
+- **`/import` with the `mangawari` or `youtube` shape** answers `200` with
+  `{"logged": true, ...}`, or `{"error": "..."}` for a bad date or non-positive
+  time. Absence of `logged` is a failure — do not read a bare `200` as stored.
 - **`/import` with an unrecognised `source`** is a real `400`.
 
 ### 4. Freeze before you post, delete only on confirmation
@@ -161,10 +165,39 @@ POST /import
 - An entry with **both** chars and time at zero is skipped.
 - Field names are camelCase. Yes, really.
 
-**This works for manga too**: send `charactersRead: 0` with a real `readingTime`.
-Chars-less reading time is deliberately excluded from the chars/hour figures, so a
-manga session adds to your time without corrupting your reading speed. The only
-cost is that the row is labelled as ttsu-sourced.
+**Do not use this shape for a source with no character count.** The upsert is
+guarded on *characters*: it only rewrites the row when `charactersRead` is
+greater than what is stored. Send `charactersRead: 0` twice for one title on one
+day and the second post is skipped — reported as `skipped: 1`, with the reading
+time silently dropped. That guard is right for ttsu (IndexedDB reports stale
+values, tabs race) and fatal for anything chars-less. Use the shape below.
+
+### A reader with no character count
+
+Manga, or anything else where there is nothing to count. Cumulative per (title,
+logical day), last-write-wins, no monotonic guard:
+
+```http
+POST /import
+{
+  "source": "mangawari",
+  "title": "極夜行",
+  "session_date": "2026-08-12",
+  "time_seconds": 3600,
+  "client_id": "mangawari:<device>:極夜行:2026-08-12"
+}
+```
+
+- `time_seconds` is that title's **running total for the day**, re-posted as it
+  grows — not each sitting's delta. Posting a delta would overwrite, not add.
+- `client_id` is the **cumulative** flavour from rule 2: stable, reused all day,
+  and carrying the device name so two readers sum instead of clobbering.
+  Omit it and you get the same behaviour for a single device.
+- Answers `{"logged": true, ...}`. There is no `imported`/`skipped` here.
+- Rows land as `activity_type: "Reading"` with `chars_read` 0, which keeps the
+  hours in every total while staying out of the chars/hour denominators.
+
+The title is a real media entry, so `/cover` attaches to it.
 
 ### A time-only session
 
@@ -223,6 +256,10 @@ that needs a change on the Konseki side as well as yours:
 
 1. An `import_<yoursource>()` in `src/imports.py` that owns the upsert and its key.
 2. A branch for it in `apply_payload()` in `src/ext_server.py`.
+
+`import_mangawari_day` is a worked example of both, and of when it's worth doing:
+the chars guard on the ttsu path made borrowing that shape lossy, not just
+mislabelled.
 
 `apply_payload` is the single import path — both the live HTTP handler and the
 inbox drain call it, which is what makes a payload behave identically whether it
