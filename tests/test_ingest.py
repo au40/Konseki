@@ -259,6 +259,79 @@ class TestApplyPayloadDispatch:
         assert status == 200 and _last_date() == "2026-03-03"
 
 
+# ── covers ────────────────────────────────────────────────────────────────────
+# A 1x1 PNG. Small enough that _shrink_cover_b64 passes it through untouched,
+# which keeps these tests independent of whether PIL is installed.
+_PNG_1PX = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM"
+    "IQAAAABJRU5ErkJggg=="
+)
+
+
+def _cover(title):
+    con = sqlite3.connect(dbm.DB_PATH)
+    try:
+        r = con.execute("SELECT image_data FROM book_covers WHERE title=?", (title,)).fetchone()
+    finally:
+        con.close()
+    return r[0] if r else None
+
+
+class TestCoverIngest:
+    """Covers arrive as metadata on their own endpoint, and are insert-if-absent
+    so a client can never overwrite one the user chose by hand."""
+
+    def test_stores_a_cover_for_a_new_title(self, seed):
+        res, status = ext_server.apply_payload(
+            "/cover", {"title": "極夜行", "cover_b64": _PNG_1PX})
+        assert status == 200 and res["stored"] is True
+        assert _cover("極夜行").startswith("data:image/png;base64,")
+
+    def test_does_not_overwrite_an_existing_cover(self, seed):
+        """THE rule. A hand-picked cover outranks whatever a reader ships, and a
+        client re-sending after a reinstall must not undo that choice."""
+        ext_server.apply_payload("/cover", {"title": "極夜行", "cover_b64": _PNG_1PX})
+        first = _cover("極夜行")
+
+        other = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        res, status = ext_server.apply_payload(
+            "/cover", {"title": "極夜行", "cover_b64": other})
+
+        assert status == 200
+        assert res["stored"] is False and res["existing"] is True
+        assert _cover("極夜行") == first, "the original cover must survive"
+
+    def test_a_no_op_resend_is_not_an_error(self, seed):
+        """The drain must count it as applied and advance past it, so it can't
+        be reported as a failure."""
+        ext_server.apply_payload("/cover", {"title": "T", "cover_b64": _PNG_1PX})
+        res, status = ext_server.apply_payload("/cover", {"title": "T", "cover_b64": _PNG_1PX})
+        assert status == 200 and "error" not in res
+
+    def test_requires_a_title(self, seed):
+        res, _ = ext_server.apply_payload("/cover", {"title": "  ", "cover_b64": _PNG_1PX})
+        assert "error" in res and _cover("  ") is None
+
+    def test_requires_image_data(self, seed):
+        res, _ = ext_server.apply_payload("/cover", {"title": "T", "cover_b64": ""})
+        assert "error" in res
+
+    def test_rejects_an_oversized_payload_without_decoding_it(self, seed):
+        res, _ = ext_server.apply_payload(
+            "/cover", {"title": "T", "cover_b64": "A" * (6 * 1024 * 1024 + 1)})
+        assert "error" in res and _cover("T") is None
+
+    def test_rejects_data_that_is_not_an_image(self, seed):
+        res, _ = ext_server.apply_payload(
+            "/cover", {"title": "T", "cover_b64": "!!!not base64!!!"})
+        assert "error" in res and _cover("T") is None
+
+    def test_a_cover_touches_no_session_data(self, seed):
+        """Covers are display metadata. Posting one must never mint a row."""
+        ext_server.apply_payload("/cover", {"title": "T", "cover_b64": _PNG_1PX})
+        assert _rows() == []
+
+
 # ── drain loop ────────────────────────────────────────────────────────────────
 class FakeInbox:
     """Stands in for pi/inbox_server.py over requests. Records acks so the

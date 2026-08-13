@@ -28,6 +28,7 @@ belongs in `apply_payload()` in [src/ext_server.py](../src/ext_server.py).
 |---|---|---|---|
 | POST | `/import` | token | Queue a ttsu/extension payload |
 | POST | `/log-manual` | token | Queue a hand-logged session |
+| POST | `/cover` | token | Queue a cover image for a title |
 | GET | `/inbox?since=<id>&limit=<n>` | token | Unapplied rows in id order |
 | POST | `/ack` `{"through_id":n}` | token | Stamp rows `applied_at` |
 | GET | `/pending` | **none** | Backlog count + oldest timestamp |

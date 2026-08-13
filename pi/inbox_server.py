@@ -41,7 +41,10 @@ DEFAULT_RETENTION = 30      # days to keep applied rows; see "Ack marks, doesn't
 PRUNE_EVERY_SECS  = 6 * 3600
 MAX_BODY_BYTES    = 8 * 1024 * 1024   # a ttsu full-history post is the big one
 
-INGEST_PATHS = ("/import", "/log-manual")
+# Queued verbatim, same as any other payload. /cover carries a base64 image, which
+# is the one thing that makes MAX_BODY_BYTES load-bearing rather than theoretical —
+# the desktop caps covers at 6MB of base64, comfortably under the limit here.
+INGEST_PATHS = ("/import", "/log-manual", "/cover")
 
 # Mirrors ext_server.py. Kept as a literal rather than imported — this file has
 # no access to src/, which is the point.

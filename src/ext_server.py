@@ -18,7 +18,8 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from db import get_setting, set_setting, db_get_custom_categories, logical_date_for
-from imports import import_ttsu_entries, import_youtube_day, log_manual_session
+from imports import (import_cover, import_ttsu_entries, import_youtube_day,
+                     log_manual_session)
 
 BUILTIN_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"]
 
@@ -27,7 +28,7 @@ ALLOWED_ORIGINS = {
     "https://reader.ttsu.app",
 }
 
-INGEST_PATHS = ("/import", "/log-manual")
+INGEST_PATHS = ("/import", "/log-manual", "/cover")
 
 
 def _is_extension_origin(origin):
@@ -139,6 +140,13 @@ def apply_payload(path, body):
                 body.get("client_id"),
             ), 200
         return {"error": f"unknown source {source!r}"}, 400
+
+    if path == "/cover":
+        # Metadata, not a session — no date, no idempotency key, and separate
+        # from /import so a 300KB blob doesn't ride along on the payload a
+        # client sends every couple of minutes. Insert-if-absent, so a client
+        # re-sending after a reinstall can't overwrite a cover the user chose.
+        return import_cover(body.get("title", ""), body.get("cover_b64", "")), 200
 
     if path == "/log-manual":
         # client_id is what makes a retry safe — the stopwatch re-sends the same
@@ -276,7 +284,9 @@ class _Handler(BaseHTTPRequestHandler):
             result, status = apply_payload(self.path, body)
             if status != 200:
                 return self._reject(status)
-            if self._on_import and (result.get("imported", 0) > 0 or result.get("logged")):
+            if self._on_import and (result.get("imported", 0) > 0
+                                    or result.get("logged")
+                                    or result.get("stored")):
                 self._on_import()
             resp = json.dumps({"ok": True, **result}).encode()
 

@@ -39,6 +39,7 @@ _WIPE = (
     "title_aliases",
     "media_char_counts",
     "media_completions",
+    "book_covers",
     "series",
     "series_members",
     "goals",

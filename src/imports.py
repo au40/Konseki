@@ -1019,6 +1019,126 @@ def import_youtube_day(session_date, time_seconds, client_id=None):
     return {"logged": True, "session_date": session_date, "time_seconds": secs}
 
 
+# ── Book-cover downscaling ────────────────────────────────────────────────────
+# Covers are never displayed larger than ~250px anywhere in the UI (the media
+# grid cards and the 160px detail box). A dropped book cover, though, is stored
+# at the file's full resolution — routinely 1500–2560px on the long edge, vs the
+# ~400px GSM game covers. The webview then live-downscales that ~10x in a single
+# cheap pass, which aliases badly: soft, "low-res"/artifacty covers on the grid,
+# while the already-small game covers stay crisp through the identical CSS. We
+# fix it at the source: resample big covers down to COVER_MAX_EDGE with a proper
+# Lanczos filter before storing, so the browser only has to scale a modest
+# amount. Small images pass through untouched (no needless recompression).
+#
+# Lives here rather than in tracker.py because network-delivered covers need it
+# too, and tracker.py already imports from this module (not the reverse).
+try:
+    from PIL import Image as _CoverImage
+    _COVER_PIL_OK = True
+except Exception:
+    _COVER_PIL_OK = False
+
+COVER_MAX_EDGE = 600  # long-edge cap; 2x+ HiDPI headroom over the largest card
+
+# A cover is a display asset, not data. Anything past this is a client bug or a
+# hostile payload, and decoding it would be the expensive way to find out.
+COVER_MAX_B64_BYTES = 6 * 1024 * 1024
+
+
+def _shrink_cover_b64(b64_str):
+    """Return (mime, b64) ready for a data URL. Downscales oversized covers with
+    Lanczos and re-encodes; passes small/animated images through unchanged. Any
+    decode/encode failure (or missing PIL) falls back to the original bytes, so a
+    cover upload never breaks over this."""
+    raw = base64.b64decode(b64_str)
+
+    def _sniff(b):
+        if b[:4] == b'\x89PNG':                       return 'image/png'
+        if b[:2] == b'\xff\xd8':                      return 'image/jpeg'
+        if b[:6] in (b'GIF87a', b'GIF89a'):           return 'image/gif'
+        if b[:4] == b'RIFF' and b[8:12] == b'WEBP':   return 'image/webp'
+        return 'image/jpeg'
+
+    if not _COVER_PIL_OK:
+        return _sniff(raw), b64_str
+    try:
+        im = _CoverImage.open(io.BytesIO(raw))
+        im.load()
+        if getattr(im, 'is_animated', False):
+            return _sniff(raw), b64_str               # don't flatten animations
+        w, h = im.size
+        if max(w, h) <= COVER_MAX_EDGE:
+            return _sniff(raw), b64_str               # already display-sized
+        scale = COVER_MAX_EDGE / max(w, h)
+        im = im.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                       _CoverImage.LANCZOS)
+        has_alpha = im.mode in ('RGBA', 'LA') or (im.mode == 'P' and 'transparency' in im.info)
+        buf = io.BytesIO()
+        if has_alpha:
+            im.convert('RGBA').save(buf, format='PNG', optimize=True)
+            mime = 'image/png'
+        else:
+            im.convert('RGB').save(buf, format='JPEG', quality=88,
+                                   optimize=True, progressive=True)
+            mime = 'image/jpeg'
+        return mime, base64.b64encode(buf.getvalue()).decode('ascii')
+    except Exception:
+        return _sniff(raw), b64_str
+
+
+def import_cover(title, cover_b64):
+    """Store a network-delivered cover for `title` — **only if none exists**.
+
+    Insert-if-absent, deliberately, unlike `set_book_cover`'s INSERT OR REPLACE.
+    A cover the user chose by hand (dropping an image or an EPUB on the media
+    entry) outranks whatever a reader app happens to ship, and a client that
+    re-sends after a reinstall must not be able to undo that choice. The cost,
+    accepted: a wrong cover from a client can only be corrected in the app.
+
+    The client does NOT declare a mime type. `_shrink_cover_b64` may re-encode
+    the image — a resized PNG comes back as JPEG — so a client-supplied type
+    would be a lie exactly when it mattered. We sniff and use what we produced.
+
+    Note the client cannot ask whether a cover already exists: the always-on
+    inbox has no database and cannot answer such a question (see pi/README.md).
+    So clients send once per title on their own initiative and this is the only
+    thing standing between that and an overwrite.
+    """
+    title = (title or "").strip()
+    if not title:
+        return {"error": "title is required"}
+    if not cover_b64:
+        return {"error": "cover_b64 is required"}
+    if len(cover_b64) > COVER_MAX_B64_BYTES:
+        return {"error": "cover_b64 exceeds the size limit"}
+
+    con = sqlite3.connect(DB_PATH)
+    try:
+        # Fast path: don't spend a Lanczos resample on an image we'll discard.
+        if con.execute("SELECT 1 FROM book_covers WHERE title=?", (title,)).fetchone():
+            return {"stored": False, "existing": True, "title": title}
+
+        try:
+            mime, b64_out = _shrink_cover_b64(cover_b64)
+        except Exception:
+            return {"error": "cover_b64 is not valid base64 image data"}
+
+        # OR IGNORE rather than a second existence check: `title` is the primary
+        # key, so this is the atomic form of insert-if-absent and closes the
+        # window between the SELECT above and here.
+        cur = con.execute(
+            "INSERT OR IGNORE INTO book_covers (title, image_data, updated_at) "
+            "VALUES (?,?,?)",
+            (title, f"data:{mime};base64,{b64_out}", datetime.now().isoformat()),
+        )
+        con.commit()
+        stored = cur.rowcount > 0
+    finally:
+        con.close()
+
+    return {"stored": stored, "existing": not stored, "title": title}
+
+
 # ── EPUB extraction ────────────────────────────────────────────────────────────
 # Dropping an EPUB on a media entry's cover box fills two display-only fields in
 # one go: the cover image (book_covers) and the progress-bar length
