@@ -98,6 +98,9 @@ const PROBE = `
   set portalColorMap(v) { portalColorMap = v; },
   set portalSelected(v) { portalSelected = v; },
   get HEATMAP_CAP_HOURS() { return HEATMAP_CAP_HOURS; },
+  get charts()   { return charts; },
+  set charts(v)  { charts = v; },
+  reserveLegendRoom,
   applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty, heatmapColor,
   rollDetailSeries, twRolling, splitBarDatasets, speedSegmentColors, memberLegendLabels,
   bucketDaily, statsMetricAvail, statsCumSeries, sparkHTML, goalBurnupSeries, dateFromISO,
@@ -546,6 +549,46 @@ check('dateFromISO parses local, not UTC', P.dateFromISO('2026-03-02').getDate()
 check('a 366-day goal spans a leap year without drift',
       P.goalBurnupSeries({ metric: 'chars_read', target: 1, start_date: '2028-01-01',
                            deadline: '2028-12-31' }, [], []).labels.length, 366);
+
+// --- legend room must not destroy a live chart on a scaled display -----------
+// Regression: the guard used to read the canvas `height` attribute back, but
+// Chart.js owns that attribute once a chart is live and rewrites it in DEVICE
+// pixels (base x devicePixelRatio). At any scaling other than 100% it therefore
+// never matched, so every render destroyed the chart -- and upsertChart()'s
+// morphBars slide needs a live chart to morph FROM. The Stats bars lost their
+// sliding transition, silently, and only for devicePixelRatio != 1.
+console.log('\n--- legend room must not destroy a live chart on a scaled display ---');
+const DPR = 1.25;                       // 125% Windows display scaling
+const canvasStub = {
+  attrs: { height: '180' }, dataset: {},
+  getAttribute(n) { return n in this.attrs ? this.attrs[n] : null; },
+  setAttribute(n, v) { this.attrs[n] = String(v); },
+};
+let destroyed = 0;
+const liveChart = { destroy() { destroyed++; } };
+sandbox.document.getElementById = id => (id === 'chart-daily' ? canvasStub : null);
+P.charts = {};
+
+P.reserveLegendRoom('chart-daily', 'daily', 180, false);
+check('the first call tags the canvas at its base height', canvasStub.getAttribute('height'), '180');
+
+P.charts = { daily: liveChart };        // new Chart(...) — Chart.js now owns the attribute
+canvasStub.setAttribute('height', String(Math.floor(180 * DPR)));
+check('Chart.js rewrote the attribute in device pixels', canvasStub.getAttribute('height'), '225');
+
+P.reserveLegendRoom('chart-daily', 'daily', 180, false);
+check('an unchanged legend state leaves the live chart alone', destroyed, 0);
+check('so upsertChart still has a chart to morph from', P.charts.daily, liveChart);
+
+P.reserveLegendRoom('chart-daily', 'daily', 180, true);
+check('turning the legend on still rebuilds', destroyed, 1);
+check('and still grows the canvas by one legend row', canvasStub.getAttribute('height'), '211');
+check('the rebuilt chart is dropped from the registry', P.charts.daily, undefined);
+
+P.charts = { daily: liveChart };
+canvasStub.setAttribute('height', String(Math.floor(211 * DPR)));
+P.reserveLegendRoom('chart-daily', 'daily', 180, true);
+check('a split chart is also left alone on the next render', destroyed, 1);
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

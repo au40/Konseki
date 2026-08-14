@@ -2182,13 +2182,23 @@ function setChartEmpty(canvasId, msg) {
 // if a chart already owns the canvas we drop it first, because Chart.js caches
 // its render height from construction — the re-render then rebuilds at the new
 // size. Call this BEFORE (re)building the chart.
+//
+// The "did it change" test reads OUR OWN tag, never the height attribute back.
+// Chart.js owns that attribute once a chart is live: retinaScale() overwrites it
+// with the DEVICE-pixel height (base × devicePixelRatio — 225 for a 180 base at
+// 125% display scaling), so on any scaled display the attribute never equals
+// `want` and this destroyed + rebuilt the chart on EVERY render. That starved
+// morphBars(), whose slide needs a live chart in upsertChart() to morph FROM —
+// the Stats bars' sliding transition silently disappeared, but only for users
+// whose devicePixelRatio ≠ 1.
 const LEGEND_ROOM = 31;
 function reserveLegendRoom(canvasId, chartKey, base, legendOn) {
   const cv = document.getElementById(canvasId);
   if (!cv) return;
   const want = String(legendOn ? base + LEGEND_ROOM : base);
-  if (cv.getAttribute('height') === want) return;
+  if (cv.dataset.reservedHeight === want) return;
   if (charts[chartKey]) { charts[chartKey].destroy(); delete charts[chartKey]; }
+  cv.dataset.reservedHeight = want;
   cv.setAttribute('height', want);
 }
 
@@ -2788,8 +2798,11 @@ function renderSpeedDistChart(rows) {
   const cv = document.getElementById('chart-speed-dist');
   if (cv) {
     const want = String(Math.max(160, rows.length * 26 + 40));
-    if (cv.getAttribute('height') !== want) {
+    // Same rule as reserveLegendRoom: compare our own tag, not the height
+    // attribute — Chart.js rewrites that one in device pixels.
+    if (cv.dataset.reservedHeight !== want) {
       destroyChart('speed-dist');       // Chart.js caches render height at construction
+      cv.dataset.reservedHeight = want;
       cv.setAttribute('height', want);
     }
   }
