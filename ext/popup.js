@@ -102,7 +102,7 @@ saveBtn.addEventListener("click", async () => {
   await browser.storage.local.set({ host, port, token, deviceName: device });
   browser.action.setBadgeText({ text: "" });
   statusEl.textContent = "Saved.";
-  statusEl.className   = "";
+  statusEl.className   = "ok";
 
   // Dismiss the "paste your token" / "no token set" prompt if it's showing
   if (timerStatus.classList.contains("err") && /token/i.test(timerStatus.textContent)) {
@@ -324,11 +324,20 @@ const ytStateEl = document.getElementById("yt-state-text");
 // happen while nothing is accruing, so it reads idle exactly when it is.
 const YT_LIVE_MS = 15000;
 
+// Seconds are shown, not just minutes, so a short viewing session reads as
+// something rather than "0m". Deliberately NOT smoothed: the figure is whatever
+// the background actually holds, which advances in FLUSH_MS batches while a
+// video plays and is exact the moment it stops. Interpolating between batches
+// would look smoother but would have to give the seconds back when the page
+// stops without a further credit.
 function formatYtShort(total) {
-  const s = Math.floor(total);
-  const h = Math.floor(s / 3600);
-  const m = Math.floor((s % 3600) / 60);
-  return h ? `${h}h ${m}m` : `${m}m`;
+  const t = Math.floor(total);
+  const h = Math.floor(t / 3600);
+  const m = Math.floor((t % 3600) / 60);
+  const s = t % 60;
+  if (h) return `${h}h ${m}m ${s}s`;
+  if (m) return `${m}m ${s}s`;
+  return `${s}s`;
 }
 
 async function refreshYtToday() {
@@ -352,7 +361,10 @@ async function refreshYtToday() {
 }
 
 refreshYtToday();
-setInterval(refreshYtToday, 5000);
+// Once a second, not once every five. A minutes-only figure could be five
+// seconds stale without ever looking wrong; a seconds figure can't. The cost is
+// a storage read in the background script, bounded by how long the popup is open.
+setInterval(refreshYtToday, 1000);
 
 // ── Site access ───────────────────────────────────────────────────────────────
 // Firefox MV3 treats everything in `host_permissions` as OPT-IN: listing
@@ -515,7 +527,7 @@ discardBtn.addEventListener("click", async () => {
     applyState({});
     if (elapsed >= 1) {
       timerStatus.textContent = `Discarded ${formatTime(elapsed)}.`;
-      timerStatus.className   = "";
+      timerStatus.className   = "ok";
       setTimeout(() => { timerStatus.textContent = ""; }, 2500);
     }
     return;
@@ -738,7 +750,7 @@ startStopBtn.addEventListener("click", async () => {
         await clearTimerState();
         applyState({});
         timerStatus.textContent = `Logged ${formatTime(elapsed)} of ${activity}`;
-        timerStatus.className   = "";
+        timerStatus.className   = "ok";
         setTimeout(() => { timerStatus.textContent = ""; }, 4000);
         return;
       }

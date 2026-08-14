@@ -545,19 +545,23 @@ function buildChip() {
     top:            "52px",
     right:          "12px",
     zIndex:         "2147483647",
-    background:     "rgba(20, 20, 32, 0.82)",
-    color:          "#eee",
-    fontFamily:     "monospace",
-    fontSize:       "13px",
-    padding:        "5px 11px",
-    borderRadius:   "20px",
-    pointerEvents:  "auto",
-    userSelect:     "none",
-    backdropFilter: "blur(6px)",
-    border:         "1px solid rgba(155, 155, 199, 0.25)",
-    letterSpacing:  "0.05em",
-    cursor:         "grab",
-    transition:     "opacity 0.3s",
+    // Same palette as timer-overlay.js — the tracker's --surface / --text /
+    // --accent. The two chips are meant to be indistinguishable apart from
+    // position, so change both together.
+    background:         "rgba(28, 28, 40, 0.86)",
+    color:              "#E8E8F0",
+    fontFamily:         "monospace",
+    fontSize:           "13px",
+    padding:            "5px 11px",
+    borderRadius:       "20px",
+    pointerEvents:      "auto",
+    userSelect:         "none",
+    backdropFilter:     "blur(6px)",
+    border:             "1px solid rgba(91, 140, 255, 0.28)",
+    boxShadow:          "0 6px 20px rgba(0, 0, 0, 0.4)",
+    letterSpacing:      "0.05em",
+    cursor:             "grab",
+    transition:         "opacity 0.3s",
   });
   document.documentElement.appendChild(chip);
 
@@ -661,10 +665,10 @@ function render() {
   if (Date.now() < state.announceUntil && tracking()) {
     el.textContent    = "● Tracking — 日本語";
     el.style.opacity  = "1";
-    el.style.color    = "#9be89b";
+    el.style.color    = "#4ECBA0";   // tracker --success
     return;
   }
-  el.style.color = "#eee";
+  el.style.color = "#E8E8F0";        // tracker --text
 
   // Still polling. Deliberately NOT the ask prompt — showing "click to count"
   // while we're merely waiting reads as a verdict and invites a click that

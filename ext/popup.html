@@ -3,277 +3,312 @@
 <head>
   <meta charset="UTF-8">
   <style>
-    * { box-sizing: border-box; }
+    /* Design tokens lifted verbatim from the tracker's src/ui.css, so the popup
+       reads as the same application rather than a utility that talks to it.
+       Keep them in sync by name — if a token changes there, change it here. */
+    :root {
+      --accent:    #5B8CFF;
+      --surface:   #1C1C28;
+      --card:      #24243A;
+      --muted:     #6B6B8A;
+      --success:   #4ECBA0;
+      --text:      #E8E8F0;
+      --dim:       #9090A8;
+      --warn:      #FF9F5B;
+      --danger:    #FF6B6B;   /* hardcoded in the tracker; named here */
+      --grid:      #2E2E48;
+      --hover:     #2E2E50;
+      --input-bg:  #141422;
+      --inset:     #1E1E30;
+      --radius:    12px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
-      font-family: system-ui, sans-serif;
-      font-size: 13px;
-      margin: 0;
+      width: 300px;
       padding: 14px;
-      width: 270px;
-      background: #1c1c28;
-      color: #ccc;
-    }
-    h3 {
-      margin: 0 0 2px;
-      font-size: 14px;
-      color: #eee;
-    }
-    p.sub {
-      margin: 0 0 12px;
-      font-size: 11px;
-      color: #666;
-    }
-    label {
-      display: block;
-      margin-top: 10px;
-      margin-bottom: 3px;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #888;
-    }
-    input, select {
-      width: 100%;
-      padding: 5px 8px;
-      background: #2a2a3d;
-      border: 1px solid #3a3a55;
-      border-radius: 4px;
-      color: #eee;
+      background: var(--surface);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
       font-size: 13px;
-      font-family: monospace;
+      scrollbar-width: thin;
+      scrollbar-color: var(--grid) transparent;
     }
-    input:focus, select:focus { outline: none; border-color: #9b9bc7; }
-    select { font-family: system-ui, sans-serif; cursor: pointer; }
-    .btn-row {
-      display: flex;
-      gap: 6px;
-      margin-top: 10px;
+
+    /* ── Wordmark ─────────────────────────────────────────────────────────── */
+    /* The tracker's sidebar leads with 痕跡 in the accent; the popup is too
+       short to spend a block on it, so it sits inline with the latin name. */
+    .pop-header {
+      display: flex; align-items: baseline; gap: 8px;
+      padding: 0 2px 12px;
     }
-    button {
-      flex: 1;
-      padding: 7px;
-      background: #9b9bc7;
-      border: none;
-      border-radius: 4px;
-      color: #fff;
-      font-size: 13px;
-      cursor: pointer;
-      transition: background 0.15s;
+    .logo-jp {
+      font-size: 20px; font-weight: 700; color: var(--accent);
+      letter-spacing: 2px; line-height: 1;
     }
-    button:hover { background: #7b7ba7; }
-    button.stop-btn  { background: #5a8a5a; }
-    button.stop-btn:hover  { background: #467046; }
-    button.pause-btn { background: #7a6eaa; }
-    button.pause-btn:hover { background: #5e5490; }
-    button.discard-btn {
-      background: transparent;
-      color: #8a6a6a;
-      border: 1px solid #4a3535;
-      padding: 5px 7px;
-      font-size: 11px;
+    .logo-name {
+      font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: 0.04em;
     }
-    button.discard-btn:hover { background: #3a2525; color: #d09898; }
-    button.discard-btn.confirm {
-      background: #c05555;
-      border-color: #c05555;
-      color: #fff;
+
+    /* ── Cards ────────────────────────────────────────────────────────────── */
+    .card {
+      background: var(--card); border-radius: var(--radius);
+      padding: 12px 14px; margin-bottom: 10px;
     }
-    button.discard-btn.confirm:hover { background: #a03a3a; }
-    .seg {
-      display: flex;
-      background: #2a2a3d;
-      border-radius: 8px;
-      padding: 3px;
-      gap: 2px;
-      margin-top: 8px;
+    /* :last-child, not :last-of-type — the settings card is a <details> and the
+       other two are <section>s, so per-type matching would strip the margin off
+       the YouTube card and collapse it against the one below. */
+    body > .card:last-child { margin-bottom: 0; }
+    .card-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 8px; margin-bottom: 8px;
     }
-    .seg-btn {
-      flex: 1;
-      padding: 5px 10px;
-      border-radius: 6px;
-      border: none;
-      cursor: pointer;
-      background: transparent;
-      color: #888;
-      font-size: 12px;
-      font-family: inherit;
-      font-weight: 500;
-      transition: background 0.15s, color 0.15s;
-    }
-    .seg-btn:hover:not(.active):not(:disabled) { color: #ccc; }
-    .seg-btn.active { background: #9b9bc7; color: #fff; }
-    .seg-btn:disabled { cursor: not-allowed; opacity: 0.5; }
-    #timer-status.prompt {
-      color: #9b9bc7;
-      cursor: pointer;
-      text-decoration: underline;
-      text-underline-offset: 2px;
-    }
-    #status, #timer-status {
-      margin-top: 8px;
-      font-size: 11px;
-      min-height: 14px;
-      color: #8f8;
-      text-align: center;
-    }
-    #status.err, #timer-status.err { color: #f88; }
-    .hint {
-      margin-top: 10px;
-      font-size: 10px;
-      color: #555;
-      line-height: 1.5;
-    }
-    #timer-display {
-      font-family: monospace;
-      font-size: 38px;
-      font-weight: bold;
-      text-align: center;
-      color: #eee;
-      letter-spacing: 3px;
-      margin: 6px 0 10px;
-      user-select: none;
-    }
-    #timer-display.running { color: #a0d4a0; }
-    #timer-display.paused  { color: #c8b85a; }
-    hr {
-      border: none;
-      border-top: 1px solid #2a2a3d;
-      margin: 14px 0;
-    }
-    details summary {
-      cursor: pointer;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #666;
-      list-style: none;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-    details summary::before {
-      content: "▶";
-      font-size: 9px;
-      transition: transform 0.15s;
-    }
-    details[open] summary::before { transform: rotate(90deg); }
-    details summary::-webkit-details-marker { display: none; }
     /* Section headings. The popup holds two independent trackers — the manual
        stopwatch and the passive YouTube one — and without a name on each, the
        YouTube total read as a stray note under the Start button. */
-    .section {
-      margin: 8px 0 3px;
-      font-size: 11px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      color: #888;
+    .card-title {
+      font-size: 11px; font-weight: 600; color: var(--dim);
+      text-transform: uppercase; letter-spacing: 0.04em;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .section .sub-note {
-      text-transform: none;
-      letter-spacing: 0;
-      color: #555;
+    .card-note { font-size: 10px; color: var(--muted); flex: none; }
+
+    /* ── Stopwatch ────────────────────────────────────────────────────────── */
+    /* No monospace here — the tracker sets every big number (.stat-card .value,
+       .catalog-hero-num) in the body font at 700/800 and lets tabular-nums stop
+       the digits from shuffling as they tick. Same treatment, same result. */
+    #timer-display {
+      font-variant-numeric: tabular-nums;
+      font-size: 36px; font-weight: 700; line-height: 1.1;
+      text-align: center; color: var(--text);
+      letter-spacing: 0.5px; margin: 2px 0 12px; user-select: none;
     }
+    #timer-display.running { color: var(--success); }
+    #timer-display.paused  { color: var(--warn); }
+
+    /* ── Forms ────────────────────────────────────────────────────────────── */
+    .form-group { margin-bottom: 10px; }
+    .form-group:last-child { margin-bottom: 0; }
+    label {
+      display: block; font-size: 12px; color: var(--dim); margin-bottom: 6px;
+    }
+    input[type=text], input[type=number] {
+      background: var(--input-bg); border: 1px solid var(--grid); border-radius: 8px;
+      color: var(--text); font-family: inherit; font-size: 13px;
+      padding: 8px 10px; outline: none; width: 100%;
+      transition: border-color 0.15s;
+    }
+    input:focus { border-color: var(--accent); }
+    input::placeholder { color: var(--muted); }
+    select {
+      background: var(--input-bg); border: 1px solid var(--grid); border-radius: 8px;
+      color: var(--text); font-family: inherit; font-size: 13px;
+      padding: 8px 10px; outline: none; cursor: pointer; width: 100%;
+      transition: border-color 0.15s; appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236B6B8A' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 10px center;
+      padding-right: 32px;
+    }
+    select:focus { border-color: var(--accent); }
+    select:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    /* ── Buttons ──────────────────────────────────────────────────────────── */
+    button {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 8px 14px; border-radius: 8px; border: none; cursor: pointer;
+      background: var(--accent); color: #fff;
+      font-size: 13px; font-weight: 600; font-family: inherit;
+      transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    button:hover    { opacity: 0.88; }
+    button:active   { opacity: 0.72; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-row { display: flex; gap: 8px; margin-top: 10px; }
+    .btn-row button { flex: 1; }
+
+    /* start-stop-btn's class is REPLACED wholesale by popup.js ("" when idle,
+       "stop-btn" once a session is live), so its resting look has to hang off
+       the id — a bare class would be wiped along with the state. */
+    #start-stop-btn           { background: var(--accent); color: #fff; }
+    #start-stop-btn.stop-btn  { background: var(--success); color: #10261F; }
+
+    .pause-btn {
+      background: transparent; border: 1px solid var(--accent); color: var(--accent);
+    }
+    .pause-btn:hover { background: rgba(91, 140, 255, 0.12); opacity: 1; }
+
+    .discard-btn {
+      background: transparent; border: 1px solid var(--danger); color: var(--danger);
+      padding: 6px 12px; font-size: 12px;
+    }
+    .discard-btn:hover { background: rgba(255, 107, 107, 0.1); opacity: 1; }
+    .discard-btn.confirm { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .discard-btn.confirm:hover { background: var(--danger); opacity: 0.88; }
+
+    /* ── Segment control ──────────────────────────────────────────────────── */
+    .seg {
+      display: flex; background: var(--input-bg); border-radius: 8px;
+      padding: 3px; gap: 2px;
+    }
+    .seg-btn {
+      flex: 1; padding: 5px 8px; border-radius: 6px; border: none; cursor: pointer;
+      background: transparent; color: var(--dim);
+      font-size: 12px; font-weight: 500; font-family: inherit;
+      transition: background 0.15s, color 0.15s;
+    }
+    .seg-btn:hover:not(.active):not(:disabled) { color: var(--text); opacity: 1; }
+    .seg-btn.active   { background: var(--accent); color: #fff; }
+    .seg-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* ── Feedback lines ───────────────────────────────────────────────────── */
+    #status, #timer-status {
+      margin-top: 8px; font-size: 12px; min-height: 16px; line-height: 1.4;
+      color: var(--dim); text-align: center; overflow-wrap: break-word;
+    }
+    /* Same rule the tracker's log-page feedback lines use: while empty they
+       reserve no space, so the buttons sit tight against the card edge instead
+       of floating above a permanent blank row. */
+    #status:empty, #timer-status:empty { min-height: 0; margin-top: 0; }
+    #status.ok,  #timer-status.ok  { color: var(--success); }
+    #status.err, #timer-status.err { color: var(--danger); }
+    #timer-status.prompt {
+      color: var(--accent); cursor: pointer;
+      text-decoration: underline; text-underline-offset: 2px;
+    }
+
+    .hint { margin-top: 8px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+    p.sub { margin-bottom: 12px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+
+    /* ── YouTube row ──────────────────────────────────────────────────────── */
     #yt-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      background: var(--inset); border-radius: 8px; padding: 8px 10px;
     }
     #yt-state {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      color: #888;
+      display: flex; align-items: center; gap: 7px; min-width: 0;
+      font-size: 12px; color: var(--dim);
     }
+    #yt-state-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #yt-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #555;
-      flex: none;
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--muted); flex: none; transition: background 0.15s, box-shadow 0.15s;
     }
-    #yt-row.live #yt-dot   { background: #9be89b; }
-    #yt-row.live #yt-state { color: #9be89b; }
+    #yt-row.live #yt-dot   { background: var(--success); box-shadow: 0 0 0 3px rgba(78, 203, 160, 0.16); }
+    #yt-row.live #yt-state { color: var(--success); }
     #yt-today {
-      font-family: monospace;
-      font-size: 15px;
-      color: #eee;
+      font-variant-numeric: tabular-nums;
+      font-size: 15px; font-weight: 700; color: var(--accent); flex: none;
     }
+
+    /* ── Collapsible settings ─────────────────────────────────────────────── */
+    details.card > summary {
+      list-style: none; cursor: pointer;
+      display: flex; align-items: center; gap: 6px;
+      font-size: 11px; font-weight: 600; color: var(--dim);
+      text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    details.card > summary:hover { color: var(--text); }
+    details.card > summary::-webkit-details-marker { display: none; }
+    details.card > summary::before {
+      content: "▸"; font-size: 10px; color: var(--muted); transition: transform 0.15s;
+    }
+    details.card[open] > summary::before { transform: rotate(90deg); }
+    details.card[open] > summary { margin-bottom: 12px; }
   </style>
 </head>
 <body>
-  <h3>Konseki</h3>
+  <div class="pop-header">
+    <span class="logo-jp">痕跡</span>
+    <span class="logo-name">Konseki</span>
+  </div>
 
   <!-- Stopwatch. The heading names the activity while a session is live, so the
        two sections read as "what you started" and "what runs on its own". -->
-  <div class="section" id="sw-label">Stopwatch</div>
-  <div id="timer-display">00:00:00</div>
+  <section class="card">
+    <div class="card-head">
+      <span class="card-title" id="sw-label">Stopwatch</span>
+    </div>
 
-  <label>Activity</label>
-  <select id="activity-select"></select>
+    <div id="timer-display">00:00:00</div>
 
-  <div class="seg" id="mode-seg">
-    <button class="seg-btn active" data-mode="video"  title="Track based on the page's video play / pause events">Auto</button>
-    <button class="seg-btn"        data-mode="manual" title="Track manually with Pause / Resume — no media detection">Manual</button>
-    <button class="seg-btn"        data-mode="audio"  title="Track based on whether the tab is producing sound">Audio</button>
-  </div>
+    <div class="form-group">
+      <label for="activity-select">Activity</label>
+      <select id="activity-select"></select>
+    </div>
 
-  <div class="btn-row">
-    <button id="pause-btn" style="display:none" class="pause-btn">Pause</button>
-    <button id="start-stop-btn">Start</button>
-  </div>
-  <div class="btn-row" id="discard-row" style="display:none">
-    <button id="discard-btn" class="discard-btn">Discard</button>
-  </div>
-  <div id="timer-status"></div>
+    <div class="seg" id="mode-seg">
+      <button class="seg-btn active" data-mode="video"  title="Track based on the page's video play / pause events">Auto</button>
+      <button class="seg-btn"        data-mode="manual" title="Track manually with Pause / Resume — no media detection">Manual</button>
+      <button class="seg-btn"        data-mode="audio"  title="Track based on whether the tab is producing sound">Audio</button>
+    </div>
 
-  <hr>
+    <div class="btn-row">
+      <button id="pause-btn" style="display:none" class="pause-btn">Pause</button>
+      <button id="start-stop-btn">Start</button>
+    </div>
+    <div class="btn-row" id="discard-row" style="display:none">
+      <button id="discard-btn" class="discard-btn">Discard</button>
+    </div>
+    <div id="timer-status"></div>
+  </section>
 
   <!-- Passive YouTube tracking — read-only; the on-page chip is the live view.
        Always visible, unlike the old line, which hid itself below 60s and so
        looked like the feature had stopped existing. -->
-  <div class="section">YouTube <span class="sub-note">— passive</span></div>
-  <div id="yt-row">
-    <span id="yt-state"><span id="yt-dot"></span><span id="yt-state-text">Idle</span></span>
-    <span id="yt-today">0m</span>
-  </div>
-
-  <!-- Shown only while Firefox hasn't granted youtube.com. Until it is, the
-       tracker doesn't run at all unless you click the toolbar icon on each tab. -->
-  <div id="yt-perm" style="display:none">
-    <div class="btn-row">
-      <button id="yt-perm-btn">Allow YouTube tracking</button>
+  <section class="card">
+    <div class="card-head">
+      <span class="card-title">YouTube</span>
+      <span class="card-note">passive</span>
     </div>
-    <div class="hint" id="yt-perm-hint">
-      Firefox only runs the tracker on sites you've allowed. Without this it starts
-      only when you click the toolbar icon, and stops again on the next tab.
-    </div>
-  </div>
 
-  <hr>
+    <div id="yt-row">
+      <span id="yt-state"><span id="yt-dot"></span><span id="yt-state-text">Idle</span></span>
+      <span id="yt-today">0s</span>
+    </div>
+
+    <!-- Shown only while Firefox hasn't granted youtube.com. Until it is, the
+         tracker doesn't run at all unless you click the toolbar icon on each tab. -->
+    <div id="yt-perm" style="display:none">
+      <div class="btn-row">
+        <button id="yt-perm-btn">Allow YouTube tracking</button>
+      </div>
+      <div class="hint" id="yt-perm-hint">
+        Firefox only runs the tracker on sites you've allowed. Without this it starts
+        only when you click the toolbar icon, and stops again on the next tab.
+      </div>
+    </div>
+  </section>
 
   <!-- Settings (collapsed by default) -->
-  <details>
-    <summary>Extension Settings</summary>
+  <details class="card">
+    <summary>Extension settings</summary>
 
-    <p class="sub" style="margin-top:10px;">Host, port and token from your tracker's Settings page. Leave the host at 127.0.0.1 if the tracker runs on this machine.</p>
+    <p class="sub">Host, port and token from your tracker's Settings page. Leave the host at 127.0.0.1 if the tracker runs on this machine.</p>
 
-    <label>Host</label>
-    <input id="host" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false">
+    <div class="form-group">
+      <label for="host">Host</label>
+      <input id="host" type="text" placeholder="127.0.0.1" autocomplete="off" spellcheck="false">
+    </div>
 
-    <label>Port</label>
-    <input id="port" type="number" placeholder="18463" min="1024" max="65535">
+    <div class="form-group">
+      <label for="port">Port</label>
+      <input id="port" type="number" placeholder="18463" min="1024" max="65535">
+    </div>
 
-    <label>Token</label>
-    <input id="token" type="text" placeholder="paste token here" autocomplete="off" spellcheck="false">
+    <div class="form-group">
+      <label for="token">Token</label>
+      <input id="token" type="text" placeholder="paste token here" autocomplete="off" spellcheck="false">
+    </div>
 
-    <label>Device name</label>
-    <input id="device" type="text" placeholder="desktop" autocomplete="off" spellcheck="false">
-    <p class="hint">
-      Give each machine that tracks YouTube its own name, so their viewing time
-      adds up instead of overwriting each other. One machine only? Leave it blank.
-    </p>
+    <div class="form-group">
+      <label for="device">Device name</label>
+      <input id="device" type="text" placeholder="desktop" autocomplete="off" spellcheck="false">
+      <p class="hint">
+        Give each machine that tracks YouTube its own name, so their viewing time
+        adds up instead of overwriting each other. One machine only? Leave it blank.
+      </p>
+    </div>
 
     <div class="btn-row">
       <button id="save">Save</button>

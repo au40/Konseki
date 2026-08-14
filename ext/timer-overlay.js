@@ -10,19 +10,23 @@ if (!window.__immersionOverlayActive) {
     top:            "12px",
     right:          "12px",
     zIndex:         "2147483647",
-    background:     "rgba(20, 20, 32, 0.82)",
-    color:          "#eee",
-    fontFamily:     "monospace",
-    fontSize:       "13px",
-    padding:        "5px 11px",
-    borderRadius:   "20px",
-    pointerEvents:  "auto",
-    userSelect:     "none",
-    backdropFilter: "blur(6px)",
-    border:         "1px solid rgba(155, 155, 199, 0.25)",
-    letterSpacing:  "0.05em",
-    cursor:         "grab",
-    transition:     "opacity 0.3s",
+    // Colours are the tracker's own (src/ui.css): --surface behind, --text on
+    // top, an --accent-tinted hairline. Kept in sync with the YouTube chip in
+    // yt-track.js, which is deliberately identical.
+    background:         "rgba(28, 28, 40, 0.86)",
+    color:              "#E8E8F0",
+    fontFamily:         "monospace",
+    fontSize:           "13px",
+    padding:            "5px 11px",
+    borderRadius:       "20px",
+    pointerEvents:      "auto",
+    userSelect:         "none",
+    backdropFilter:     "blur(6px)",
+    border:             "1px solid rgba(91, 140, 255, 0.28)",
+    boxShadow:          "0 6px 20px rgba(0, 0, 0, 0.4)",
+    letterSpacing:      "0.05em",
+    cursor:             "grab",
+    transition:         "opacity 0.3s",
   });
   document.documentElement.appendChild(overlay);
 
