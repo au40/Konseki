@@ -116,6 +116,7 @@ saveBtn.addEventListener("click", async () => {
 });
 
 // ── Stopwatch ─────────────────────────────────────────────────────────────────
+const swLabel        = document.getElementById("sw-label");
 const timerDisplay   = document.getElementById("timer-display");
 const activitySelect = document.getElementById("activity-select");
 const pauseBtn       = document.getElementById("pause-btn");
@@ -216,6 +217,14 @@ function applyState(cfg) {
 
   const active   = cfg.timerRunning || cfg.timerPaused || cfg.timerWaiting;
   const lockMode = cfg.timerRunning || cfg.timerWaiting;  // mode is editable while paused
+
+  // Name the running session in the heading. Read off the select rather than
+  // cfg.timerActivity: the select already holds the session's activity and is
+  // disabled while one is live, and the storage listener that re-runs this
+  // doesn't fetch timerActivity.
+  if (swLabel) {
+    swLabel.textContent = active ? `Stopwatch — ${activitySelect.value}` : "Stopwatch";
+  }
   modeBtns.forEach(b => { b.disabled = !!lockMode; });
   if (active && cfg.timerMode) {
     modeBtns.forEach(b => b.classList.toggle("active", b.dataset.mode === cfg.timerMode));
@@ -306,6 +315,14 @@ fetchActivityTypes();
 // branch rewrites everything from ~line 487 down, and this region is untouched
 // by it (see plans/YOUTUBE-PLAN.md).
 const ytTodayEl = document.getElementById("yt-today");
+const ytRowEl   = document.getElementById("yt-row");
+const ytStateEl = document.getElementById("yt-state-text");
+
+// A credit reaches the background every FLUSH_MS (5s) while a video is actually
+// playing, so anything fresher than this means it's counting right now. The
+// background's timestamp resets when its event page unloads — which can only
+// happen while nothing is accruing, so it reads idle exactly when it is.
+const YT_LIVE_MS = 15000;
 
 function formatYtShort(total) {
   const s = Math.floor(total);
@@ -319,16 +336,60 @@ async function refreshYtToday() {
   try {
     const res  = await browser.runtime.sendMessage({ type: "yt-day-total" });
     const secs = (res && res.dayTotal) || 0;
-    if (secs < 60) { ytTodayEl.style.display = "none"; return; }
-    ytTodayEl.textContent   = `YouTube today — ${formatYtShort(secs)}`;
-    ytTodayEl.style.display = "";
+    const live = !!(res && res.activeAt) && Date.now() - res.activeAt < YT_LIVE_MS;
+    ytTodayEl.textContent = formatYtShort(secs);
+    if (ytRowEl)   ytRowEl.classList.toggle("live", live);
+    if (ytStateEl) {
+      ytStateEl.textContent = live ? "Tracking now"
+                            : secs > 0 ? "Idle"
+                            : "Nothing yet today";
+    }
   } catch {
-    ytTodayEl.style.display = "none";
+    // The background is unreachable, which is not the same as "no viewing".
+    if (ytRowEl)   ytRowEl.classList.remove("live");
+    if (ytStateEl) ytStateEl.textContent = "Unavailable";
   }
 }
 
 refreshYtToday();
 setInterval(refreshYtToday, 5000);
+
+// ── Site access ───────────────────────────────────────────────────────────────
+// Firefox MV3 treats everything in `host_permissions` as OPT-IN: listing
+// youtube.com grants nothing at install, so the content script never runs and
+// the tracker looks broken. Clicking the toolbar icon grants `activeTab` for
+// that one tab, which is why it seems to work "sometimes" — the grant survives
+// YouTube's SPA navigation (no document load) but dies on the next tab.
+//
+// So ask for it properly, once. Nothing else in the popup depends on the answer;
+// the row simply disappears when access is held.
+const YT_ORIGIN   = "https://www.youtube.com/*";
+const ytPermRow   = document.getElementById("yt-perm");
+const ytPermBtn   = document.getElementById("yt-perm-btn");
+
+async function refreshYtPerm() {
+  if (!ytPermRow) return;
+  let granted = true;      // on error, assume granted — never nag on a false alarm
+  try {
+    granted = await browser.permissions.contains({ origins: [YT_ORIGIN] });
+  } catch {}
+  ytPermRow.style.display = granted ? "none" : "";
+}
+
+if (ytPermBtn) {
+  ytPermBtn.addEventListener("click", () => {
+    // request() must be called SYNCHRONOUSLY from the user gesture — awaiting
+    // anything first (a storage read, a permissions.contains) spends the gesture
+    // and Firefox rejects the call outright.
+    browser.permissions.request({ origins: [YT_ORIGIN] })
+      .then(() => refreshYtPerm())
+      // Firefox usually closes the popup to show the prompt, so this often never
+      // runs; the check on next open is what actually clears the row.
+      .catch(() => {});
+  });
+}
+
+refreshYtPerm();
 
 // ── Pause / Resume ────────────────────────────────────────────────────────────
 pauseBtn.addEventListener("click", async () => {

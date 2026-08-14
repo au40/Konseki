@@ -389,6 +389,24 @@ async function ytPostCycle() {
 ytPostCycle();
 setInterval(ytPostCycle, YT_POST_MS);
 
+// Granting site access doesn't retroactively load the content script into tabs
+// that are already open — without this, allowing YouTube from the popup appears
+// to do nothing until every tab is reloaded. Injecting is safe on a tab that
+// already has it: yt-track.js guards on `window.__konsekiYtActive`.
+browser.permissions.onAdded.addListener(async (perms) => {
+  const origins = (perms && perms.origins) || [];
+  if (!origins.some(o => o.includes("youtube.com"))) return;
+  try {
+    const tabs = await browser.tabs.query({ url: "https://www.youtube.com/*" });
+    for (const tab of tabs) {
+      if (!tab.id) continue;
+      try {
+        await browser.scripting.executeScript({ target: { tabId: tab.id }, files: ["yt-track.js"] });
+      } catch {}
+    }
+  } catch {}
+});
+
 browser.runtime.onMessage.addListener(async (msg) => {
   if (msg.type === "yt-accrue") {
     const dayTotal = await ytSerial(() => ytCredit(Number(msg.secs) || 0));
@@ -408,7 +426,13 @@ browser.runtime.onMessage.addListener(async (msg) => {
 
   if (msg.type === "yt-day-total") {
     const { days, rollover } = await ytRead();
-    return { dayTotal: days[ytLogicalDate(Date.now(), rollover)] || 0 };
+    // activeAt is when a credit last landed. The popup turns that into "tracking
+    // now" — it has no other way to know, since the accrual lives in whichever
+    // tab happens to be playing.
+    return {
+      dayTotal: days[ytLogicalDate(Date.now(), rollover)] || 0,
+      activeAt: ytLastCredit,
+    };
   }
 
   if (msg.type === "media-pause") {

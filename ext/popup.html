@@ -158,12 +158,56 @@
     }
     details[open] summary::before { transform: rotate(90deg); }
     details summary::-webkit-details-marker { display: none; }
+    /* Section headings. The popup holds two independent trackers — the manual
+       stopwatch and the passive YouTube one — and without a name on each, the
+       YouTube total read as a stray note under the Start button. */
+    .section {
+      margin: 8px 0 3px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: #888;
+    }
+    .section .sub-note {
+      text-transform: none;
+      letter-spacing: 0;
+      color: #555;
+    }
+    #yt-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    #yt-state {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #888;
+    }
+    #yt-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #555;
+      flex: none;
+    }
+    #yt-row.live #yt-dot   { background: #9be89b; }
+    #yt-row.live #yt-state { color: #9be89b; }
+    #yt-today {
+      font-family: monospace;
+      font-size: 15px;
+      color: #eee;
+    }
   </style>
 </head>
 <body>
   <h3>Konseki</h3>
 
-  <!-- Stopwatch -->
+  <!-- Stopwatch. The heading names the activity while a session is live, so the
+       two sections read as "what you started" and "what runs on its own". -->
+  <div class="section" id="sw-label">Stopwatch</div>
   <div id="timer-display">00:00:00</div>
 
   <label>Activity</label>
@@ -184,8 +228,28 @@
   </div>
   <div id="timer-status"></div>
 
-  <!-- Passive YouTube tracking — read-only; the on-page chip is the live view -->
-  <div id="yt-today" class="sub" style="display:none"></div>
+  <hr>
+
+  <!-- Passive YouTube tracking — read-only; the on-page chip is the live view.
+       Always visible, unlike the old line, which hid itself below 60s and so
+       looked like the feature had stopped existing. -->
+  <div class="section">YouTube <span class="sub-note">— passive</span></div>
+  <div id="yt-row">
+    <span id="yt-state"><span id="yt-dot"></span><span id="yt-state-text">Idle</span></span>
+    <span id="yt-today">0m</span>
+  </div>
+
+  <!-- Shown only while Firefox hasn't granted youtube.com. Until it is, the
+       tracker doesn't run at all unless you click the toolbar icon on each tab. -->
+  <div id="yt-perm" style="display:none">
+    <div class="btn-row">
+      <button id="yt-perm-btn">Allow YouTube tracking</button>
+    </div>
+    <div class="hint" id="yt-perm-hint">
+      Firefox only runs the tracker on sites you've allowed. Without this it starts
+      only when you click the toolbar icon, and stops again on the next tab.
+    </div>
+  </div>
 
   <hr>
 
