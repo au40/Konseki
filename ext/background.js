@@ -332,10 +332,57 @@ function ytPrunePosted() {
   });
 }
 
+// Posting has three drivers now — the interval, an accrue message, and a pause —
+// so runs can overlap. They're serialised not for the server's sake (every post
+// is an idempotent rewrite of its own row) but for `posted`: two concurrent runs
+// read the same map and whichever writes last drops the other's confirmations,
+// costing a needless re-post of every day next cycle.
+//
+// A request arriving mid-run sets the flag rather than joining the run, because
+// the run in flight read storage BEFORE that request's seconds were credited —
+// folding it in would mean the caller's whole point (publish the total as of
+// now) waited for the next interval. Passes are no-ops once every day matches
+// `posted`, so the loop settles immediately.
+let ytPosting   = null;
+let ytPostAgain = false;
+
+function ytPostOnce() {
+  if (ytPosting) {
+    ytPostAgain = true;
+    return ytPosting;
+  }
+  ytPosting = (async () => {
+    try {
+      do {
+        ytPostAgain = false;
+        await ytPostPending();
+      } while (ytPostAgain);
+    } catch {}
+    ytPosting = null;
+  })();
+  return ytPosting;
+}
+
+// Pause-driven post. Deliberately NOT the full cycle: the config fetch and the
+// prune are periodic housekeeping, not per-event work.
+//
+// The floor is the seek guard. The content script's once-a-second gate sampling
+// already swallows most scrubs, but a slow seek or an ad transition shows up as
+// a genuine pause, and a scrub-heavy video would otherwise post on every one.
+const YT_FORCE_MS = 10000;
+let ytLastForce = 0;
+
+function ytPostForced() {
+  const now = Date.now();
+  if (now - ytLastForce < YT_FORCE_MS) return Promise.resolve();
+  ytLastForce = now;
+  return ytPostOnce();
+}
+
 async function ytPostCycle() {
   ytLastPost = Date.now();
   await ytFetchConfig();
-  await ytPostPending();
+  await ytPostOnce();
   await ytPrunePosted();
 }
 
@@ -350,6 +397,13 @@ browser.runtime.onMessage.addListener(async (msg) => {
     // cycle from here too rather than trusting the timer to survive.
     if (Date.now() - ytLastPost >= YT_POST_MS) ytPostCycle();
     return { dayTotal };
+  }
+
+  // Sent when the page stops accruing, right after its final yt-accrue — so the
+  // seconds being published are already in storage by the time this arrives.
+  if (msg.type === "yt-post-now") {
+    await ytPostForced();
+    return;
   }
 
   if (msg.type === "yt-day-total") {

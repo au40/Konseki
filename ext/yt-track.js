@@ -162,17 +162,50 @@ function metaFromResponse(r) {
 
 const CACHE_KEY = "ytChannelVerdicts";
 const DEBUG_KEY = "ytDebug";       // set true in storage to re-enable probe logs
+const TIMER_KEY = "timerRunning";  // the manual stopwatch — see the yield below
 let channelCache = {};
 let DEBUG = false;
 
+// ── Yielding to the manual stopwatch ─────────────────────────────────────────
+// The two features measure the same wall clock, and neither used to know the
+// other existed. Starting a stopwatch session on a YouTube tab logged its own
+// row while this tracker kept accruing, so the same minutes landed in `sessions`
+// twice — there is no cross-source overlap detection, so the day total, Stats,
+// the heatmap and goals were all inflated by however long they overlapped.
+//
+// The passive tracker yields to the explicit one, on ANY tab, not just the tab
+// the stopwatch is attached to: starting a session is a deliberate act and this
+// is not, and a stopwatch running on one tab while YouTube plays on another
+// double-counts exactly the same way.
+//
+// Gated on `timerRunning` alone. `timerWaiting` is armed-but-counting-nothing
+// (the background flips it to running once audio starts, which we see), and a
+// paused or crash-recovered session can sit for hours without being an active
+// measurement — neither should suppress real listening.
+let manualTimer = false;
+
 async function loadSettings() {
   try {
-    const got = await browser.storage.local.get([CACHE_KEY, DEBUG_KEY]);
+    const got = await browser.storage.local.get([CACHE_KEY, DEBUG_KEY, TIMER_KEY]);
     channelCache = got[CACHE_KEY] || {};
     DEBUG        = !!got[DEBUG_KEY];
+    manualTimer  = !!got[TIMER_KEY];
   } catch {
     channelCache = {};
   }
+}
+
+// The stopwatch starts and stops from the popup, so the state can flip under a
+// page that's already loaded. Wrapped because a top-level throw in a content
+// script kills the whole tracker silently.
+function watchManualTimer() {
+  try {
+    browser.storage.onChanged.addListener((changes, area) => {
+      if (area !== "local" || !changes || !(TIMER_KEY in changes)) return;
+      manualTimer = !!changes[TIMER_KEY].newValue;
+      if (state.videoId) render();
+    });
+  } catch {}
 }
 
 async function rememberChannel(channelId, isJa) {
@@ -267,14 +300,49 @@ function tracking() {
 // so "playing and not muted" stands in for it. Deliberately NOT gated on
 // visibility: a backgrounded tab still playing unmuted audio is real listening.
 
-function accrualGate() {
-  const v = document.querySelector("video");
+function accrualGate(v = document.querySelector("video")) {
   if (!v)                                    return { ok: false, why: "no video" };
   if (v.ended)                               return { ok: false, why: "ended" };
   if (v.paused)                              return { ok: false, why: "paused" };
   if (v.readyState <= 2)                     return { ok: false, why: "buffering" };
   if (v.muted || v.volume === 0)             return { ok: false, why: "muted" };
   return { ok: true, why: "" };
+}
+
+// ── Liveness: did this second actually contain playback? ─────────────────────
+// The gate above asks whether the page LOOKS like it's playing, and that isn't
+// the same question. Hitting play flips `paused` to false instantly, but YouTube
+// then spends a couple of seconds on its own spin-up — refetching a segment
+// after a long pause, an ad check, restarting the decoder — with the spinner up
+// and nothing audible. `readyState` doesn't catch it: the buffer is usually
+// still populated, so the element reports 3 or 4 throughout. Every one of those
+// seconds used to be credited.
+//
+// currentTime can't lie about it. The playhead only moves when frames are
+// actually being played, and it is frozen solid through a spinner — whatever the
+// rest of the element claims. So it's read as a LIVENESS BOOLEAN only, never as
+// the credit amount; the amount stays wall-clock for the reason below. This also
+// covers mid-video rebuffers and ad transitions, which the unpause case is just
+// the most visible instance of.
+let lastMediaTime = null;
+let stalled       = false;   // read by render() so the chip can say why it froze
+
+function mediaAdvanced(v, wallMs) {
+  const prev = lastMediaTime;
+  // Sampled on EVERY tick, including blocked ones, so the reference is always
+  // the previous second's position. Sampling only while accruing would leave a
+  // stale reference across a pause, and the first tick after resuming would
+  // measure against wherever the playhead was minutes ago.
+  lastMediaTime = v ? v.currentTime : null;
+  if (prev === null || lastMediaTime === null || v.seeking) return false;
+
+  const adv    = lastMediaTime - prev;
+  const expect = (wallMs / 1000) * (v.playbackRate || 1);
+  // Upper bound rejects a scrub or an ad swapping the element out: those land as
+  // a jump far larger than the elapsed wall time (or a negative one), which is
+  // motion but not playback. Lower bound scales down with the interval so an
+  // early tick isn't misread as a stall.
+  return adv > Math.min(0.05, expect * 0.25) && adv < expect * 3 + 1;
 }
 
 // Wall-clock, not currentTime: at 1.5x speed a 60-minute video is 40 minutes of
@@ -288,11 +356,44 @@ function tickAccrual() {
   const prev = state.lastTick || now;
   state.lastTick = now;
 
-  if (!tracking()) { state.gateWhy = state.verdict === "unknown" ? "unsure" : "not Japanese"; return; }
-
-  const gate = accrualGate();
+  // The stopwatch is checked FIRST so `why` names the real reason — and so the
+  // publish below fires the moment a session starts, handing over whatever this
+  // page had accrued before it yielded.
+  const video = document.querySelector("video");
+  const gate  = manualTimer
+    ? { ok: false, why: "manual timer" }
+    : tracking()
+      ? accrualGate(video)
+      : { ok: false, why: state.verdict === "unknown" ? "unsure" : "not Japanese" };
   state.gateWhy = gate.why;
-  if (!gate.ok) return;
+
+  // Sampled before any early return — see mediaAdvanced.
+  const advanced = mediaAdvanced(video, now - prev);
+
+  // Stopping accrual — paused, muted, ended, or the video stopped qualifying —
+  // is the moment the day's total is final until playback resumes, so publish it
+  // now instead of letting it sit for up to a post interval. This is also the
+  // LAST tick that sends the background anything: after it, no accrue message
+  // arrives, and the background's own interval may have died with its event
+  // page (see background.js), so nothing else is guaranteed to wake it.
+  //
+  // Sampling the gate once a second rather than listening for `pause` is
+  // deliberate: YouTube fires pause on every seek, and a scrub's pause/play pair
+  // usually lands inside one tick and is never seen. The background floors the
+  // rate for the ones that don't.
+  if (wasAccruing && !gate.ok) flushAndPost();
+  wasAccruing = gate.ok;
+
+  if (!gate.ok) { stalled = false; return; }
+
+  // A stall suppresses the CREDIT only — it deliberately does not flow into
+  // `wasAccruing` above. If it did, a buffer hiccup would publish the day total,
+  // and then the real pause a minute later would find `wasAccruing` already
+  // false and publish nothing, leaving the total unposted until the background's
+  // next interval. Stopping and stalling are different events; only the first
+  // means "this day's figure is final for now".
+  stalled = !advanced;
+  if (stalled) return;
 
   let delta = now - prev;
   if (delta > MAX_CREDIT_MS) delta = TICK_MS;   // credit one interval, never the gap
@@ -306,23 +407,84 @@ function tickAccrual() {
 // page going away. We batch a few seconds at a time to keep the message volume
 // down; the cost of a crash is bounded by FLUSH_MS.
 
-const FLUSH_MS = 5000;
-let pendingSecs = 0;
-let lastFlush   = 0;
+const FLUSH_MS  = 5000;
+const ANCHOR_MS = 30000;
+let pendingSecs  = 0;
+let lastFlush    = 0;
+let wasAccruing  = false;
 
+// ── The number on the chip is the DAY total ──────────────────────────────────
+// Not this video's. The day total is the figure that actually exists downstream:
+// the background keeps one per logical date and every post rewrites that day's
+// single row. The per-video counter was the one number in the pipeline that
+// corresponded to nothing stored, and it reset on every navigation — so "did the
+// last hour register?" couldn't be answered from the page it was watched on.
+// (`state.secs` still runs, for the tooltip.)
+//
+// ANCHORED, not polled. `dayAnchor` is the background's figure as of the last
+// exchange; the seconds this page hasn't handed over yet are added on top.
+// Rendering the background's number alone would jump FLUSH_MS at a time, and
+// summing locally would OVER-report: the background clamps each credit to the
+// wall clock (background.js), so two tabs playing at once can't both bill the
+// same second. The anchor is what will be posted; pendingSecs only keeps it
+// ticking in between.
+//
+// It steps back to ~zero at the rollover hour — the logical day changed under
+// it. That's honest, and the only moment the number ever goes down.
+let dayAnchor = 0;
+let anchorAt  = 0;
+
+function dayTotal() {
+  return dayAnchor + pendingSecs;
+}
+
+function takeAnchor(res) {
+  if (res && typeof res.dayTotal === "number") {
+    dayAnchor = res.dayTotal;
+    anchorAt  = Date.now();
+  }
+}
+
+// A paused page never flushes, so its anchor would sit still while another tab
+// racks up time. Re-read it occasionally rather than show a figure that stopped
+// moving hours ago.
+async function refreshAnchor(force) {
+  if (!force && Date.now() - anchorAt < ANCHOR_MS) return;
+  try {
+    takeAnchor(await browser.runtime.sendMessage({ type: "yt-day-total" }));
+  } catch {}
+}
+
+// Returns whether the background now holds everything this page had accrued.
 async function flushAccrual() {
   lastFlush = Date.now();
-  if (pendingSecs <= 0) return;
+  if (pendingSecs <= 0) { await refreshAnchor(false); return true; }
 
   const secs  = pendingSecs;
   pendingSecs = 0;
   try {
-    await browser.runtime.sendMessage({ type: "yt-accrue", secs });
+    // The reply carries the day total the background now holds — other tabs'
+    // contributions and its wall-clock clamp included — so every flush re-anchors
+    // the chip to the figure that will actually be posted.
+    takeAnchor(await browser.runtime.sendMessage({ type: "yt-accrue", secs }));
+    return true;
   } catch {
     // The page holds the only copy until the background acknowledges it — the
     // same rule the stopwatch learned the hard way. Put it back and retry.
     pendingSecs += secs;
+    return false;
   }
+}
+
+// Order matters: the batch above is worth up to FLUSH_MS of listening, so
+// posting before it lands publishes a total that's seconds short. A failed
+// flush means the page still holds those seconds — say nothing rather than
+// have the tracker show a figure we know is stale.
+async function flushAndPost() {
+  if (!(await flushAccrual())) return;
+  try {
+    await browser.runtime.sendMessage({ type: "yt-post-now" });
+  } catch {}
 }
 
 // ── The chip ─────────────────────────────────────────────────────────────────
@@ -339,7 +501,13 @@ function buildChip() {
   chip.id = "__konseki-yt-chip";
   Object.assign(chip.style, {
     position:       "fixed",
-    top:            "12px",
+    // Sits BELOW the stopwatch overlay's default 12px, not on it. The two chips
+    // are styled identically and keep separate position keys (`overlayPos` vs
+    // POS_KEY), so at the same default they stacked pixel-on-pixel: the
+    // stopwatch, appended later at the same z-index, painted on top and ate the
+    // pointer events — which made this chip's click-to-override, including the
+    // "click to count" prompt, unreachable underneath it.
+    top:            "52px",
     right:          "12px",
     zIndex:         "2147483647",
     background:     "rgba(20, 20, 32, 0.82)",
@@ -422,8 +590,31 @@ function formatTime(total) {
 }
 
 
+// The per-video reading the chip used to show, plus the verdict — kept where it
+// costs no width. The day total is labelled "this device" because that's what it
+// is: this machine's row for the logical day, not the app's total for the day.
+function tooltip() {
+  const lines = [
+    `Today, this device: ${formatTime(dayTotal())}`,
+    `This video: ${formatTime(state.secs)}`,
+  ];
+  if (state.reason)  lines.push(state.reason);
+  if (manualTimer)   lines.push("held — the manual stopwatch is running");
+  return lines.join("\n");
+}
+
 function render() {
   const el = buildChip();
+  el.title = tooltip();
+
+  // Yielded to the stopwatch. Say so: a chip that silently froze looks broken,
+  // and this is the one state where the day total is deliberately not moving.
+  if (manualTimer) {
+    el.textContent   = "⏸ manual timer";
+    el.style.color   = "#eee";
+    el.style.opacity = "0.6";
+    return;
+  }
 
   if (Date.now() < state.announceUntil && tracking()) {
     el.textContent    = "● Tracking — 日本語";
@@ -458,14 +649,20 @@ function render() {
   // above is what tells you a new video is being tracked; once that's said,
   // this should be as quiet as the manual timer is.
   const gate = accrualGate();
-  if (gate.ok) {
-    el.textContent   = "⏱ " + formatTime(state.secs);
+  if (gate.ok && stalled) {
+    // Playing by every other measure, but the playhead isn't moving — YouTube is
+    // spinning up. The frozen number IS the evidence that the wait isn't being
+    // counted; the glyph says why it's frozen rather than leaving it looking stuck.
+    el.textContent   = "⧗ " + formatTime(dayTotal());
+    el.style.opacity = "0.65";
+  } else if (gate.ok) {
+    el.textContent   = "⏱ " + formatTime(dayTotal());
     el.style.opacity = "1";
   } else if (gate.why === "muted") {
     el.textContent   = "🔇 muted";
     el.style.opacity = "0.65";
   } else {
-    el.textContent   = "⏸ " + formatTime(state.secs);
+    el.textContent   = "⏸ " + formatTime(dayTotal());
     el.style.opacity = "0.65";
   }
 }
@@ -482,7 +679,22 @@ function currentVideoId() {
   try {
     const u = new URL(location.href);
     if (u.pathname === "/watch") return u.searchParams.get("v");
-    const m = u.pathname.match(/^\/shorts\/([\w-]+)/);
+    // /live/<id> is the canonical share link for a stream and YouTube serves it
+    // AT that path — 200, not a redirect to /watch (only its <link rel=canonical>
+    // points there). A null id makes onNavigate hide the chip and every tick bail,
+    // so the whole tracker used to no-op on any live stream opened by share link.
+    //
+    // NOT covered, both deliberately:
+    //   /embed/<id>     — the iframe player. This script has no `all_frames`, which
+    //                     defaults to false, so it only ever runs in the TOP frame;
+    //                     a player embedded on someone else's site is a subframe and
+    //                     never loads it. Matching the path would only fire if you
+    //                     opened an embed URL directly in the address bar.
+    //   /@channel/live  — carries no id in the URL at all. Reaching it means taking
+    //                     identity from the player response instead, which inverts
+    //                     the navigation guard's premise.
+    // Both are pinned as null in the URL-shape checks in tests/verify_yt.js.
+    const m = u.pathname.match(/^\/(?:shorts|live)\/([\w-]+)/);
     return m ? m[1] : null;
   } catch {
     return null;
@@ -568,6 +780,17 @@ function onNavigate() {
   const id = currentVideoId();
   if (id === state.videoId) return;
 
+  // Leaving a video counts as stopping. tickAccrual can't see this one: it
+  // returns early once videoId is null, so navigating to the homepage mid-video
+  // would strand the last batch until the next pagehide. Clearing the flag first
+  // stops the next tick from publishing a second time for the same stop.
+  if (wasAccruing) { wasAccruing = false; flushAndPost(); }
+
+  // The new video's playhead has nothing to do with the old one's, so prime the
+  // liveness reference fresh rather than measuring the first tick against it.
+  lastMediaTime = null;
+  stalled       = false;
+
   clearTimeout(classifyTimer);
   state.videoId       = id;
   state.channelId     = "";
@@ -590,6 +813,8 @@ function onNavigate() {
 
 async function start() {
   await loadSettings();
+  watchManualTimer();
+  refreshAnchor(true);     // show today's total straight away, not 00:00:00
   onNavigate();
 
   document.addEventListener("yt-navigate-finish", onNavigate, true);
