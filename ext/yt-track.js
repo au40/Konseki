@@ -1,10 +1,16 @@
 // yt-track.js — passive YouTube listening tracker.
 //
-// ── M1: DETECTION + INDICATOR ONLY. THIS FILE POSTS NOTHING. ─────────────────
-// It classifies each video by YouTube's own ASR caption language, shows that
-// verdict on-page, and ticks a local counter you can watch. No fetch, no
-// storage of accrued time, no server contact. Accrual persistence lands in M2
-// and posting in M3 — see plans/YOUTUBE-PLAN.md.
+// ── WHAT THIS FILE OWNS ─────────────────────────────────────────────────────
+// Classification and accrual for ONE page: it decides whether the video is
+// Japanese (from YouTube's own ASR caption language), shows that verdict on a
+// draggable chip, and accrues wall-clock seconds while audio is actually
+// playing.
+//
+// It does not own the number and it does not talk to the tracker. Accrued
+// seconds are handed to background.js in batches (`yt-accrue`), which keeps the
+// per-logical-day totals across tabs and does the posting; this file only asks
+// it to publish early when playback stops (`yt-post-now`). The page is the sole
+// holder of a batch until the background acknowledges it — see flushAccrual.
 //
 // The signal: every auto-captioned video carries a caption track with
 // kind="asr", and its languageCode is YouTube's own speech-recognition verdict
@@ -434,8 +440,29 @@ let wasAccruing  = false;
 let dayAnchor = 0;
 let anchorAt  = 0;
 
+// ── The third term, and why the number needs one ─────────────────────────────
+// Seconds handed to the background but not yet confirmed. They belong to NEITHER
+// of the other two for the length of the round trip: `pendingSecs` has been
+// zeroed (the page gave them away) and `dayAnchor` has not moved yet (the reply
+// hasn't landed). Without this term the chip renders the gap.
+//
+// And it renders it every single flush, not just on a slow one: flushAccrual()
+// is called WITHOUT await from the tick loop, so it runs synchronously as far as
+// its first await — zeroing pendingSecs — and hands back a pending promise. The
+// very next line of that tick is render(). So the paint always happens inside
+// the gap, and the chip drops by the whole batch (up to FLUSH_MS of listening)
+// until a later tick picks the anchor up. That read as the timer bouncing around
+// wildly, because the extra flush triggers below (every accrual stop: an ad, a
+// rebuffer, a mute, a seek) mean flushes are far more frequent than once per 5s.
+//
+// Only the display was ever wrong — the seconds themselves are handed over and
+// posted correctly either way. Kept as a separate counter rather than "just
+// don't zero pendingSecs until the reply" because those seconds must not be sent
+// twice if a second flush overlaps this one.
+let inFlight  = 0;
+
 function dayTotal() {
-  return dayAnchor + pendingSecs;
+  return dayAnchor + pendingSecs + inFlight;
 }
 
 function takeAnchor(res) {
@@ -462,15 +489,23 @@ async function flushAccrual() {
 
   const secs  = pendingSecs;
   pendingSecs = 0;
+  inFlight   += secs;        // still ours to DISPLAY until the anchor moves
   try {
     // The reply carries the day total the background now holds — other tabs'
     // contributions and its wall-clock clamp included — so every flush re-anchors
     // the chip to the figure that will actually be posted.
+    //
+    // takeAnchor and the -= are one step with no await between them, which is
+    // what makes the handover seamless: the instant these seconds stop being
+    // counted here they are already inside dayAnchor. Reversing the two would
+    // reintroduce the gap in miniature.
     takeAnchor(await browser.runtime.sendMessage({ type: "yt-accrue", secs }));
+    inFlight -= secs;
     return true;
   } catch {
     // The page holds the only copy until the background acknowledges it — the
     // same rule the stopwatch learned the hard way. Put it back and retry.
+    inFlight    -= secs;
     pendingSecs += secs;
     return false;
   }
@@ -599,22 +634,29 @@ function tooltip() {
     `This video: ${formatTime(state.secs)}`,
   ];
   if (state.reason)  lines.push(state.reason);
-  if (manualTimer)   lines.push("held — the manual stopwatch is running");
   return lines.join("\n");
 }
 
 function render() {
+  // ── One chip at a time ──────────────────────────────────────────────────────
+  // While the manual stopwatch is running it owns the corner: timer-overlay.js
+  // has its own chip up, counting, and this tracker has yielded to it (see the
+  // yield note above). Standing down entirely beats the old behaviour of showing
+  // a SECOND chip reading "⏸ manual timer" — two overlays stacked in the corner,
+  // one of them present only to announce that it isn't the one working.
+  //
+  // Only this chip hides, never the stopwatch's. A stopwatch session is
+  // something the user deliberately started; it stays visible in every state,
+  // including paused, because it is the only place that session is shown. So
+  // when the stopwatch is merely paused or waiting — not counting — this chip
+  // comes back and does the counting, which is exactly the intended split.
+  //
+  // Nothing is lost by hiding: the click-to-override control this chip carries
+  // only affects accrual, and accrual is suppressed for as long as it's hidden.
+  if (manualTimer) { hideChip(); return; }
+
   const el = buildChip();
   el.title = tooltip();
-
-  // Yielded to the stopwatch. Say so: a chip that silently froze looks broken,
-  // and this is the one state where the day total is deliberately not moving.
-  if (manualTimer) {
-    el.textContent   = "⏸ manual timer";
-    el.style.color   = "#eee";
-    el.style.opacity = "0.6";
-    return;
-  }
 
   if (Date.now() < state.announceUntil && tracking()) {
     el.textContent    = "● Tracking — 日本語";
@@ -834,7 +876,7 @@ async function start() {
     render();
   }, TICK_MS);
 
-  console.log(LOG, "M2 loaded — accrual is local only, nothing is posted");
+  console.log(LOG, "loaded — accruing to the background, which posts");
 }
 
 if (!window.__konsekiYtActive) {

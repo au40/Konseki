@@ -29,9 +29,9 @@ belongs in `apply_payload()` in [src/ext_server.py](../src/ext_server.py).
 | POST | `/import` | token | Queue a ttsu/extension payload |
 | POST | `/log-manual` | token | Queue a hand-logged session |
 | POST | `/cover` | token | Queue a cover image for a title |
-| GET | `/inbox?since=<id>&limit=<n>` | token | Unapplied rows in id order |
+| GET | `/inbox?since=<id>&limit=<n>` | token | Unapplied rows in id order, plus `boot_id` |
 | POST | `/ack` `{"through_id":n}` | token | Stamp rows `applied_at` |
-| GET | `/pending` | **none** | Backlog count + oldest timestamp |
+| GET | `/pending` | **none** | Backlog count + oldest timestamp, plus `boot_id` |
 | GET/POST | `/activity-types` | token | Desktop-pushed category cache |
 | GET/POST | `/config` | token | Desktop-pushed settings cache (`rollover_hour`) |
 
@@ -46,7 +46,15 @@ schema. They exist so a client behaves identically whichever host it points at.
 `/config` carries `rollover_hour`, which a capturing device has to know *before*
 it posts, because the capturer decides the date (see `apply_payload()` in
 [src/ext_server.py](../src/ext_server.py)). Both are held in memory and repopulate
-on the next drain after a restart.
+on the next drain after a restart — which works only because `boot_id` tells the
+desktop the restart happened. `boot_id` is fresh per process, never persisted,
+and returned by `/inbox` and `/pending`; the desktop keys its push dedup on it
+(`_push_settings` in [src/drain.py](../src/drain.py)) and would otherwise stay
+silent after a reboot, leaving this box serving `rollover_hour: 0` indefinitely.
+
+**Redeploy this file after updating Konseki.** A desktop running the newer drain
+against an older inbox still works — it just pushes on every tick instead of
+deduping, because there is no `boot_id` to key on.
 
 ## Deploy
 

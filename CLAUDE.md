@@ -210,9 +210,21 @@ the inbox is a dumb relay for it. `/activity-types` and `/config` on
 overwrites from `_push_settings` in [drain.py](src/drain.py) on every successful
 drain — **not** only on one that applied something. That gating was circular
 once `rollover_hour` joined the payload: a device needs it *before* its first
-post, since the capturer decides the date. Pushes are deduped by value, so the
-steady state is silent. Adding a setting a device needs means adding it to that
-one dict; the inbox never learns what any of it means.
+post, since the capturer decides the date. Adding a setting a device needs means
+adding it to that one dict; the inbox never learns what any of it means.
+
+**The dedup is keyed on `(boot_id, payload)`, not the payload alone.** The inbox
+mints `BOOT_ID` per process and returns it on `/inbox` (and `/pending`), so it
+rides along on a request the drain already makes. Keying on the payload alone was
+wrong in a way that only showed up in deployment: those caches live in the
+inbox's memory and reset to defaults when it restarts, while `_pushed` lives in
+the desktop's memory and survives that — so a Pi reboot left the inbox serving
+`rollover_hour: 0` and the desktop, seeing nothing changed on its side, never
+corrected it. Every device that reads its rollover hour from the inbox then filed
+late-night viewing under the wrong logical day, silently. An inbox too old to
+send a `boot_id` reads as `None`, which pushes every tick rather than guessing.
+Push failures — including a non-2xx, which is checked — leave `_pushed` untouched
+and retry. If you add another desktop→inbox cache, put it behind this same stamp.
 
 ## GSM "reopen catch-up" pull — EXPERIMENTAL
 

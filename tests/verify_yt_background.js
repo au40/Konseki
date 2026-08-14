@@ -34,6 +34,14 @@ function set(obj) { Object.assign(store, obj); return Promise.resolve(); }
 
 const noop = () => {};
 let onMessage = null;
+let onPermsAdded = null;
+
+// --- tabs / scripting stubs ---------------------------------------------------
+// The permissions.onAdded handler re-injects yt-track.js into tabs that were
+// already open when access was granted; these capture what it asked for.
+let openTabs    = [];
+let tabsQueried = [];
+let injected    = [];
 
 // --- fetch stub ---------------------------------------------------------------
 let fetchCalls = [];
@@ -59,8 +67,15 @@ const sandbox = {
       onInstalled: { addListener: noop },
       onMessage:   { addListener: (fn) => { onMessage = fn; } },
     },
-    tabs: { onUpdated: { addListener: noop }, onRemoved: { addListener: noop }, get: () => Promise.resolve({}) },
-    scripting: { executeScript: () => Promise.resolve([]) },
+    tabs: {
+      onUpdated: { addListener: noop }, onRemoved: { addListener: noop },
+      get:   () => Promise.resolve({}),
+      query: (q) => { tabsQueried.push(q); return Promise.resolve(openTabs); },
+    },
+    scripting: {
+      executeScript: (a) => { injected.push(a); return Promise.resolve([]); },
+    },
+    permissions: { onAdded: { addListener: (fn) => { onPermsAdded = fn; } } },
   },
 };
 sandbox.window = sandbox;
@@ -307,6 +322,32 @@ function reset(rollover) {
   assert.strictEqual(fetchCalls[0].body.client_id, null,
     'an unnamed device must send no key');
   console.log('  ok  an unnamed device posts without a key');
+
+  // --- 13. granting YouTube access reaches tabs that are already open ----------
+  // Firefox MV3 makes host_permissions opt-in, and granting one does NOT load
+  // the content script into tabs that already exist. Without this handler,
+  // allowing YouTube from the popup looks like it did nothing until every tab is
+  // reloaded. Re-injecting is safe: yt-track.js guards on __konsekiYtActive.
+  assert.ok(typeof onPermsAdded === 'function',
+    'a permissions.onAdded listener should be registered');
+
+  openTabs = [{ id: 7 }, { id: 9 }, {}];   // the last has no id — must be skipped
+  tabsQueried = []; injected = [];
+  await onPermsAdded({ origins: ['https://www.youtube.com/*'] });
+  // Compared field by field, not deepStrictEqual: objects minted inside the vm
+  // context carry that realm's Object.prototype and never match a host literal.
+  assert.deepStrictEqual(tabsQueried.map(q => q.url), ['https://www.youtube.com/*'],
+    'should only look at YouTube tabs');
+  assert.deepStrictEqual(injected.map(a => a.target.tabId), [7, 9],
+    'should inject into every open YouTube tab with an id');
+  assert.ok(injected.every(a => a.files.includes('yt-track.js')), 'should inject the tracker');
+  console.log('  ok  granting YouTube access injects into already-open tabs');
+
+  tabsQueried = []; injected = [];
+  await onPermsAdded({ origins: ['https://example.com/*'] });
+  assert.strictEqual(injected.length, 0, 'an unrelated grant must inject nothing');
+  assert.strictEqual(tabsQueried.length, 0, 'an unrelated grant must not even query tabs');
+  console.log('  ok  an unrelated permission grant is ignored');
 
   console.log('\nbackground.js YouTube day counter + posting: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });

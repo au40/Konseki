@@ -146,7 +146,10 @@ class DrainLoop:
                 r = requests.get(f"{base}/inbox", params={"since": since, "limit": BATCH_LIMIT},
                                  headers=hdrs, timeout=TIMEOUT)
                 r.raise_for_status()
-                rows = (r.json() or {}).get("rows", [])
+                body = r.json() or {}
+                rows = body.get("rows", [])
+                # Identifies the inbox PROCESS, not the box. See _push_settings.
+                boot = body.get("boot_id")
             except requests.exceptions.RequestException as e:
                 # Unreachable is normal and quiet. Recorded, not surfaced.
                 self.last_error = self._short_error(e)
@@ -191,7 +194,7 @@ class DrainLoop:
             self.last_ok    = _now()
             self.last_applied_count = applied
 
-        self._push_settings(base, hdrs)
+        self._push_settings(base, hdrs, boot)
 
         if applied:
             print(f"[drain] Applied {applied} queued session payload(s)")
@@ -199,7 +202,7 @@ class DrainLoop:
                 self._on_applied()
         return applied
 
-    def _push_settings(self, base, hdrs):
+    def _push_settings(self, base, hdrs, boot_id=None):
         """Keep the inbox's read-only caches in step with ours, so a client
         behaves identically whichever host it points at.
 
@@ -212,23 +215,42 @@ class DrainLoop:
         on `applied > 0` would make that circular: the value a payload needed to
         be correct would only arrive after that payload had already been sent.
 
-        Deduped against the last acknowledged copy, so the steady state is one
-        comparison and no traffic. A failed push leaves `_pushed` untouched and
-        is simply retried next tick — the inbox being down is the ordinary case
-        here, same as everywhere else in this file.
+        ── THE DEDUP IS KEYED ON THE INBOX PROCESS, NOT THE VALUE ──────────────
+        Deduping on the payload alone was wrong in a way that never showed up
+        locally. The inbox holds those caches IN MEMORY (pi/inbox_server.py) and
+        resets them to defaults when its process restarts; `_pushed` lives in
+        THIS process and survives that. So a Pi reboot, a `systemctl restart`, or
+        an OOM kill left both sides quietly disagreeing: the inbox served
+        `rollover_hour: 0` and the desktop, seeing nothing had changed on its
+        side, never corrected it. Any device reading its rollover hour from the
+        inbox then filed late-night viewing under the wrong logical day —
+        silently, and looking exactly like a normal day.
+
+        `boot_id` is fresh per inbox process and rides along on the /inbox
+        response we already fetch, so a restart invalidates the dedup at no extra
+        request. An inbox too old to send one (not yet redeployed) reads as None:
+        we then push every tick rather than guess, which is correct, cheap, and
+        self-resolving on redeploy.
+
+        A failed push — including a rejected one; the status is checked, so a 403
+        from a token mismatch is not mistaken for delivery — leaves `_pushed`
+        untouched and is simply retried next tick. The inbox being down is the
+        ordinary case here, same as everywhere else in this file.
         """
         payload = {
             "types":  activity_types(),
             "config": {"rollover_hour": int(get_setting("rollover_hour", "0") or 0)},
         }
-        if payload == self._pushed:
+        stamp = (boot_id, payload)
+        if boot_id is not None and stamp == self._pushed:
             return
         try:
-            requests.post(f"{base}/activity-types", json={"types": payload["types"]},
-                          headers=hdrs, timeout=TIMEOUT)
-            requests.post(f"{base}/config", json={"config": payload["config"]},
-                          headers=hdrs, timeout=TIMEOUT)
-            self._pushed = payload
+            for path, body in (("/activity-types", {"types":  payload["types"]}),
+                               ("/config",         {"config": payload["config"]})):
+                resp = requests.post(f"{base}{path}", json=body,
+                                     headers=hdrs, timeout=TIMEOUT)
+                resp.raise_for_status()
+            self._pushed = stamp
         except requests.exceptions.RequestException:
             pass
 

@@ -326,6 +326,41 @@ class TestCoverIngest:
             "/cover", {"title": "T", "cover_b64": "!!!not base64!!!"})
         assert "error" in res and _cover("T") is None
 
+    @pytest.mark.parametrize("mime", ["image/jpeg", "image/png", "image/webp", "image/gif"])
+    def test_a_data_url_prefix_is_stripped_not_stored(self, seed, mime):
+        """A client that sends `FileReader.readAsDataURL` output must not have the
+        prefix stored INSIDE the payload. Base64's alphabet swallows most of it
+        silently — the `/` in `image/jpeg` is a legal character — so the decode
+        succeeded on garbage, PIL declined it, and the fallback stored
+        `data:image/jpeg;base64,data:image/jpeg;base64,…`: an <img src> that
+        renders nothing, reports success, and can never be corrected by the
+        client because covers are insert-if-absent."""
+        res, status = ext_server.apply_payload(
+            "/cover", {"title": "P", "cover_b64": f"data:{mime};base64,{_PNG_1PX}"})
+        assert status == 200 and res["stored"] is True
+
+        stored = _cover("P")
+        assert stored.count("data:") == 1, f"prefix was stored in the payload: {stored[:64]}"
+        assert stored.endswith(_PNG_1PX), "the image bytes must survive intact"
+
+    def test_whitespace_wrapped_base64_still_decodes(self, seed):
+        """Line-wrapped base64 is what several encoders emit by default. It was
+        already tolerated by the lenient decode; strict decoding must not
+        regress it."""
+        wrapped = "\n".join(_PNG_1PX[i:i + 32] for i in range(0, len(_PNG_1PX), 32))
+        res, status = ext_server.apply_payload(
+            "/cover", {"title": "W", "cover_b64": wrapped})
+        assert status == 200 and res["stored"] is True
+        assert _cover("W").endswith(_PNG_1PX)
+
+    def test_garbage_inside_valid_looking_base64_is_an_error(self, seed):
+        """The fallback in _shrink_cover_b64 exists for bytes we could not
+        RESIZE, never for bytes we could not decode — those must not reach
+        storage as a cover that will never render."""
+        res, _ = ext_server.apply_payload(
+            "/cover", {"title": "G", "cover_b64": "not*valid*base64*at*all=="})
+        assert "error" in res and _cover("G") is None
+
     def test_a_cover_touches_no_session_data(self, seed):
         """Covers are display metadata. Posting one must never mint a row."""
         ext_server.apply_payload("/cover", {"title": "T", "cover_b64": _PNG_1PX})
@@ -337,19 +372,31 @@ class FakeInbox:
     """Stands in for pi/inbox_server.py over requests. Records acks so the
     ordering guarantees can be asserted."""
 
-    def __init__(self, rows):
+    def __init__(self, rows, boot_id="boot-1"):
         self.rows = rows
         self.acked = []
         self.pushed_types = None
         self.pushed_config = None
         self.push_count = 0         # how many times the caches were written
         self.fail_after = None      # apply this many rows, then raise on ack
+        # Identifies this inbox PROCESS. The desktop keys its push dedup on it,
+        # so restart() below is what a Pi reboot looks like from the drain's side.
+        self.boot_id = boot_id
+
+    def restart(self, boot_id="boot-2"):
+        """A reboot / systemctl restart: fresh process, caches back to defaults."""
+        self.boot_id = boot_id
+        self.pushed_types = None
+        self.pushed_config = None
 
     def get(self, url, params=None, headers=None, timeout=None):
         if url.endswith("/inbox"):
             since = int((params or {}).get("since", 0))
             rows = [r for r in self.rows if r["id"] > since]
-            return _Resp({"rows": rows, "count": len(rows)})
+            body = {"rows": rows, "count": len(rows)}
+            if self.boot_id is not None:      # None = an inbox too old to send one
+                body["boot_id"] = self.boot_id
+            return _Resp(body)
         if url.endswith("/pending"):
             n = len([r for r in self.rows if r["id"] > max(self.acked, default=0)])
             return _Resp({"count": n, "oldest_received_at": None})
@@ -367,12 +414,16 @@ class FakeInbox:
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, status=200):
         self._p = payload
+        self.status_code = status
     def json(self):
         return self._p
     def raise_for_status(self):
-        pass
+        if self.status_code >= 400:
+            err = drainm.requests.exceptions.HTTPError(f"HTTP {self.status_code}")
+            err.response = self
+            raise err
 
 
 def _row(rid, path, body):
@@ -391,8 +442,12 @@ def loop(seed, monkeypatch):
 
 
 def _wire(monkeypatch, fake):
-    monkeypatch.setattr(drainm.requests, "get", fake.get)
-    monkeypatch.setattr(drainm.requests, "post", fake.post)
+    # Indirected through a lambda, NOT bound once: several tests swap `fake.post`
+    # mid-test to inject a failure. Patching the bound method directly froze the
+    # original in place, so those swaps never reached the drain and the tests
+    # passed by asserting something that was already true.
+    monkeypatch.setattr(drainm.requests, "get",  lambda *a, **k: fake.get(*a, **k))
+    monkeypatch.setattr(drainm.requests, "post", lambda *a, **k: fake.post(*a, **k))
 
 
 class TestDrain:
@@ -495,6 +550,56 @@ class TestDrain:
         loop.drain_once()
         loop.drain_once()
         assert fake.push_count == 1
+
+    def test_a_restarted_inbox_is_repushed(self, loop, monkeypatch):
+        """THE hole the value-only dedup left. The inbox holds these caches in
+        MEMORY and resets them on restart; `_pushed` lives in the desktop and
+        survives that. Deduping on the payload alone meant a Pi reboot left the
+        inbox serving rollover_hour=0 forever, and every device reading it filed
+        late-night viewing under the wrong logical day — silently."""
+        fake = FakeInbox([])
+        _wire(monkeypatch, fake)
+        loop.drain_once()
+        assert fake.push_count == 1
+
+        fake.restart()
+        loop.drain_once()
+        assert fake.push_count == 2, "a restarted inbox must be re-sent the settings"
+        assert fake.pushed_config == {"rollover_hour": 0}
+        assert "Reading" in fake.pushed_types
+
+        loop.drain_once()
+        assert fake.push_count == 2, "and then go quiet again on the same process"
+
+    def test_an_inbox_too_old_to_report_a_boot_id_is_pushed_every_tick(self, loop, monkeypatch):
+        """No boot_id means we cannot tell a restart from a steady state, so we
+        stop guessing and just push. Correct and cheap; resolves itself the
+        moment the inbox is redeployed."""
+        fake = FakeInbox([], boot_id=None)
+        _wire(monkeypatch, fake)
+        loop.drain_once()
+        loop.drain_once()
+        assert fake.push_count == 2
+
+    def test_a_rejected_push_is_not_recorded_as_delivered(self, loop, monkeypatch):
+        """A 403 from a token mismatch is a failure, not a delivery. Recording it
+        would leave the inbox on defaults until a setting happened to change —
+        the same silent-disagreement failure as the restart above."""
+        fake = FakeInbox([])
+        _wire(monkeypatch, fake)
+
+        real_post = fake.post
+        def rejecting(url, **kw):
+            if url.endswith("/config"):
+                return _Resp({"error": "forbidden"}, status=403)
+            return real_post(url, **kw)
+        fake.post = rejecting
+        loop.drain_once()
+        assert fake.pushed_config is None
+
+        fake.post = real_post
+        loop.drain_once()
+        assert fake.pushed_config == {"rollover_hour": 0}, "must retry after a rejection"
 
     def test_a_changed_setting_is_pushed_again(self, loop, seed, monkeypatch):
         fake = FakeInbox([])

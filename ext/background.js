@@ -147,20 +147,20 @@ browser.tabs.onRemoved.addListener(async (tabId) => {
 });
 
 // ── YouTube passive tracker — the day counter ────────────────────────────────
-// M2: ACCRUAL ONLY. Nothing here posts to the tracker; that's M3.
+// Accrual lives here, not in yt-track.js, because it has to be shared across
+// tabs and outlive any one page. Posting lives here too, further down.
 //
-// This lives in the background rather than the content script because it has to
-// be shared across tabs and outlive any one page. Storage shape, keyed by
-// LOGICAL date so a rollover hour splits the day the way the app does:
+// Storage shape, keyed by LOGICAL date so a rollover hour splits the day the
+// way the app does:
 //
 //   ytDays: { "2026-08-10": 4212.5, "2026-08-09": 1800 }
 //
 // A map rather than a single bucket so a day that closes while the tracker is
-// unreachable isn't lost — M3 posts each date and prunes only on a confirmed
-// store.
+// unreachable isn't lost — every date is posted on its own and pruned only on a
+// confirmed store (ytPostPending / ytPrunePosted below).
 
 const YT_DAYS_KEY     = "ytDays";
-const YT_ROLLOVER_KEY = "rolloverHour";   // fetched from the desktop in M3; 0 until then
+const YT_ROLLOVER_KEY = "rolloverHour";   // fetched from the desktop; 0 until the first fetch lands
 const YT_KEEP_DAYS    = 14;
 
 let ytLastCredit = 0;
@@ -208,7 +208,7 @@ async function ytCredit(secs) {
   return days[date] || 0;
 }
 
-// ── M3: posting ──────────────────────────────────────────────────────────────
+// ── Posting ──────────────────────────────────────────────────────────────────
 // Each cycle re-posts the CUMULATIVE total for any day whose figure has moved
 // since it was last confirmed. Every post carries the full total, so a dropped
 // request is corrected by the next one rather than lost — and a drain replaying

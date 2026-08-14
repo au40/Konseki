@@ -506,6 +506,42 @@ async function dayTotalDisplay() {
   assert.ok(getChip().textContent.includes('02:00:00'),
     `idle chip should pick up another tab's viewing, got ${JSON.stringify(getChip().textContent)}`);
   console.log('  ok  an idle page re-reads the day total');
+
+  // -- the number must never go BACKWARDS across a flush -----------------------
+  // The tick loop calls flushAccrual() WITHOUT awaiting it, so it runs as far as
+  // its first await — zeroing pendingSecs — and returns a pending promise. The
+  // very next line of that tick is render(). So the paint lands inside the
+  // handover window, and if those seconds belong to neither counter for its
+  // duration the chip drops by the whole batch and jumps back a tick later.
+  // That is not a slow-round-trip edge case: it happened on EVERY flush, and
+  // read as the timer bouncing around wildly.
+  //
+  // Reproduced the way the tick loop actually runs it — flush un-awaited, paint
+  // immediately after — so a regression cannot hide behind an await this loop
+  // does not perform.
+  resetAccrual();
+  vm.runInContext('dayAnchor = 0; anchorAt = 0; pendingSecs = 0; inFlight = 0;', ctx);
+  let bg = 0;
+  dayTotalReply = 0;
+  const readOut = (s) => Number(String(s).replace(/\D/g, '')) || 0;
+
+  const shown = [];
+  for (let i = 0; i < 12; i++) {
+    tick(1);
+    if (i % 4 === 3) {                       // a flush tick, un-awaited
+      bg += vm.runInContext('pendingSecs', ctx);
+      dayTotalReply = bg;
+      flush();
+    }
+    draw();
+    shown.push(readOut(getChip().textContent));
+    await drain();                           // let the reply land, as a real tick would
+  }
+
+  const back = shown.filter((v, i) => i && v < shown[i - 1]);
+  assert.strictEqual(back.length, 0,
+    `the chip stepped backwards ${back.length} time(s) across flushes: ${shown.join(' ')}`);
+  console.log('  ok  the chip never steps backwards across a flush');
 }
 
 // -- 10. the tracker yields to the manual stopwatch ---------------------------
@@ -535,17 +571,30 @@ async function manualYield() {
     'yielding must publish what was accrued before the stopwatch started');
   console.log('  ok  yielding publishes the seconds accrued before it');
 
+  // ONE chip at a time. timer-overlay.js already has its own chip up and
+  // counting; this one used to sit under it reading "⏸ manual timer" — two
+  // overlays stacked in the corner, the second present only to announce it
+  // wasn't the one working. It stands down instead.
   draw();
-  assert.ok(/manual timer/.test(getChip().textContent),
-    `chip should name the stopwatch, got ${JSON.stringify(getChip().textContent)}`);
-  console.log('  ok  chip says why it stopped');
+  assert.strictEqual(getChip(), null,
+    `the chip must be gone while the stopwatch owns the corner, got ` +
+    JSON.stringify(getChip() && getChip().textContent));
+  console.log('  ok  the chip stands down while the stopwatch is running');
 
   // Armed-but-waiting and paused sessions count nothing, so they must not
-  // suppress real listening — only `timerRunning` does.
+  // suppress real listening — only `timerRunning` does. The chip has to come
+  // BACK for those, or a paused stopwatch would leave the corner empty while
+  // this tracker was the one actually counting.
   setManualTimer(false);
   tick(1); tick(1);
   assert.ok(st.secs > before, 'accrual must resume when the stopwatch stops');
   console.log('  ok  accrual resumes when the stopwatch stops');
+
+  draw();
+  assert.ok(getChip() && /\d\d:\d\d:\d\d/.test(getChip().textContent),
+    `the chip must return when the stopwatch stops, got ` +
+    JSON.stringify(getChip() && getChip().textContent));
+  console.log('  ok  the chip comes back when the stopwatch stops');
 }
 
   clockJumps();

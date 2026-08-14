@@ -1145,12 +1145,48 @@ COVER_MAX_EDGE = 600  # long-edge cap; 2x+ HiDPI headroom over the largest card
 COVER_MAX_B64_BYTES = 6 * 1024 * 1024
 
 
+# Clients send bare base64, but a data URL is the obvious thing to reach for —
+# `FileReader.readAsDataURL` and `canvas.toDataURL` both hand you one, prefix
+# included. That prefix MUST be stripped here rather than trusted to be absent,
+# because base64's alphabet swallows it silently instead of erroring:
+# `data:image/jpeg;base64,` loses only the `:`/`;`/`,` to the decoder's lenient
+# filtering, and the `/` in `image/jpeg` is a legal base64 character. What was
+# left decoded to garbage of a valid length, PIL refused it, the fallback below
+# returned the ORIGINAL string, and `import_cover` stamped a second prefix on the
+# front — storing `data:image/jpeg;base64,data:image/jpeg;base64,…`, a broken
+# <img src> that reported {"stored": True} and, because covers are
+# insert-if-absent, could never be corrected by the client that sent it.
+# (`image/png` and `image/gif` happened to raise on 3 of 4 payload alignments,
+# so this looked format-dependent rather than universal.)
+_COVER_DATA_URL_RE = re.compile(r'^\s*data:[^;,]*;base64,', re.IGNORECASE)
+
+
+def _normalize_cover_b64(b64_str):
+    """Bare, padded base64 from whatever a client actually sent.
+
+    Strips a data-URL prefix and any whitespace (line-wrapped base64 is common),
+    then restores padding some encoders omit. Returning the CLEANED string is the
+    point: every fallback path below hands its input straight back to be stored,
+    so it has to be storable."""
+    s = _COVER_DATA_URL_RE.sub('', b64_str or '')
+    s = ''.join(s.split())
+    if len(s) % 4:
+        s += '=' * (4 - len(s) % 4)
+    return s
+
+
 def _shrink_cover_b64(b64_str):
     """Return (mime, b64) ready for a data URL. Downscales oversized covers with
     Lanczos and re-encodes; passes small/animated images through unchanged. Any
     decode/encode failure (or missing PIL) falls back to the original bytes, so a
-    cover upload never breaks over this."""
-    raw = base64.b64decode(b64_str)
+    cover upload never breaks over this.
+
+    Input is normalized first (see above) and then decoded STRICTLY: the fallback
+    only makes sense for bytes we could not resize, never for bytes we could not
+    decode. Junk raises here and the caller turns it into an error, rather than
+    being stored as a cover that will never render."""
+    b64_str = _normalize_cover_b64(b64_str)
+    raw = base64.b64decode(b64_str, validate=True)
 
     def _sniff(b):
         if b[:4] == b'\x89PNG':                       return 'image/png'
@@ -1197,7 +1233,10 @@ def import_cover(title, cover_b64):
 
     The client does NOT declare a mime type. `_shrink_cover_b64` may re-encode
     the image — a resized PNG comes back as JPEG — so a client-supplied type
-    would be a lie exactly when it mattered. We sniff and use what we produced.
+    would be a lie exactly when it mattered. We sniff and use what we produced,
+    and the `data:…;base64,` prefix we prepend below is the only one there is:
+    `_shrink_cover_b64` strips any the client sent (see the note above it — a
+    doubled prefix used to be stored, permanently, and reported as success).
 
     Note the client cannot ask whether a cover already exists: the always-on
     inbox has no database and cannot answer such a question (see pi/README.md).

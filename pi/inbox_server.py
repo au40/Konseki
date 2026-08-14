@@ -50,6 +50,15 @@ INGEST_PATHS = ("/import", "/log-manual", "/cover")
 # no access to src/, which is the point.
 ALLOWED_ORIGINS = {"https://reader.ttsu.app"}
 
+# Fresh on every start, and served with every /inbox and /pending answer. It is
+# how the desktop notices this process restarted and lost the in-memory caches
+# below — without it, the desktop's push dedup (drain.py) has no way to tell "I
+# already sent this" from "I already sent this, to a process that no longer
+# exists", and a restarted inbox serves DEFAULT_CONFIG forever. Nothing else
+# reads it; it is not persisted, and it must not be — a value that survived a
+# restart would defeat the entire point.
+BOOT_ID = secrets.token_hex(8)
+
 
 def _is_extension_origin(origin):
     return origin.startswith("moz-extension://") or origin.startswith("chrome-extension://")
@@ -196,8 +205,12 @@ class Inbox:
 #
 # Held in memory, not the db, and deliberately so: this file stores payload bytes
 # and nothing else (see the module docstring). Losing them on restart is
-# harmless — the next drain repopulates within a couple of minutes, and clients
-# cache their last known value rather than resetting to the default.
+# harmless ONLY because BOOT_ID tells the desktop it happened — the desktop
+# dedups its pushes by value, so without that signal it would stay silent and
+# this box would serve DEFAULT_CONFIG until a setting happened to change. See
+# _push_settings in src/drain.py; the two halves have to stay in step.
+# Clients cache their last known value rather than resetting to the default,
+# which is what keeps the repopulation window (one drain interval) harmless.
 BUILTIN_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"]
 _activity_types = list(BUILTIN_ACTIVITY_TYPES)
 
@@ -267,7 +280,7 @@ class _Handler(BaseHTTPRequestHandler):
         # can eyeball the backlog from a phone browser with nothing configured.
         # It exposes counts and timestamps, never payload contents.
         if path == "/pending":
-            return self._json(self.inbox.pending())
+            return self._json({**self.inbox.pending(), "boot_id": BOOT_ID})
 
         if not self._token_ok():
             return self._reject(403)
@@ -276,7 +289,9 @@ class _Handler(BaseHTTPRequestHandler):
             since = int((qs.get("since") or ["0"])[0] or 0)
             limit = min(int((qs.get("limit") or ["500"])[0] or 500), 2000)
             rows  = self.inbox.unapplied(since, limit)
-            return self._json({"rows": rows, "count": len(rows)})
+            # boot_id rides along on the call the desktop already makes every
+            # tick, so noticing a restart costs no extra request.
+            return self._json({"rows": rows, "count": len(rows), "boot_id": BOOT_ID})
 
         if path == "/activity-types":
             return self._json(_activity_types)
