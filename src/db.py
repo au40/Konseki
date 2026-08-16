@@ -198,6 +198,40 @@ def init_db():
         con.execute("ALTER TABLE gsm_rollover_attributions_new "
                     "RENAME TO gsm_rollover_attributions")
 
+    # Per-sitting evidence from GSM's /api/today-stats. This is the INPUT the
+    # attribution writer above has always been missing: GSM's other surfaces
+    # (/api/stats, gsm.db's game_daily_rollup) are real-calendar only, so the
+    # live pull could only snapshot a whole day's total and guess how much of it
+    # belonged to the previous logical day. today-stats reports each sitting with
+    # start/end timestamps, which makes that split a computation instead.
+    #
+    # `logical_date` is computed ONCE at ingest and stored, never re-derived on
+    # read. Two reasons: a DST shift would otherwise silently re-bucket a stored
+    # sitting, and changing rollover_hour would retroactively rewrite history as
+    # a side effect of a read. Re-bucketing should be a deliberate migration.
+    #
+    # PK is (game_id, start_ts) — today-stats returns one entry per sitting and
+    # the same game can legitimately appear twice in a window, so the date alone
+    # is not a key. See plans/GSM-TODAY-PLAN.md.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS gsm_session_evidence (
+            game_id      TEXT NOT NULL DEFAULT '',
+            start_ts     REAL NOT NULL,
+            end_ts       REAL,
+            real_date    TEXT NOT NULL,
+            logical_date TEXT NOT NULL,
+            chars        INTEGER NOT NULL DEFAULT 0,
+            secs         REAL    NOT NULL DEFAULT 0,
+            lines        INTEGER NOT NULL DEFAULT 0,
+            updated_at   TEXT    NOT NULL,
+            PRIMARY KEY (game_id, start_ts)
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_evidence_real_date "
+                "ON gsm_session_evidence(real_date)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_evidence_logical_date "
+                "ON gsm_session_evidence(logical_date)")
+
     # Manual time correction overlay, keyed by (DISPLAY date, game_id). secs_delta
     # is signed; negative shaves dead/AFK time GSM stranded on a specific game that
     # day. Applied at read time alongside GSM rollover attribution (see CLAUDE.md),
@@ -611,6 +645,165 @@ def set_rollover_attribution(game_id, source_date, chars, minutes):
     return {"chars": chars, "minutes": round(secs / 60.0, 2)}
 
 
+# ── GSM per-sitting evidence (/api/today-stats) ───────────────────────────────
+# Shadow-phase plumbing for plans/GSM-TODAY-PLAN.md. NOTHING here feeds a display
+# path yet. Evidence is recorded and compared against what the snapshot writer
+# produced, so the Phase 2 cut-over rests on observed data rather than a guess —
+# in particular whether GSM's measured per-sitting seconds agree with the time
+# the live pull derives as chars ÷ speed.
+
+def replace_gsm_evidence(rows):
+    """Record per-sitting evidence, replacing everything from the payload's own
+    earliest sitting forward.
+
+    The replacement floor is min(start_ts) across `rows` — the span GSM is
+    currently claiming authority over. Evidence older than that is never touched,
+    which is what lets us ignore GSM's own rollover-hour setting entirely: we
+    overwrite exactly what GSM just re-reported and keep whatever has since aged
+    out of its window. GSM merging or re-timing sittings inside the window is
+    handled; nothing outside it can be clobbered.
+
+    Known limit: if GSM deletes the EARLIEST sitting of a window, the floor moves
+    later and that stale row survives. Accepted — it fails toward keeping data,
+    and the attribution clamp bounds what a stale row can do.
+
+    Returns the number of rows written."""
+    rows = list(rows or [])
+    if not rows:
+        return 0                      # empty payload deletes nothing
+    floor = min(float(r["start_ts"]) for r in rows)
+    now   = datetime.now().isoformat()
+    con   = sqlite3.connect(DB_PATH)
+    con.execute("DELETE FROM gsm_session_evidence WHERE start_ts >= ?", (floor,))
+    con.executemany("""
+        INSERT OR REPLACE INTO gsm_session_evidence
+          (game_id, start_ts, end_ts, real_date, logical_date,
+           chars, secs, lines, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, [
+        (r.get("game_id") or "", float(r["start_ts"]),
+         float(r["end_ts"]) if r.get("end_ts") else None,
+         r["real_date"], r["logical_date"],
+         int(r.get("chars") or 0), float(r.get("secs") or 0),
+         int(r.get("lines") or 0), now)
+        for r in rows
+    ])
+    con.commit()
+    con.close()
+    return len(rows)
+
+
+def get_gsm_evidence_attributions():
+    """{(rollover_date, source_date, game_id): (chars, secs)} implied by evidence.
+
+    Exactly the shape gsm_rollover_attributions stores — that correspondence is
+    the whole design: Phase 2 writes this map into that table and every existing
+    read path keeps working untouched. Only sittings whose logical date differs
+    from their real date are a displacement; the rest are no-ops by definition."""
+    con  = sqlite3.connect(DB_PATH)
+    rows = con.execute("""
+        SELECT logical_date, real_date, game_id,
+               COALESCE(SUM(chars),0), COALESCE(SUM(secs),0)
+        FROM gsm_session_evidence
+        WHERE logical_date <> real_date
+        GROUP BY logical_date, real_date, game_id
+    """).fetchall()
+    con.close()
+    return {(ld, rd, g): (int(c or 0), float(s or 0)) for ld, rd, g, c, s in rows}
+
+
+def get_gsm_evidence_day_totals():
+    """{(real_date, game_id): (chars, secs, sittings)} — evidence rolled up to the
+    real calendar date, which is the grain the sessions table stores."""
+    con  = sqlite3.connect(DB_PATH)
+    rows = con.execute("""
+        SELECT real_date, game_id, COALESCE(SUM(chars),0),
+               COALESCE(SUM(secs),0), COUNT(*)
+        FROM gsm_session_evidence
+        GROUP BY real_date, game_id
+    """).fetchall()
+    con.close()
+    return {(d, g): (int(c or 0), float(s or 0), int(n or 0))
+            for d, g, c, s, n in rows}
+
+
+def get_gsm_evidence_report():
+    """Shadow-phase comparison: what the snapshot writer recorded vs what the
+    per-sitting evidence says it should have been. One entry per (real_date,
+    game_id) that has evidence, newest first.
+
+    `complete` is the load-bearing field. Characters are reported unambiguously
+    by both sources, so evidence chars == the stored row's chars means evidence
+    saw the whole day and its measured seconds can be trusted for that date. When
+    it's false, evidence is partial: it can only ever UNDER-attribute, which is
+    the current behaviour, never a new failure.
+
+    `secs_delta` is measured-minus-stored on complete days — the number that
+    answers whether GSM's per-sitting seconds agree with chars ÷ speed."""
+    ev_days = get_gsm_evidence_day_totals()
+    if not ev_days:
+        return []
+    ev_attr = get_gsm_evidence_attributions()
+
+    con = sqlite3.connect(DB_PATH)
+    rows = con.execute(
+        "SELECT session_date, COALESCE(game_id,''), chars_read, time_seconds, title "
+        "FROM sessions WHERE source='gsm'"
+    ).fetchall()
+    stored_attr = {
+        (rd, sd, g): (int(c or 0), float(s or 0))
+        for rd, sd, g, c, s in con.execute(
+            "SELECT rollover_date, source_date, game_id, chars, time_seconds "
+            "FROM gsm_rollover_attributions WHERE rollover_date <> source_date"
+        ).fetchall()
+    }
+    # Evidence can name a game the sessions table hasn't got a row for yet (a
+    # game read today but not yet pulled), so fall back to gsm_games rather than
+    # showing a bare UUID in the readout.
+    names = {g: n for g, n in con.execute(
+        "SELECT game_id, game_name FROM gsm_games").fetchall()}
+    con.close()
+    sess = {(d, g): (int(c or 0), float(s or 0), t) for d, g, c, s, t in rows}
+
+    out = []
+    for (d, g), (ev_c, ev_s, n) in ev_days.items():
+        row_c, row_s, title = sess.get((d, g), (0, 0.0, None))
+        # Displacements OUT of this real date, both as recorded and as implied.
+        st_c = st_s = 0
+        for (rd, sd, gg), (c, s) in stored_attr.items():
+            if sd == d and gg == g:
+                st_c += c; st_s += s
+        iv_c = iv_s = 0
+        for (rd, sd, gg), (c, s) in ev_attr.items():
+            if sd == d and gg == g:
+                iv_c += c; iv_s += s
+        complete = (ev_c == row_c)
+        out.append({
+            "real_date":    d,
+            "game_id":      g,
+            "title":        title or names.get(g) or g or "(unknown)",
+            "sittings":     n,
+            "row_chars":    row_c,
+            "row_secs":     round(row_s, 1),
+            "ev_chars":     ev_c,
+            "ev_secs":      round(ev_s, 1),
+            "complete":     complete,
+            "secs_delta":   round(ev_s - row_s, 1) if complete else None,
+            # Inferred, not stored: if evidence covers the day and the row's time
+            # already equals the measured figure, the live pull used it. Saves a
+            # sessions column for a purely diagnostic readout.
+            "time_source":  ("measured" if complete and abs(ev_s - row_s) <= 1.0
+                             else "derived"),
+            "attr_chars_stored":  st_c,
+            "attr_chars_implied": iv_c,
+            "attr_secs_stored":   round(st_s, 1),
+            "attr_secs_implied":  round(iv_s, 1),
+            "agrees": st_c == iv_c and abs(st_s - iv_s) <= 1.0,
+        })
+    out.sort(key=lambda r: (r["real_date"], r["title"]), reverse=True)
+    return out
+
+
 def get_gsm_day_adjustment(d):
     """Return (chars, time_seconds, cards) net adjustment to apply to date d's GSM totals.
     Adds attributions where rollover_date=d (chars belonging to d from another source_date),
@@ -938,16 +1131,29 @@ def get_today_stats():
     # so a shave set on day D lands on D's own row — not on a post-midnight session
     # that merged into D's bucket during the rollover window. This mirrors
     # get_recent_sessions (History), keeping the dashboard and History consistent.
-    rem_by_game = {g: -s for g, s in get_manual_time_adjusts_for_date(today).items() if s < 0}
-    if rem_by_game:
+    # The overlay is signed. A NEGATIVE delta shaves dead time and is spread
+    # across the game's rows until the budget runs out (the rollover bucket can
+    # hold more than one row for a game), floored at zero per row. A POSITIVE
+    # delta credits time GSM under-measured; it needs no budget-spreading and no
+    # floor, so it lands whole on the highest-priority row.
+    day_adj     = get_manual_time_adjusts_for_date(today)
+    rem_by_game = {g: -s for g, s in day_adj.items() if s < 0}
+    add_by_game = {g: s for g, s in day_adj.items() if s > 0}
+    if rem_by_game or add_by_game:
         for i in sorted(range(len(result)), key=lambda i: 0 if result[i][8] == today else 1):
             rid, src, title, atype, chars, lines, secs, gid, sd = result[i]
+            if src != 'gsm':
+                continue
             rem = rem_by_game.get(gid, 0)
-            if src == 'gsm' and rem > 0 and secs > 0:
+            if rem > 0 and secs > 0:
                 take = min(secs, rem)
                 secs -= take
                 rem_by_game[gid] = rem - take
-                result[i] = (rid, src, title, atype, chars, lines, secs, gid, sd)
+            add = add_by_game.get(gid, 0)
+            if add > 0:
+                secs += add
+                add_by_game[gid] = 0
+            result[i] = (rid, src, title, atype, chars, lines, secs, gid, sd)
 
     # Keep session_date as the trailing element: the dashboard needs each real
     # row's true source_date to target the rollover-edit control (phantom rows carry
@@ -1107,17 +1313,27 @@ def get_recent_sessions(limit=30):
             game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
             day_rows.append((None, d, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), gid))
 
-        # Manual overlay for display date d — shave secs off the SPECIFIC game's
+        # Manual overlay for display date d — adjust secs on the SPECIFIC game's
         # row(s), keeping History consistent with the per-game dashboard edit.
+        # Signed: negative shaves (spread across the game's rows, floored at
+        # zero), positive credits time GSM under-measured (lands whole on the
+        # first row). Mirrors get_today_stats — keep the two in step or the
+        # dashboard and History will disagree about which row carries the edit.
         rem_by_game = {g: -s for (dd, g), s in manual.items() if dd == d and s < 0}
-        if rem_by_game:
+        add_by_game = {g: s for (dd, g), s in manual.items() if dd == d and s > 0}
+        if rem_by_game or add_by_game:
             shaved = []
             for rid, sd, src, title, atype, chars, lines, secs, gid in day_rows:
-                rem = rem_by_game.get(gid, 0)
-                if src == 'gsm' and rem > 0 and secs > 0:
-                    take = min(secs, rem)
-                    secs -= take
-                    rem_by_game[gid] = rem - take
+                if src == 'gsm':
+                    rem = rem_by_game.get(gid, 0)
+                    if rem > 0 and secs > 0:
+                        take = min(secs, rem)
+                        secs -= take
+                        rem_by_game[gid] = rem - take
+                    add = add_by_game.get(gid, 0)
+                    if add > 0:
+                        secs += add
+                        add_by_game[gid] = 0
                 if chars == 0 and secs == 0 and (lines or 0) == 0:
                     continue
                 shaved.append((rid, sd, src, title, atype, chars, lines, secs, gid))
@@ -2759,9 +2975,11 @@ def _compute_title_core(title):
     # secs only — chars stay, so speed rises. Rides the same rails as the attribution
     # deduction above (daily_map is keyed by display date, matching the manual key).
     # title_games computed above (shared with the attribution filter).
+    # Signed: a negative delta shaves, a positive one credits time GSM
+    # under-measured. Either way chars stay put, so the per-day speed moves.
     if title_games:
         for (d, g), delta in get_manual_time_adjusts_all().items():
-            if g in title_games and delta < 0 and d in daily_map:
+            if g in title_games and delta and d in daily_map:
                 daily_map[d]["secs"] = max(0.0, daily_map[d]["secs"] + delta)
 
     # Total cards counts EVERY day's cards, even fully-displaced days that get

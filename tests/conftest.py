@@ -31,6 +31,7 @@ assert str(dbm.DB_PATH).startswith(str(_TMP)), (
 _WIPE = (
     "sessions",
     "gsm_rollover_attributions",
+    "gsm_session_evidence",
     "manual_time_adjust",
     "gsm_games",
     "settings",

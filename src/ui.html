@@ -947,6 +947,22 @@
             <input type="number" id="gsm-open-gap" min="0" max="86400" placeholder="0" onchange="saveSettings()" style="max-width:100px">
             <span style="color:var(--text-muted);font-size:13px">seconds (0 = off)</span>
           </div>
+
+          <label style="display:block;margin:16px 0 6px;font-size:13px">GSM per-sitting timestamps <span style="color:var(--text-muted);font-weight:normal">(shadow)</span></label>
+          <p class="muted" style="margin-bottom:8px">GSM's <code>/api/today-stats</code> reports each sitting with a start and end time, and its real measured duration. The normal pull has neither — it works time out by dividing characters by speed, which loses real minutes when that speed figure runs high.</p>
+          <p class="muted" style="margin-bottom:8px"><strong>Shadow</strong> records and compares only; nothing you see changes. <strong>Use measured time</strong> additionally stores GSM's real duration — but only for a day it can prove it saw in full, by matching character counts. Any day it can't, it silently leaves alone, so the worst case is no improvement rather than a wrong number.</p>
+          <div class="settings-row">
+            <select id="gsm-today-stats" onchange="saveSettings()" style="max-width:260px">
+              <option value="off">Off</option>
+              <option value="shadow">Shadow — record and compare</option>
+              <option value="live">Use measured time where verified</option>
+            </select>
+          </div>
+          <div class="settings-row" style="margin-top:12px">
+            <button class="btn btn-outline btn-sm" onclick="refreshGsmEvidence()">Check now</button>
+            <span id="gsm-evidence-status" class="muted" style="font-size:12px"></span>
+          </div>
+          <div id="gsm-evidence-detail" style="margin-top:10px"></div>
         </div>
       </div>
 
@@ -1153,19 +1169,21 @@
   </div>
 </div>
 
-<!-- ── GSM entry adjust modal (subtract dead time / rollover) ──────────── -->
+<!-- ── GSM entry adjust modal (correct time / rollover) ─────────────────── -->
+<!-- The "subtract" ids are historical: the minutes field is now signed, so the
+     same control both removes dead time and adds time GSM under-counted. -->
 <div id="gsm-edit-overlay" style="display:none">
   <div id="gsm-edit-dialog" class="card">
     <h2 style="margin:0 0 14px" id="gsm-edit-title">Adjust entry</h2>
     <div class="seg" id="gsm-edit-seg" style="margin-bottom:16px">
-      <button class="seg-btn active" data-tab="subtract" onclick="switchGsmEditTab('subtract')">Subtract minutes</button>
+      <button class="seg-btn active" data-tab="subtract" onclick="switchGsmEditTab('subtract')">Correct minutes</button>
       <button class="seg-btn" data-tab="rollover" id="gsm-edit-rollover-tab" onclick="switchGsmEditTab('rollover')">Rollover</button>
     </div>
 
     <div class="gsm-edit-pane" id="gsm-edit-pane-subtract">
       <div class="form-group" style="max-width:160px">
-        <label>Minutes</label>
-        <input type="number" id="gsm-edit-sub-minutes" min="0" step="any">
+        <label>Minutes (+ or −)</label>
+        <input type="number" id="gsm-edit-sub-minutes" step="any">
       </div>
       <div class="muted" style="font-size:12px;margin:-4px 0 4px" id="gsm-edit-sub-hint"></div>
     </div>

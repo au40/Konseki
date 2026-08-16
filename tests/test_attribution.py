@@ -171,6 +171,116 @@ class TestManualOverlay:
         assert db.get_all_time_totals()[2] == 0
 
 
+class TestPositiveOverlay:
+    """The overlay is signed. A POSITIVE delta credits time GSM under-measured —
+    the live pull derives time as chars ÷ speed rather than measuring it, so a
+    slightly high speed figure silently loses real minutes.
+
+    Every one of these has a negative twin above; the point is that both signs
+    reach the same surfaces, because the per-row paths used to filter for
+    negatives only while the per-day paths did not."""
+
+    def test_credit_increases_that_day(self, seed, db):
+        d = seed.day(2)
+        seed.gsm(d, chars=10_000, secs=3600, game_id="g1")
+        seed.shave(d, "g1", 309)
+        series = dict((x[0], (x[1], x[2])) for x in db.get_daily_time_series(7))
+        assert series[d] == (3909, 10_000), "time added, chars untouched"
+
+    def test_credit_reaches_the_all_time_total(self, seed, db):
+        d = seed.day(2)
+        seed.gsm(d, chars=1_000, secs=3600, game_id="g1")
+        seed.shave(d, "g1", 309)
+        assert db.get_all_time_totals()[2] == 3909
+
+    def test_credit_lands_on_the_dashboard_row(self, seed, db):
+        """The regression this class exists for: the per-row path filtered for
+        negative deltas, so a credit moved the day total but not the row — the
+        dashboard and its own total would disagree."""
+        d = seed.day(0)
+        seed.gsm(d, chars=1_000, secs=3600, game_id="g1")
+        seed.shave(d, "g1", 309)
+        rows = [r for r in db.get_today_stats() if r[7] == "g1"]
+        assert len(rows) == 1
+        assert rows[0][6] == 3909
+
+    def test_credit_lands_on_the_history_row(self, seed, db):
+        d = seed.day(2)
+        seed.gsm(d, chars=1_000, secs=3600, game_id="g1")
+        seed.shave(d, "g1", 309)
+        rows = [r for r in db.get_recent_sessions(50) if r[8] == "g1"]
+        assert len(rows) == 1
+        assert rows[0][7] == 3909
+
+    def test_dashboard_row_total_matches_the_day_total(self, seed, db):
+        """The cross-surface invariant, stated directly for a credit."""
+        d = seed.day(0)
+        seed.gsm(d, chars=1_000, secs=3600, game_id="g1")
+        seed.shave(d, "g1", 309)
+        row_secs = sum(r[6] for r in db.get_today_stats())
+        series   = dict((x[0], x[1]) for x in db.get_daily_time_series(7))
+        assert row_secs == series[d] == 3909
+
+    def test_credit_targets_only_its_own_game(self, seed, db):
+        d = seed.day(0)
+        seed.gsm(d, chars=1_000, secs=3600, game_id="g1", title="One")
+        seed.gsm(d, chars=2_000, secs=1800, game_id="g2", title="Two")
+        seed.shave(d, "g1", 309)
+        by_game = {r[7]: r[6] for r in db.get_today_stats()}
+        assert by_game["g1"] == 3909
+        assert by_game["g2"] == 1800
+
+    def test_credit_lands_once_across_a_games_rows(self, seed, db):
+        """A game can hold two rows in today's bucket — its own, plus a phantom
+        synthesized from reading displaced in from another date. A credit needs
+        no budget-spreading, so it must land WHOLE on one row, not on each.
+
+        Built from a displacement rather than the rollover window so it doesn't
+        depend on the clock: one GSM row per (game, date) is enforced by
+        idx_gsm_one_row_per_day, so a second row for one game can only be a
+        phantom."""
+        today, prev = seed.day(0), seed.day(1)
+        seed.gsm(today, chars=1_000, secs=1800, game_id="g1")
+        seed.gsm(prev,  chars=500,   secs=900,  game_id="g1")
+        seed.displace(today, prev, "g1", chars=500, secs=900)
+        seed.shave(today, "g1", 300)
+
+        rows = [r for r in db.get_today_stats() if r[7] == "g1"]
+        assert len(rows) == 2, "own row plus the phantom"
+        # The credit lands once, on the row that is natively today's.
+        assert sorted(r[6] for r in rows) == [900, 2100]
+        assert sum(r[6] for r in rows) == 3000
+
+    def test_credit_affects_per_title_speed(self, seed, db):
+        """Chars stay, time grows, so reading speed FALLS — the mirror of a shave
+        raising it. Derived from the displayed chars/time, never the stored
+        reading_speed column."""
+        d = seed.day(2)
+        seed.gsm(d, chars=7200, secs=3600, game_id="g1", title="One")
+        core = db._compute_title_core("One")
+        assert core["daily"][-1]["speed"] == pytest.approx(7200)
+        seed.shave(d, "g1", 3600)
+        core = db._compute_title_core("One")
+        assert core["daily"][-1]["speed"] == pytest.approx(3600)
+
+    def test_credit_and_displacement_together(self, seed, db):
+        src, roll = seed.day(3), seed.day(4)
+        seed.gsm(src, chars=10_000, secs=3600, game_id="g1")
+        seed.displace(roll, src, "g1", chars=4_000, secs=1200)
+        seed.shave(src, "g1", 309)
+        series = dict((x[0], (x[1], x[2])) for x in db.get_daily_time_series(10))
+        assert series[src] == (3600 - 1200 + 309, 6_000)
+        assert series[roll] == (1200, 4_000)
+
+    def test_zero_still_clears(self, seed, db):
+        d = seed.day(2)
+        seed.gsm(d, chars=1_000, secs=3600, game_id="g1")
+        seed.shave(d, "g1", 309)
+        seed.shave(d, "g1", 0)
+        assert db.get_manual_time_adjust(d, "g1") in (0, 0.0, None)
+        assert db.get_gsm_day_adjustment(d)[1] == 0
+
+
 # ── The cross-surface invariant ────────────────────────────────────────────
 def _scenarios(seed):
     """Every overlay combination, as (name, builder). Each builder seeds rows and

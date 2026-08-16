@@ -388,7 +388,8 @@ function wireEditLogBtn(el, s) {
 
 function makeSessionRow(s) {
   const color  = acolor(s.activity_type);
-  const shaved = s.adjust_secs ? Math.round(-s.adjust_secs / 60) : 0;
+  // Signed: a negative overlay reads "−Nm dead time", a positive one "+Nm added".
+  const adjM = s.adjust_secs ? Math.round(s.adjust_secs / 60) : 0;
   const el     = document.createElement('div');
   el.className = 'session-row';
   el.innerHTML = `
@@ -400,7 +401,7 @@ function makeSessionRow(s) {
     <div class="session-right">
       ${s.seconds > 0 ? `<span class="session-time" style="color:${color}">${fmtTime(s.seconds)}</span>` : ''}
       ${s.chars   > 0 ? `<span class="session-chars">${fmtChars(s.chars)} chars</span>` : ''}
-      ${shaved > 0 ? `<span class="session-chars" style="color:var(--warn)">−${shaved}m dead time</span>` : ''}
+      ${adjM ? `<span class="session-chars" style="color:var(--warn)">${adjM < 0 ? `−${-adjM}m dead time` : `+${adjM}m added`}</span>` : ''}
       <button class="btn btn-xs btn-danger" onclick="doDeleteSession(${s.id}, this)">✕</button>
       ${editTimeBtnHtml(s)}
       ${editLogBtnHtml(s)}
@@ -421,7 +422,7 @@ function makeGroupedSessionRow(sessions) {
   sessions.forEach(r => {
     if (r.game_id && !(r.game_id in seenG)) { seenG[r.game_id] = 1; shaved += (r.adjust_secs || 0); }
   });
-  const shavedM = shaved ? Math.round(-shaved / 60) : 0;
+  const shavedM = shaved ? Math.round(shaved / 60) : 0;   // signed, as above
   const color = acolor(s.activity_type);
   const ids   = sessions.map(r => r.id);
   const el    = document.createElement('div');
@@ -436,7 +437,7 @@ function makeGroupedSessionRow(sessions) {
     <div class="session-right">
       ${totalSeconds > 0 ? `<span class="session-time" style="color:${color}">${fmtTime(totalSeconds)}</span>` : ''}
       ${totalChars   > 0 ? `<span class="session-chars">${fmtChars(totalChars)} chars</span>` : ''}
-      ${shavedM > 0 ? `<span class="session-chars" style="color:var(--warn)">−${shavedM}m dead time</span>` : ''}
+      ${shavedM ? `<span class="session-chars" style="color:var(--warn)">${shavedM < 0 ? `−${-shavedM}m dead time` : `+${shavedM}m added`}</span>` : ''}
       <button class="btn btn-xs btn-danger" onclick="doDeleteSessionGroup([${ids.join(',')}], this)">✕</button>
       ${editTimeBtnHtml(s)}
     </div>`;
@@ -471,9 +472,10 @@ async function openGsmEdit(s, allowRollover = true) {
   document.getElementById('gsm-edit-title').textContent = `Adjust “${s.title || 'entry'}”`;
 
   const sub = await window.pywebview.api.get_game_time_adjust(gameId, displayDate);
-  document.getElementById('gsm-edit-sub-minutes').value = sub.subtract_minutes || 0;
+  document.getElementById('gsm-edit-sub-minutes').value = sub.adjust_minutes || 0;
   document.getElementById('gsm-edit-sub-hint').textContent =
-    `Remove dead/AFK time from this game on ${displayDate}. 0 clears.`;
+    `Correct this game's time on ${displayDate}. Negative removes dead/AFK time; ` +
+    `positive adds time GSM under-counted. 0 clears.`;
 
   const rollTab = document.getElementById('gsm-edit-rollover-tab');
   if (showRollover) {
@@ -509,12 +511,17 @@ async function submitGsmEdit() {
   const fb  = document.getElementById('gsm-edit-feedback');
   const num = v => (v.trim() === '' ? 0 : Number(v.trim()));
 
+  // The time correction is SIGNED (negative removes, positive adds). The
+  // rollover fields stay non-negative — a displacement is an amount moved, and
+  // is separately capped to the row's own totals server-side.
   const subMins = num(document.getElementById('gsm-edit-sub-minutes').value);
   const chars   = num(document.getElementById('gsm-edit-roll-chars').value);
   const rollMin = num(document.getElementById('gsm-edit-roll-minutes').value);
-  if (isNaN(subMins) || subMins < 0 ||
-      isNaN(chars) || chars < 0 || isNaN(rollMin) || rollMin < 0) {
-    fb.className = 'feedback err'; fb.textContent = 'Enter non-negative numbers.'; return;
+  if (isNaN(subMins)) {
+    fb.className = 'feedback err'; fb.textContent = 'Enter a number of minutes.'; return;
+  }
+  if (isNaN(chars) || chars < 0 || isNaN(rollMin) || rollMin < 0) {
+    fb.className = 'feedback err'; fb.textContent = 'Rollover amounts must be non-negative.'; return;
   }
 
   const { gameId, displayDate, sourceDate, showRollover } = gsmEditCtx;
@@ -5503,6 +5510,8 @@ async function loadSettings() {
   document.getElementById('rollover-hour').value       = String(s.rollover_hour || 0);
   document.getElementById('gsm-debounce').value        = s.gsm_debounce_secs || 60;
   document.getElementById('gsm-open-gap').value         = s.gsm_open_gap_secs ?? 0;
+  const todayStatsEl = document.getElementById('gsm-today-stats');
+  if (todayStatsEl) todayStatsEl.value = s.gsm_today_stats || 'off';
   document.getElementById('ext-host').value            = s.ext_host  || '127.0.0.1';
   document.getElementById('ext-port').value            = s.ext_port  || 18463;
   document.getElementById('ext-token').value           = s.ext_token || '';
@@ -5664,10 +5673,75 @@ async function saveSettings() {
   const gsm_debounce_secs = parseInt(document.getElementById('gsm-debounce').value) || 60;
   const gapRaw = document.getElementById('gsm-open-gap').value;
   const gsm_open_gap_secs = gapRaw === '' ? 0 : (parseInt(gapRaw) || 0);
-  appSettings = { ...appSettings, rollover_hour: rollover, gsm_url, gsm_debounce_secs, gsm_open_gap_secs };
-  await window.pywebview.api.save_settings({ rollover_hour: rollover, gsm_url, gsm_debounce_secs, gsm_open_gap_secs });
+  const tsEl = document.getElementById('gsm-today-stats');
+  const gsm_today_stats = tsEl ? tsEl.value : 'off';
+  appSettings = { ...appSettings, rollover_hour: rollover, gsm_url, gsm_debounce_secs, gsm_open_gap_secs, gsm_today_stats };
+  await window.pywebview.api.save_settings({ rollover_hour: rollover, gsm_url, gsm_debounce_secs, gsm_open_gap_secs, gsm_today_stats });
   scheduleRolloverRefresh();
   setStatus('Settings saved');
+}
+
+// Shadow-phase readout for plans/GSM-TODAY-PLAN.md. Pulls fresh evidence, then
+// shows what the per-sitting timestamps say the rollover split should have been
+// versus what the snapshot writer recorded. Read-only — nothing here writes.
+async function refreshGsmEvidence() {
+  const st  = document.getElementById('gsm-evidence-status');
+  const box = document.getElementById('gsm-evidence-detail');
+  if (!st || !box) return;
+  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  st.textContent = 'Checking…';
+  box.innerHTML  = '';
+  try {
+    const pull = await window.pywebview.api.gsm_collect_evidence_now();
+    const r    = await window.pywebview.api.gsm_evidence_report();
+    if (r.mode === 'off') {
+      st.textContent = 'Shadow mode is off — switch it on above to start recording.';
+      return;
+    }
+    if (!pull.ok) {
+      st.textContent = `Could not reach /api/today-stats (${pull.error}). Showing what was already recorded.`;
+    } else {
+      st.textContent = `${r.days} day/game record${r.days === 1 ? '' : 's'}, ${r.complete} complete.`;
+    }
+    if (!r.days) {
+      box.innerHTML = '<p class="muted" style="font-size:12px">Nothing recorded yet. Evidence is captured on each GSM pull.</p>';
+      return;
+    }
+    const delta = r.mean_secs_delta === null
+      ? '<span class="muted">not enough complete days yet</span>'
+      : `${r.mean_secs_delta > 0 ? '+' : ''}${r.mean_secs_delta}s average, ${r.max_secs_delta > 0 ? '+' : ''}${r.max_secs_delta}s worst`;
+    const rows = r.rows.slice(0, 14).map(d => `
+      <tr>
+        <td>${d.real_date}</td>
+        <td>${esc(d.title)}</td>
+        <td style="text-align:right">${d.sittings}</td>
+        <td style="text-align:right">${d.complete ? '✓' : '<span class="muted">partial</span>'}</td>
+        <td style="text-align:right">${d.time_source === 'measured'
+            ? '<span style="color:var(--ok,inherit)">measured</span>'
+            : '<span class="muted">calculated</span>'}</td>
+        <td style="text-align:right">${d.secs_delta === null ? '—' : (d.secs_delta > 0 ? '+' : '') + d.secs_delta + 's'}</td>
+        <td style="text-align:right">${d.attr_chars_stored} → ${d.attr_chars_implied}${d.agrees ? '' : ' <strong>≠</strong>'}</td>
+      </tr>`).join('');
+    box.innerHTML = `
+      <p class="muted" style="font-size:12px;margin-bottom:8px">
+        Using GSM's measured time on <strong>${r.applied}</strong> of ${r.days}.
+        Gap where it isn't: ${delta}.
+        Split disagreements: <strong>${r.disagree}</strong> of ${r.days}.
+      </p>
+      <div style="overflow-x:auto">
+        <table style="font-size:12px;width:100%;border-collapse:collapse">
+          <thead><tr style="text-align:left;color:var(--text-muted)">
+            <th>Date</th><th>Title</th><th style="text-align:right">Sittings</th>
+            <th style="text-align:right">Saw all</th><th style="text-align:right">Time from</th>
+            <th style="text-align:right">Time Δ</th>
+            <th style="text-align:right">Rolled chars</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  } catch (e) {
+    st.textContent = `Error: ${e}`;
+  }
 }
 
 async function doTestGSM() {

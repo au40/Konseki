@@ -45,6 +45,7 @@ from db import (
     get_streak, get_top_titles, get_heatmap_data,
     get_manual_time_adjust, set_manual_time_adjust, get_manual_time_adjusts_for_date,
     get_manual_time_adjusts_all,
+    get_gsm_evidence_report,
     get_media_stats, get_media_shelf, get_media_titles, get_series_data,
     get_title_streams, get_title_speed_distributions, get_activity_trend,
     get_extra_stats, get_range_extra_stats,
@@ -636,21 +637,27 @@ class Api:
 
     # ── Manual per-game time adjustment ─────────────────────────────────────────
     def get_game_time_adjust(self, game_id, session_date=None):
-        """Current manual subtraction (in minutes) for one game on a display date."""
+        """Current manual time adjustment (in minutes) for one game on a display
+        date. SIGNED, matching the table's own convention: negative removes dead
+        time, positive credits time GSM under-measured."""
         d = session_date or get_today()
         return {"date": d, "game_id": game_id,
-                "subtract_minutes": round(-get_manual_time_adjust(d, game_id) / 60, 1)}
+                "adjust_minutes": round(get_manual_time_adjust(d, game_id) / 60, 1)}
 
-    def set_game_time_adjust(self, game_id, subtract_minutes, session_date=None):
-        """Subtract `subtract_minutes` of dead/AFK time from one game on a display
-        date. 0 clears it. Survives GSM re-ingests (separate overlay table)."""
+    def set_game_time_adjust(self, game_id, adjust_minutes, session_date=None):
+        """Adjust one game's time on a display date by a SIGNED number of minutes.
+
+        Negative shaves dead/AFK time GSM over-counted; positive credits time it
+        under-counted — the live pull derives time as chars ÷ speed rather than
+        measuring it, so a slightly high speed figure loses real minutes. 0
+        clears the override. Survives GSM re-ingests (separate overlay table)."""
         try:
             if not game_id:
                 return {"ok": False, "error": "no game_id (only GSM games can be adjusted)"}
             d = session_date or get_today()
             datetime.strptime(d, "%Y-%m-%d")
-            mins = max(0.0, float(subtract_minutes))
-            set_manual_time_adjust(d, game_id, -mins * 60 if mins else 0)
+            mins = float(adjust_minutes)
+            set_manual_time_adjust(d, game_id, mins * 60 if mins else 0)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -753,6 +760,36 @@ class Api:
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    # ── GSM per-sitting evidence (shadow phase) ───────────────────────────────
+    # plans/GSM-TODAY-PLAN.md. Read-only readout of what /api/today-stats says
+    # the rollover split should have been, versus what the snapshot writer
+    # actually recorded. Nothing here changes a displayed number.
+    def gsm_evidence_report(self):
+        rows = get_gsm_evidence_report()
+        complete = [r for r in rows if r["complete"]]
+        deltas   = [r["secs_delta"] for r in complete if r["secs_delta"] is not None]
+        return {
+            "ok":        True,
+            "mode":      imports.today_stats_mode(),
+            "rows":      rows,
+            "days":      len(rows),
+            "complete":  len(complete),
+            "applied":   sum(1 for r in rows if r["time_source"] == "measured"),
+            "disagree":  sum(1 for r in rows if not r["agrees"]),
+            # The Phase 2 gate: mean measured-minus-derived seconds on days where
+            # evidence saw everything. Near zero means GSM's per-sitting seconds
+            # and chars ÷ speed agree, and the live row can switch to measured.
+            "mean_secs_delta": round(sum(deltas) / len(deltas), 1) if deltas else None,
+            "max_secs_delta":  round(max(deltas, key=abs), 1) if deltas else None,
+        }
+
+    def gsm_collect_evidence_now(self):
+        """Force an out-of-band evidence pull, so the Settings readout doesn't
+        have to wait for the next WAL-triggered pull."""
+        return imports.collect_today_stats_evidence(
+            get_setting("gsm_url", imports.GSM_API)
+        )
 
     # ── GSM history import (reads GSM's local SQLite) ─────────────────────────
     def gsm_list_games(self):
@@ -1145,6 +1182,7 @@ class Api:
             "gsm_debounce_secs": int(get_setting("gsm_debounce_secs", "60")),
             "gsm_settle_secs":  int(get_setting("gsm_settle_secs", "180")),
             "gsm_open_gap_secs": int(get_setting("gsm_open_gap_secs", "0")),
+            "gsm_today_stats":  get_setting("gsm_today_stats", "off"),
             "first_run_complete":         get_setting("first_run_complete", "0") == "1",
             "gsm_history_include_time":   get_setting("gsm_history_include_time", "0") == "1",
             "ttsu_history_include_time":  get_setting("ttsu_history_include_time", "0") == "1",

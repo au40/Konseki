@@ -260,6 +260,73 @@ explicitly (a closed calendar day can only grow via tail, so absorbing its
 growth needs no chars guard) — but it turns ambiguous on days that mixed a
 rollover session with later same-day reading, which again points to `game_lines`.
 
+# `gsm_session_evidence` — per-sitting timestamps, currently INERT
+
+The `gsm_session_evidence` table ([db.py](src/db.py)) records one row per GSM
+sitting from `/api/today-stats`: `game_id`, `start_ts`, `end_ts`, `real_date`,
+`logical_date`, chars, secs, lines. It is the shadow phase of
+[plans/GSM-TODAY-PLAN.md](plans/GSM-TODAY-PLAN.md).
+
+**No display path reads it directly, and it is not a second source of session
+rows — do not wire it up as one.** The invariant at the top of this file does
+*not* apply to it: reading it alongside the `sessions` rows it describes would
+double-count. It has exactly two consumers:
+
+1. `resolve_gsm_time_seconds` ([imports.py](src/imports.py)) — supplies
+   **measured** `time_seconds` for the row the live pull is about to write.
+2. `get_gsm_evidence_report` ([db.py](src/db.py)) — the read-only Settings →
+   Advanced readout.
+
+Written by `collect_today_stats_evidence`, gated on the `gsm_today_stats`
+setting (`off` | `shadow` | `live`).
+
+## Measured time replaces the chars ÷ speed derivation — but only when proven
+
+The live pull has never measured time; it divides the day's characters by GSM's
+reported speed ([imports.py](src/imports.py)). When that speed figure runs
+slightly high the row silently loses real minutes — 309s vanished from a single
+observed day, matching the measured-vs-derived gap exactly.
+
+In `live` mode `resolve_gsm_time_seconds` stores GSM's measured seconds instead,
+**gated on an exact character match** between the evidence and the day's
+authoritative character count. Both sources report characters unambiguously, so
+equality means every sitting is accounted for. Partial evidence, no evidence, an
+unreachable endpoint, or any other mode falls through to the derivation
+unchanged. **The failure mode is "no improvement", never "under-reported time"** —
+keep it that way if you touch it.
+
+Two consequences worth knowing:
+
+- **Ordering is load-bearing.** Evidence must be captured *before* the session
+  row is written, or the row can only ever see the previous pull's evidence.
+  `TestPullIntegration` pins this.
+- **The gate is only as good as the character count it compares against.** If
+  `characterActivityData` is an all-games total (see the multi-game note at that
+  lookup), a multi-game day can never match and the pull quietly stays on the
+  derivation. The readout's `time_source` column is what makes that visible —
+  a day stuck on "calculated" with complete-looking evidence is the symptom.
+
+Three things worth knowing if you touch it:
+
+- **`logical_date` is computed once at ingest and stored, never re-derived on
+  read.** A DST shift would otherwise silently re-bucket a stored sitting, and
+  changing `rollover_hour` would rewrite history as a side effect of a read.
+- **The replacement floor is `min(start_ts)` of the incoming payload**, not "all
+  of today". Evidence older than the window GSM is currently reporting on must
+  survive. This is what lets us ignore GSM's own rollover-hour setting: GSM's
+  setting decides which sittings appear, the tracker's decides which logical day
+  each belongs to. The two drifting apart costs coverage, never correctness.
+- **A sitting straddling the rollover hour is assigned wholly by `start_ts`.**
+  Splitting it would need the per-line timestamps this design deliberately
+  doesn't read.
+
+The eventual plan is to repoint `gsm_rollover_attributions`' *writer* at this
+table — the schema of `get_gsm_evidence_attributions()` output is already
+`(rollover_date, source_date, game_id) → (chars, secs)` for exactly that reason.
+The table itself and every read path stay. A full sunset was considered and
+rejected: `sessions.session_date` must stay real-calendar to join against
+`gsm.db`'s `game_daily_rollup`, which has no rollover concept.
+
 # Manual per-game time overlay (`manual_time_adjust`)
 
 The `manual_time_adjust` table (defined in [db.py](src/db.py)) is the user's escape
@@ -282,7 +349,16 @@ manual_time_adjust (
 )
 ```
 
-`secs_delta` is signed but the UI only ever writes **negative** (subtract). The
+`secs_delta` is signed and the UI writes **both signs**. Negative shaves dead/AFK
+time GSM over-counted. Positive credits time it *under*-counted — the live pull
+derives time as `chars ÷ speed` rather than measuring it, so a slightly high
+speed figure silently loses real minutes (observed: 309s missing from a single
+day, exactly matching the measured-vs-derived gap the today-stats readout
+reports). The two signs apply differently in the per-row paths: a shave carries a
+**budget spread across the game's rows and floored at zero**, while a credit needs
+neither, so it lands **whole on the highest-priority row**. Keep `get_today_stats`
+and `get_recent_sessions` in step here or the dashboard and History will disagree
+about which row carries the edit. The
 key is `(display date, game_id)`: the date is the logical/display date
 (`get_today()` for "today"), the same date a `rollover_date` uses — never a raw
 `session_date`; `game_id` is the GSM game's stable id (survives the re-ingest that

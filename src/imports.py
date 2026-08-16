@@ -18,10 +18,13 @@ from pathlib import Path
 from datetime import datetime, date, timedelta
 from db import (DB_PATH, get_today, get_today_date, _q1,
                 in_rollover_window, upsert_gsm_attribution,
-                refresh_gsm_attribution_tail, get_setting)
+                refresh_gsm_attribution_tail, get_setting,
+                logical_date_for, replace_gsm_evidence,
+                get_gsm_evidence_day_totals)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-GSM_API = "http://localhost:7275/api/stats"
+GSM_API       = "http://localhost:7275/api/stats"
+GSM_TODAY_API = "http://localhost:7275/api/today-stats"
 
 
 # ── GSM local DB access (read-only) ───────────────────────────────────────────
@@ -611,6 +614,139 @@ def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_hea
     return inserted
 
 
+# ── GSM per-sitting evidence (/api/today-stats) ───────────────────────────────
+# Shadow phase of plans/GSM-TODAY-PLAN.md. See the matching section in db.py:
+# this records WHEN each sitting happened so the rollover split can become a
+# computation instead of the snapshot-and-guess below. Nothing here writes a
+# session row or an attribution.
+
+def today_stats_mode():
+    """'off' | 'shadow' | 'live'.
+
+    off    — endpoint never called.
+    shadow — evidence recorded and compared; no displayed number changes.
+    live   — evidence additionally supplies MEASURED time where it covers a whole
+             day (see resolve_gsm_time_seconds)."""
+    return get_setting("gsm_today_stats", "off")
+
+
+def resolve_gsm_time_seconds(game_id, real_date, chars, derived_secs):
+    """Time for a GSM session row: GSM's MEASURED seconds when per-sitting
+    evidence covers the whole day, otherwise the chars ÷ speed derivation.
+
+    The live pull has never measured time — it divides the day's characters by
+    GSM's reported speed. When that speed figure runs slightly high the row
+    silently loses real minutes (observed: 309s lost from a single day, which
+    matched the measured-vs-derived gap exactly). today-stats reports each
+    sitting's measured seconds, so where evidence is complete we can store the
+    real number instead of inferring it.
+
+    "Complete" is an exact character match between the evidence and the day's
+    authoritative character count. Both sources report characters unambiguously,
+    so equality means every sitting is accounted for.
+
+    **This can only ever act when it has verified it saw everything.** Partial
+    evidence, no evidence, an unreachable endpoint, or a mode other than 'live'
+    all fall through to the existing derivation untouched. So the failure mode is
+    "no improvement", never "under-reported time".
+
+    One case where it will decline more often than you'd expect: if `chars` is an
+    all-games total while evidence is per-game, a multi-game day can never match.
+    That's the open question at imports.py's characterActivityData lookup — the
+    readout's time_source column is what makes it visible.
+
+    Returns (seconds, 'measured' | 'derived')."""
+    if today_stats_mode() != "live":
+        return derived_secs, "derived"
+    ev = get_gsm_evidence_day_totals().get((real_date, game_id or ""))
+    if not ev:
+        return derived_secs, "derived"
+    ev_chars, ev_secs, _ = ev
+    if ev_chars != int(chars or 0) or ev_secs <= 0:
+        return derived_secs, "derived"
+    return float(ev_secs), "measured"
+
+
+def _today_stats_url(stats_url=None):
+    """Derive the today-stats endpoint from the configured /api/stats URL so the
+    user only ever configures one address. Falls back to the default when the
+    configured URL isn't the shape we expect."""
+    base   = (stats_url or GSM_API or "").strip()
+    suffix = "/api/stats"
+    if base.endswith(suffix):
+        return base[:-len(suffix)] + "/api/today-stats"
+    return GSM_TODAY_API
+
+
+def parse_today_stats(payload):
+    """GSM /api/today-stats payload → per-sitting evidence rows.
+
+    Pure — no DB, no network. Its only external input is the tracker's own
+    rollover_hour, via logical_date_for.
+
+    It deliberately does NOT consult GSM's rollover-hour setting. GSM's setting
+    decides which sittings appear in the payload; ours decides which logical day
+    each one belongs to. Keeping those separate means the two drifting apart
+    costs coverage, never correctness.
+
+    A sitting is assigned WHOLLY by its start time. One straddling the rollover
+    hour (03:30–04:30 with rollover 4) counts entirely to the previous logical
+    day. Splitting it accurately would need per-line timestamps, which this
+    design deliberately doesn't use; the error is bounded by one sitting and only
+    arises when reading spans the rollover hour exactly.
+
+    Note `todayTotalHours` in the payload is rounded to one decimal and is never
+    used — per-sitting `totalSeconds` is the only usable time figure."""
+    out = {}
+    for s in ((payload or {}).get("sessions") or []):
+        try:
+            start = float(s.get("startTime") or 0)
+        except (TypeError, ValueError):
+            continue
+        if start <= 0:
+            continue
+        try:
+            end = float(s.get("endTime") or 0) or None
+        except (TypeError, ValueError):
+            end = None
+        when = datetime.fromtimestamp(start)
+        gid  = (s.get("gameMetadata") or {}).get("game_id") or ""
+        # Collisions aren't expected: two sittings of one game have different
+        # start times, so a repeated key is a duplicated entry rather than a
+        # second sitting. Last wins, which keeps a re-pull idempotent.
+        out[(gid, start)] = {
+            "game_id":      gid,
+            "start_ts":     start,
+            "end_ts":       end,
+            "real_date":    when.date().isoformat(),
+            "logical_date": logical_date_for(when),
+            "chars":        int(s.get("totalChars") or 0),
+            "secs":         float(s.get("totalSeconds") or 0),
+            "lines":        len(s.get("lines") or []),
+        }
+    return sorted(out.values(), key=lambda r: r["start_ts"])
+
+
+def collect_today_stats_evidence(url=None):
+    """Fetch /api/today-stats and record per-sitting evidence.
+
+    Never raises: a GSM too old to serve this endpoint, or a transient network
+    error, must not break the pull it rides along with."""
+    target = _today_stats_url(url)
+    try:
+        r = requests.get(target, timeout=5)
+        r.raise_for_status()
+        rows = parse_today_stats(r.json())
+    except requests.exceptions.RequestException as e:
+        return {"ok": False, "error": type(e).__name__}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    try:
+        return {"ok": True, "sittings": replace_gsm_evidence(rows)}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
 def pull_gsm_api_only(url=None):
     """Original /api/stats-based pull. Computes today's time via chars/speed.
     Kept as a fallback for when GSM's local SQLite isn't available, and as a
@@ -643,7 +779,20 @@ def pull_gsm_api_only(url=None):
                           .get(today_year, {}).get(real_date, 0)
         if not today_speed:
             today_speed = (data.get("allGamesStats") or {}).get("reading_speed", 0)
-        time_seconds = (today_chars / today_speed * 3600) if today_speed > 0 else 0
+        derived_secs = (today_chars / today_speed * 3600) if today_speed > 0 else 0
+
+        # Per-sitting evidence, captured BEFORE the row is written so this pull
+        # can use GSM's measured seconds instead of the derivation above. Errors
+        # are swallowed: a GSM too old to serve the endpoint just leaves us on
+        # the derived path, which is the pre-existing behaviour.
+        if today_stats_mode() != "off":
+            ev = collect_today_stats_evidence(target)
+            if not ev.get("ok"):
+                print(f"[gsm] today-stats evidence unavailable: {ev.get('error')}")
+
+        time_seconds, time_source = resolve_gsm_time_seconds(
+            game_id, real_date, today_chars, derived_secs
+        )
 
         # Cards are no longer tracked — stored as 0 (column kept for schema compat).
         today_cards = 0
@@ -659,8 +808,14 @@ def pull_gsm_api_only(url=None):
             "chars_read":    int(today_chars),
             "lines_read":    0,
             "time_seconds":  float(time_seconds),
+            # Still GSM's REPORTED speed, not chars ÷ our stored time. This is a
+            # diagnostic audit field ("what the source told us") that no read
+            # path consults — every displayed chars/hour is recomputed from the
+            # chars and time actually shown. See the reading-speed invariant in
+            # CLAUDE.md. On a measured-time row it deliberately won't reconcile.
             "reading_speed": float(today_speed),
             "cards_mined":   0,
+            "time_source":   time_source,
         }
 
         # One session row PER GAME per real date (matching the
