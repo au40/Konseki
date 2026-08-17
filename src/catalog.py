@@ -15,13 +15,19 @@ Two jobs:
      tracker (manual baseline + accumulated session growth; never auto-decreases).
 
 A "book" for the Total-books metric is 7 manga volumes OR 100,000 chars.
+
+Reading type is inferred from the session source (`_SRC_RANK`), and it decides
+which of those two arms a row scores through. Only `mangawari` yields 'manga';
+GSM yields 'game' and ttsu 'book', and every other source (youtube, manual,
+CSV, ext) falls back to 'book'. That fallback is why a manga title used to score
+zero — filed as a book, it scored on characters, and manga reports none.
 """
 
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-from db import DATA_DIR, DB_PATH, _get_aliases
+from db import DATA_DIR, DB_PATH, _get_aliases, _series_grouping
 
 CATALOG_DB = DATA_DIR / "catalog.db"
 
@@ -52,6 +58,20 @@ def init_catalog_db():
             updated_at    TEXT NOT NULL
         )
     """)
+
+    # volumes_auto: this row's `volumes` is DERIVED from completion marks, not
+    # typed by the user, so sync may recompute it. Only auto-added manga rows
+    # get it. Defaulting to 0 is what makes the migration safe — every existing
+    # row is treated as hand-managed and its volume count is never touched.
+    #
+    # It exists because `linked` cannot answer the question: a hand-typed row
+    # whose name later matches a session title gets adopted (linked=1) while
+    # its volume count is still the user's, and deriving over that would erase
+    # a number they entered.
+    cols = [r[1] for r in con.execute("PRAGMA table_info(catalog)").fetchall()]
+    if "volumes_auto" not in cols:
+        con.execute("ALTER TABLE catalog ADD COLUMN volumes_auto INTEGER NOT NULL DEFAULT 0")
+
     con.commit()
     con.close()
 
@@ -67,13 +87,26 @@ def book_equiv(reading_type, chars, volumes):
     return (chars or 0) / CHARS_PER_BOOK
 
 
+# Source → reading_type, most specific wins. Ranked explicitly rather than
+# leaning on MAX()'s alphabetical order over the type names: that happened to
+# yield manga > game > book, but it is an accident of spelling, and a future
+# source called 'anime' would have sorted below 'book' and silently lost.
+_SRC_RANK = {"mangawari": 3, "gsm": 2, "ttsu": 1}
+_RANK_TYPE = {3: "manga", 2: "game", 1: "book"}
+
+
 def _session_title_totals():
     """{title: (all_time_chars, src_type_hint)} from tracker.db, read-only.
 
     The per-title all-time char SUM is overlay-invariant: GSM rollover attribution
     nets to zero per title across all-time and the manual overlay is time-only, so
     this raw sum already matches the Media grid's total_chars (db.get_media_stats).
-    Do not apply any overlay here."""
+    Do not apply any overlay here.
+
+    `src_type_hint` is None for sources with no opinion (youtube, manual, ext),
+    which `sync_catalog` resolves to 'book' — the historical fallback. Only
+    mangawari maps to 'manga', because it is the sole source that reports a
+    volume rather than a character count."""
     if not Path(DB_PATH).exists():
         return {}
     con = sqlite3.connect(DB_PATH)
@@ -81,28 +114,52 @@ def _session_title_totals():
         rows = con.execute("""
             SELECT title,
                    COALESCE(SUM(chars_read), 0) AS chars,
-                   MAX(CASE WHEN source = 'gsm'      THEN 'game'
-                            WHEN source LIKE 'ttsu%'  THEN 'book' END) AS src_type
+                   MAX(CASE WHEN source = 'mangawari' THEN 3
+                            WHEN source = 'gsm'       THEN 2
+                            WHEN source LIKE 'ttsu%'  THEN 1 END) AS src_rank
             FROM sessions
             WHERE title IS NOT NULL AND title != ''
             GROUP BY title
         """).fetchall()
     finally:
         con.close()
-    return {r[0]: (int(r[1]), r[2]) for r in rows}
+    return {r[0]: (int(r[1]), _RANK_TYPE.get(r[2])) for r in rows}
+
+
+def _completed_titles():
+    """Titles the user has marked finished, from tracker.db (read-only).
+
+    This is the same `media_completions` flag the media page's finish control
+    writes — there is no second notion of "done" anywhere."""
+    if not Path(DB_PATH).exists():
+        return set()
+    con = sqlite3.connect(DB_PATH)
+    try:
+        return {r[0] for r in con.execute("SELECT title FROM media_completions")}
+    finally:
+        con.close()
 
 
 def sync_catalog():
     """Auto-add new session titles and grow linked char counts. Idempotent;
-    runs lazily on Catalog load. Writes only catalog.db."""
+    runs lazily on Catalog load. Writes only catalog.db.
+
+    Auto-added manga rows also have their `volumes` RECOMPUTED here from the
+    completion marks (`volumes_auto=1`): a finished volume counts 1, an
+    unfinished one counts 0. Recomputing rather than incrementing on the finish
+    event is what keeps un-finishing and re-finishing from drifting — there is
+    no running tally to get out of step, so the answer is the same however many
+    times this runs."""
     init_catalog_db()
     sess = _session_title_totals()
+    done = _completed_titles()
 
     con = _con()
     now = datetime.now().isoformat()
     existing = {
         r[0]: r for r in con.execute(
-            "SELECT name, id, reading_type, chars, volumes, linked, synced_chars, hidden "
+            "SELECT name, id, reading_type, chars, volumes, linked, synced_chars, hidden, "
+            "       volumes_auto "
             "FROM catalog"
         ).fetchall()
     }
@@ -111,12 +168,30 @@ def sync_catalog():
         row = existing.get(title)
         if row is None:
             # Brand-new title → auto-add as a linked row seeded at its current total.
+            #
+            # mangawari posts one title per VOLUME, so an auto-added manga row
+            # is exactly one volume — but it only COUNTS once marked finished.
+            # Until then it sits in the catalog at 0 volumes: visible, so you
+            # can see what you're partway through, but scoring nothing.
+            #
+            # Type is what makes it score at all: book_equiv reads `volumes` for
+            # manga and `chars` for everything else, and manga arrives with no
+            # chars, so a manga title mis-filed as a book counted zero however
+            # many volumes were entered against it.
+            #
+            # Scoring is linear in volumes (volumes / 7), so seven one-volume
+            # rows total exactly the same as one seven-volume row. Grouping a
+            # series in the UI is therefore free: it cannot move the book count.
+            rtype = src_type or "book"
+            auto  = 1 if rtype == "manga" else 0
             con.execute("""
                 INSERT INTO catalog (name, reading_type, chars, volumes, linked,
                                      synced_chars, hidden, sort_pos,
-                                     created_at, updated_at)
-                VALUES (?,?,?,0,1,?,0,0,?,?)
-            """, (title, src_type or "book", schars, schars, now, now))
+                                     created_at, updated_at, volumes_auto)
+                VALUES (?,?,?,?,1,?,0,0,?,?,?)
+            """, (title, rtype, schars,
+                  1 if (auto and title in done) else 0,
+                  schars, now, now, auto))
             continue
 
         _id     = row[1]
@@ -126,8 +201,20 @@ def sync_catalog():
         hidden  = row[7]
         if hidden:
             continue  # dismissed auto row — don't resurrect or bump
+
+        # Derived volume count for auto-added manga: finished counts 1,
+        # unfinished counts 0. Recomputed from scratch every sync rather than
+        # nudged on the finish event, so un-finishing takes it straight back
+        # down and re-finishing can never double it.
+        if row[8] and row[4] != (want := 1 if title in done else 0):
+            con.execute(
+                "UPDATE catalog SET volumes = ?, updated_at = ? WHERE id = ?",
+                (want, now, _id))
+
         if linked:
-            # Grow only on MORE chars, and never for manga (volumes are manual).
+            # Grow only on MORE chars, and never for manga — it reports none,
+            # and its count lives in `volumes` (derived just above when auto,
+            # otherwise the user's own number).
             if rtype != "manga" and schars > synced:
                 con.execute(
                     "UPDATE catalog SET chars = chars + ?, synced_chars = ?, "
@@ -148,9 +235,21 @@ def sync_catalog():
 
 def get_catalog():
     """Sync, then return {rows: [...], total_books: float}. The single source of
-    truth for the book-equivalents constants."""
+    truth for the book-equivalents constants.
+
+    Each row carries its series membership (`series_key` / `series_label`) so
+    the page can collapse a series behind one header. That is a **display**
+    grouping and nothing more: `book_equiv` is linear in both volumes and chars,
+    so N member rows total exactly what one combined row would, and
+    `total_books` below is computed per row regardless of how they are grouped.
+    Which is what makes the dropdown free — see TestGroupingIsFree.
+
+    Series naming is delegated to db._series_grouping so the catalog agrees with
+    the lifetime views: a series created by dragging one card onto another has
+    no name of its own and is labelled after its first member."""
     sync_catalog()
     aliases = _get_aliases()
+    to_group, labels = _series_grouping()
     con = _con()
     rows = con.execute("""
         SELECT id, name, reading_type, chars, volumes, linked
@@ -161,6 +260,7 @@ def get_catalog():
 
     out, total_books = [], 0.0
     for _id, name, rtype, chars, volumes, linked in rows:
+        key = to_group.get(name)
         out.append({
             "id":            _id,
             "name":          name,
@@ -169,6 +269,8 @@ def get_catalog():
             "chars":         chars,
             "volumes":       volumes,
             "linked":        bool(linked),
+            "series_key":    key or "",
+            "series_label":  labels.get(key, "") if key else "",
         })
         total_books += book_equiv(rtype, chars, volumes)
     return {"rows": out, "total_books": round(total_books, 3)}
@@ -201,7 +303,11 @@ def add_catalog_entry(name, reading_type="book", chars=0, volumes=0):
 def update_catalog_entry(entry_id, name=None, reading_type=None,
                          chars=None, volumes=None):
     """Partial edit. Editing `chars` on a linked row sets the displayed value only;
-    `synced_chars` is left intact so future reading still adds its delta on top."""
+    `synced_chars` is left intact so future reading still adds its delta on top.
+
+    Editing `volumes` additionally takes the row off the derived rail
+    (`volumes_auto = 0`), so a hand-entered count is never overwritten by the
+    next sync. Editing is how you say "I'm managing this one"."""
     sets, args = [], []
     if name is not None:
         sets.append("name = ?");         args.append(name.strip())
@@ -211,6 +317,7 @@ def update_catalog_entry(entry_id, name=None, reading_type=None,
         sets.append("chars = ?");        args.append(int(chars))
     if volumes is not None:
         sets.append("volumes = ?");      args.append(int(volumes))
+        sets.append("volumes_auto = 0")
     if not sets:
         return
     sets.append("updated_at = ?");       args.append(datetime.now().isoformat())

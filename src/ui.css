@@ -1187,6 +1187,35 @@ span.flatpickr-weekday { color: var(--dim) !important; background: #2a2a42 !impo
 }
 .cat-del:hover { color: #E5484D; background: var(--hover); }
 
+/* Series grouping — display only, it never changes the book total. */
+/* Type/count here are bare cell text, unlike plain rows where every value sits
+   in .cat-editable — so the size has to be set on the cell or it falls back to
+   the 14px body size and sits a notch larger than the rows beneath it. Same
+   13px/--text as everything else in the table: the tinted background and the
+   caret are what mark this as a header, not shrunken or greyed-out text. */
+.cat-series-row > td {
+  background: var(--inset);
+  font-size: 13px;
+  color: var(--text);
+}
+.cat-series-toggle {
+  background: transparent; border: none; cursor: pointer; color: var(--text);
+  font-family: inherit; font-size: 13px; padding: 3px 6px; margin: -3px -6px;
+  border-radius: 6px; display: inline-flex; align-items: center; gap: 7px;
+  transition: background 0.12s;
+}
+.cat-series-toggle:hover { background: var(--hover); }
+.cat-series-toggle .cat-name { font-weight: 600; }
+.cat-caret {
+  display: inline-block; font-size: 10px; color: var(--text);
+  transition: transform 0.15s;
+}
+.cat-series-row.open .cat-caret { transform: rotate(90deg); }
+/* Members sit under their header; the rule marks the run as one group. */
+.cat-member-row > td:first-child { padding-left: 30px; }
+.cat-member-row > td { border-left: 2px solid var(--grid); }
+.cat-member-row > td:not(:first-child) { border-left: none; }
+
 /* ── Media stat portal ─────────────────────────────────────────────────── */
 .portal-picker-wrap { position: relative; }
 .portal-picker { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 6px; }

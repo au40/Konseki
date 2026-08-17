@@ -206,7 +206,12 @@ function acolor(t) { return ACOLORS[t] || '#6B6B8A'; }
 function mediaNoun(d) {
   // What kind of media a detail entry is, for the completion controls
   // ("Complete game" vs "Complete book" ...).
+  // mangawari is checked BEFORE the Reading arm: manga carries
+  // activity_type 'Reading', so it would otherwise read as a book. Each
+  // mangawari entry is one volume, and 'volume' is what the finish control
+  // and the catalog's 7-per-book rule both mean by it.
   if (d.source === 'gsm') return 'game';
+  if (d.source === 'mangawari') return 'volume';
   if (d.source === 'ttu' || d.source === 'ttsureader' || d.activity_type === 'Reading') return 'book';
   return 'media';
 }
@@ -4774,7 +4779,20 @@ function renderMediaDetail(d) {
   // listening) gets neither — a chars-denominated bar is meaningless there.
   const compBtn = document.getElementById('detail-complete-btn');
   const noun = mediaNoun(d);
-  if (gcc > 0) {
+  // Chars-less but still finishable. Manga reports no character count at all,
+  // so both bar-gated branches below would hide the control and leave no way
+  // to say "I finished this volume" — which is the one thing that matters for
+  // it, because the catalog counts FINISHED volumes toward 7-per-book. Checked
+  // first so the semantics stay volume-shaped even if a char count was set by
+  // hand (the progress bar above renders off gcc independently either way).
+  if (d.source === 'mangawari') {
+    compBtn.style.display = 'inline-flex';
+    compBtn.textContent = completed ? '↺ Mark unfinished' : `✓ Finish ${noun}`;
+    compBtn.title = completed
+      ? `Clear the finished mark — this ${noun} stops counting toward your book total`
+      : `Mark this ${noun} finished — it counts toward your book total (7 volumes = 1 book)`;
+    compBtn.onclick = () => onCompleteMediaToggle(d, !completed);
+  } else if (gcc > 0) {
     compBtn.style.display = 'inline-flex';
     compBtn.textContent = completed ? '↺ Mark incomplete' : `✓ Complete ${noun}`;
     compBtn.title = completed
@@ -5391,26 +5409,98 @@ function catCountText(r) {
   return `${fmtChars(r.chars)} chars`;
 }
 
+// Series groups start collapsed — the point of grouping is to stop a long
+// series burying everything else. Which ones are open is per-session UI state:
+// cheap to reopen, and there is no server-side place for it that wouldn't mean
+// a settings round-trip on every click.
+const catOpenSeries = new Set();
+
+function toggleCatSeries(key) {
+  if (catOpenSeries.has(key)) catOpenSeries.delete(key);
+  else catOpenSeries.add(key);
+  renderCatalogBody();
+}
+
+function catRowEl(r, nested) {
+  const tr = document.createElement('tr');
+  if (nested) tr.className = 'cat-member-row';
+  const nameCell = r.linked
+    ? `<span class="cat-name">${escHtml(r.display_name)}</span><span class="cat-chip" title="Auto-added from your sessions; char count grows as you read more">tracked</span>`
+    : `<span class="cat-name cat-editable" title="Double-click to rename"
+         ondblclick="startCatNameEdit(this, ${r.id})">${escHtml(r.name)}</span>`;
+  tr.innerHTML = `
+    <td>${nameCell}</td>
+    <td><span class="cat-editable" title="Double-click to change"
+          ondblclick="startCatTypeEdit(this, ${r.id})">${catTypeLabel(r.reading_type)}</span></td>
+    <td class="cat-count-cell"><span class="cat-editable" title="Double-click to edit"
+          ondblclick="startCatCountEdit(this, ${r.id})">${catCountText(r)}</span></td>
+    <td><button class="cat-del" title="Remove" onclick="deleteCatalogEntry(${r.id})">✕</button></td>`;
+  return tr;
+}
+
+// Manga counts in volumes, everything else in chars, so a mixed series shows
+// both rather than pretending one unit covers it.
+function catSeriesAggregate(rows) {
+  const vols  = rows.reduce((a, r) => a + (r.reading_type === 'manga' ? (r.volumes || 0) : 0), 0);
+  const chars = rows.reduce((a, r) => a + (r.reading_type !== 'manga' ? (r.chars   || 0) : 0), 0);
+  const parts = [];
+  if (vols)  parts.push(`${vols} vol${vols === 1 ? '' : 's'}`);
+  if (chars) parts.push(`${fmtChars(chars)} chars`);
+  return parts.join(' · ') || '0 vols';
+}
+
+function catSeriesHeaderEl(key, g, open) {
+  const tr = document.createElement('tr');
+  tr.className = 'cat-series-row' + (open ? ' open' : '');
+  tr.innerHTML = `
+    <td>
+      <button class="cat-series-toggle" aria-expanded="${open}"
+              title="${open ? 'Collapse' : 'Expand'} this series">
+        <span class="cat-caret">▸</span><span class="cat-name">${escHtml(g.label)}</span>
+      </button>
+      <span class="cat-chip" title="Grouped on the Media page. Display only — grouping never changes your book total.">${g.rows.length} entries</span>
+    </td>
+    <td class="cat-series-type">Series</td>
+    <td class="cat-count-cell">${catSeriesAggregate(g.rows)}</td>
+    <td></td>`;
+  tr.querySelector('.cat-series-toggle').onclick = () => toggleCatSeries(key);
+  return tr;
+}
+
 function renderCatalogBody() {
   const body  = document.getElementById('catalog-body');
   const empty = document.getElementById('catalog-empty');
   body.innerHTML = '';
   if (!catalogRows.length) { empty.style.display = ''; return; }
   empty.style.display = 'none';
+
+  // Bucket members by series while preserving the backend's ordering: a series
+  // takes the position of its FIRST member, so the list stays put as volumes
+  // are added rather than jumping around. Purely visual — book_equiv is linear,
+  // so what's collapsed can't affect the total in the hero.
+  const groups = new Map();
+  const order  = [];
   catalogRows.forEach(r => {
-    const tr = document.createElement('tr');
-    const nameCell = r.linked
-      ? `<span class="cat-name">${escHtml(r.display_name)}</span><span class="cat-chip" title="Auto-added from your sessions; char count grows as you read more">tracked</span>`
-      : `<span class="cat-name cat-editable" title="Double-click to rename"
-           ondblclick="startCatNameEdit(this, ${r.id})">${escHtml(r.name)}</span>`;
-    tr.innerHTML = `
-      <td>${nameCell}</td>
-      <td><span class="cat-editable" title="Double-click to change"
-            ondblclick="startCatTypeEdit(this, ${r.id})">${catTypeLabel(r.reading_type)}</span></td>
-      <td class="cat-count-cell"><span class="cat-editable" title="Double-click to edit"
-            ondblclick="startCatCountEdit(this, ${r.id})">${catCountText(r)}</span></td>
-      <td><button class="cat-del" title="Remove" onclick="deleteCatalogEntry(${r.id})">✕</button></td>`;
-    body.appendChild(tr);
+    const key = r.series_key;
+    if (!key) { order.push({ type: 'row', row: r }); return; }
+    let g = groups.get(key);
+    if (!g) {
+      g = { label: r.series_label || r.display_name, rows: [] };
+      groups.set(key, g);
+      order.push({ type: 'series', key });
+    }
+    g.rows.push(r);
+  });
+
+  order.forEach(item => {
+    if (item.type === 'row') { body.appendChild(catRowEl(item.row)); return; }
+    const g = groups.get(item.key);
+    // A series with one entry in the catalog is just a title — wrapping it in a
+    // header that hides nothing is worse than leaving it alone.
+    if (g.rows.length < 2) { body.appendChild(catRowEl(g.rows[0])); return; }
+    const open = catOpenSeries.has(item.key);
+    body.appendChild(catSeriesHeaderEl(item.key, g, open));
+    if (open) g.rows.forEach(r => body.appendChild(catRowEl(r, true)));
   });
 }
 
@@ -6345,10 +6435,13 @@ function renderMilestonesList(el, milestones, gcc) {
 async function onCompleteMediaToggle(d, complete) {
   if (complete) {
     const disp = d.display_title || d.title;
-    const ok = await showConfirm(
-      `Mark this ${mediaNoun(d)} ("${disp}") as complete? The progress bar will fill to 100% and milestone percentages will be recalculated against the chars you actually read.`,
-      'Complete', CT.success
-    );
+    // Chars-less media has no progress bar and no milestone percentages to
+    // repin, so the standard message would describe things that don't exist.
+    // What finishing DOES do there is make it count in the catalog.
+    const msg = d.source === 'mangawari'
+      ? `Mark this volume ("${disp}") as finished? It will count toward your book total — 7 volumes make one book.`
+      : `Mark this ${mediaNoun(d)} ("${disp}") as complete? The progress bar will fill to 100% and milestone percentages will be recalculated against the chars you actually read.`;
+    const ok = await showConfirm(msg, complete && d.source === 'mangawari' ? 'Finish' : 'Complete', CT.success);
     if (!ok) return;
   }
   const r = await window.pywebview.api.set_media_complete(d.title, complete);
