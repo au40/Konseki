@@ -283,14 +283,14 @@ function reset(rollover) {
   // from overwriting each other once they both can.
   reset(0);
   store.token      = 'tok';
-  store.host       = 'konsekiserv.local';
+  store.host       = 'inbox.local';
   store.port       = 18463;
   store.deviceName = 'laptop';
   store.ytDays     = { '2026-09-01': 3600 };
   fetchImpl  = () => ({ ok: true, json: () => Promise.resolve({ ok: true, logged: true }) });
   fetchCalls = [];
   await ytPostPending();
-  assert.strictEqual(fetchCalls[0].url, 'http://konsekiserv.local:18463/import',
+  assert.strictEqual(fetchCalls[0].url, 'http://inbox.local:18463/import',
     'posts must go to the configured host, not loopback');
   assert.strictEqual(fetchCalls[0].body.client_id, 'youtube:laptop:2026-09-01',
     'the key must name the device and the logical day');
@@ -300,12 +300,12 @@ function reset(rollover) {
   // tracker can never learn the rollover hour it needs to date its own posts.
   reset(0);
   store.token = 'tok';
-  store.host  = 'konsekiserv.local';
+  store.host  = 'inbox.local';
   store.port  = 18463;
   fetchCalls  = [];
   fetchImpl   = () => ({ ok: true, json: () => Promise.resolve({ rollover_hour: 4 }) });
   await ytFetchConfig();
-  assert.strictEqual(fetchCalls[0].url, 'http://konsekiserv.local:18463/config',
+  assert.strictEqual(fetchCalls[0].url, 'http://inbox.local:18463/config',
     'the config fetch must follow the configured host too');
   assert.strictEqual(store.rolloverHour, '4');
   console.log('  ok  the rollover fetch follows the configured host');

@@ -313,7 +313,7 @@ fetchActivityTypes();
 //
 // Deliberately placed here rather than at the end of the file: the `server`
 // branch rewrites everything from ~line 487 down, and this region is untouched
-// by it (see plans/YOUTUBE-PLAN.md).
+// by it.
 const ytTodayEl = document.getElementById("yt-today");
 const ytRowEl   = document.getElementById("yt-row");
 const ytStateEl = document.getElementById("yt-state-text");

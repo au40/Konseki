@@ -926,6 +926,16 @@
             <button class="btn btn-outline btn-sm" onclick="refreshInboxStatus()">Check now</button>
             <span id="inbox-status" class="muted" style="font-size:12px"></span>
           </div>
+          <div class="settings-row" style="margin-top:10px;align-items:flex-start">
+            <label style="min-width:70px;color:var(--muted);font-size:12px">Backups</label>
+            <span id="backup-status" class="muted" style="font-size:12px"></span>
+          </div>
+          <p class="muted" style="margin-top:8px;font-size:11px;line-height:1.5">
+            When an inbox is set, Konseki also sends it a dated copy of your database once
+            a day, so your backups aren't all on this one drive. The inbox keeps them but
+            will never hand one back over the network — to restore, copy the file off that
+            machine directly.
+          </p>
         </div>
       </div>
 

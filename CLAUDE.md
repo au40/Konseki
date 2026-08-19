@@ -198,9 +198,9 @@ chars-less source, copy that function, not the ttsu one.
 `import_youtube_day` ([imports.py](src/imports.py)) also **adopts** a keyless row
 for its date on the first keyed post, rather than inserting beside it, so naming
 a machine that previously posted keyless doesn't double-count the changeover day.
-That replaces the one-shot backfill migration proposed in
-[plans/YOUTUBE-PLAN.md](plans/YOUTUBE-PLAN.md) — it needs no guess about which
-device the old rows belonged to, and is correct whether or not any exist.
+That replaces the one-shot backfill migration this originally called for — it
+needs no guess about which device the old rows belonged to, and is correct
+whether or not any exist.
 
 ### The inbox distributes settings, it doesn't hold them
 
@@ -264,8 +264,8 @@ rollover session with later same-day reading, which again points to `game_lines`
 
 The `gsm_session_evidence` table ([db.py](src/db.py)) records one row per GSM
 sitting from `/api/today-stats`: `game_id`, `start_ts`, `end_ts`, `real_date`,
-`logical_date`, chars, secs, lines. It is the shadow phase of
-[plans/GSM-TODAY-PLAN.md](plans/GSM-TODAY-PLAN.md).
+`logical_date`, chars, secs, lines. It is the shadow phase of the per-sitting
+timestamp work: recorded and compared, never displayed.
 
 **No display path reads it directly, and it is not a second source of session
 rows — do not wire it up as one.** The invariant at the top of this file does

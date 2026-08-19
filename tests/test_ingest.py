@@ -3,7 +3,7 @@ and the auth boundary that moves when the server leaves loopback.
 
 The capture-time trap is the reason most of this file exists. A payload can be
 applied the instant it arrives or the next morning after sitting in the always-on
-inbox, and it has to land identically either way. See plans/SERVER-PLAN.md.
+inbox, and it has to land identically either way.
 """
 import json
 import sqlite3

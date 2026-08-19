@@ -212,7 +212,7 @@ def init_db():
     #
     # PK is (game_id, start_ts) — today-stats returns one entry per sitting and
     # the same game can legitimately appear twice in a window, so the date alone
-    # is not a key. See plans/GSM-TODAY-PLAN.md.
+    # is not a key.
     con.execute("""
         CREATE TABLE IF NOT EXISTS gsm_session_evidence (
             game_id      TEXT NOT NULL DEFAULT '',
@@ -511,8 +511,8 @@ def logical_date_for(when):
     at 01:00 with rollover_hour=4 belongs to the previous logical day, and that
     stays true whether it's applied a second later or the next morning.
 
-    This is the capture-time trap in plans/SERVER-PLAN.md: the applier must
-    never re-decide a date the capturer already decided."""
+    This is the capture-time trap: the applier must never re-decide a date the
+    capturer already decided."""
     rollover = int(get_setting("rollover_hour", "0"))
     if rollover > 0 and when.hour < rollover:
         return str(when.date() - timedelta(days=1))
@@ -646,8 +646,8 @@ def set_rollover_attribution(game_id, source_date, chars, minutes):
 
 
 # ── GSM per-sitting evidence (/api/today-stats) ───────────────────────────────
-# Shadow-phase plumbing for plans/GSM-TODAY-PLAN.md. NOTHING here feeds a display
-# path yet. Evidence is recorded and compared against what the snapshot writer
+# Shadow-phase plumbing for the per-sitting evidence work. NOTHING here feeds a
+# display path yet. Evidence is recorded and compared against what the snapshot writer
 # produced, so the Phase 2 cut-over rests on observed data rather than a guess —
 # in particular whether GSM's measured per-sitting seconds agree with the time
 # the live pull derives as chars ÷ speed.

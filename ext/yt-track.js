@@ -730,7 +730,16 @@ function currentVideoId() {
     // points there). A null id makes onNavigate hide the chip and every tick bail,
     // so the whole tracker used to no-op on any live stream opened by share link.
     //
-    // NOT covered, both deliberately:
+    // NOT covered, all deliberately:
+    //   /shorts/<id>    — Shorts are excluded from the tracker by request. A null
+    //                     id is the switch that does it: onNavigate hides the chip
+    //                     and every tick returns early, so scrolling the Shorts
+    //                     feed accrues nothing no matter what language it's in.
+    //                     Excluding by URL only reaches the Shorts player itself —
+    //                     a short opened as /watch?v=<id> is an ordinary watch page
+    //                     with no reliable "this is a Short" signal in the player
+    //                     response, and is still tracked. Click the chip to "never
+    //                     count" if one turns up there.
     //   /embed/<id>     — the iframe player. This script has no `all_frames`, which
     //                     defaults to false, so it only ever runs in the TOP frame;
     //                     a player embedded on someone else's site is a subframe and
@@ -739,8 +748,8 @@ function currentVideoId() {
     //   /@channel/live  — carries no id in the URL at all. Reaching it means taking
     //                     identity from the player response instead, which inverts
     //                     the navigation guard's premise.
-    // Both are pinned as null in the URL-shape checks in tests/verify_yt.js.
-    const m = u.pathname.match(/^\/(?:shorts|live)\/([\w-]+)/);
+    // All are pinned as null in the URL-shape checks in tests/verify_yt.js.
+    const m = u.pathname.match(/^\/live\/([\w-]+)/);
     return m ? m[1] : null;
   } catch {
     return null;

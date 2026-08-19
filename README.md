@@ -48,7 +48,6 @@ to the app over a local-only HTTP server (`127.0.0.1`) secured with a shared tok
 Everything lives in `~/immersion-tracker/`:
 
 - `tracker.db` — sessions and stats
-- `sessions/` — raw session files (GSM/ttsu/manual)
 - `catalog.db` — the reading catalog
 - backups are kept here too (7-day rolling)
 

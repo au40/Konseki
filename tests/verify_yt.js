@@ -221,9 +221,13 @@ console.log('  ok  unvalidated response keeps the full poll budget');
 // redirecting — used to return null, so live streams were never tracked at all.
 const urlCases = [
   ['https://www.youtube.com/watch?v=abc12345678',            'abc12345678'],
-  ['https://www.youtube.com/shorts/abc12345678',             'abc12345678'],
   ['https://www.youtube.com/live/abc12345678',               'abc12345678'],
   ['https://www.youtube.com/live/abc12345678?feature=share', 'abc12345678'],
+  // Shorts are excluded from the tracker on purpose. Null is the switch: the chip
+  // hides and every tick bails, so scrolling the feed accrues nothing regardless
+  // of what language the shorts are in.
+  ['https://www.youtube.com/shorts/abc12345678',             null],
+  ['https://www.youtube.com/shorts/abc12345678?feature=share', null],
   // The iframe player. Not matched on purpose: the content script has no
   // `all_frames`, so it runs in the top frame only and an embedded player (a
   // subframe of someone else's page) never loads it. Matching this would only
@@ -242,7 +246,7 @@ for (const [href, want] of urlCases) {
     `${href} -> expected ${want}, got ${sandbox.currentVideoId()}`);
 }
 scenario.href = 'https://www.youtube.com/watch?v=vid001';   // restore for later sections
-console.log(`  ok  currentVideoId handles ${urlCases.length} URL shapes (incl. /live/<id>)`);
+console.log(`  ok  currentVideoId handles ${urlCases.length} URL shapes (/live/<id> in, /shorts/<id> out)`);
 
 // --- 5. asrLanguage / normalizeTracks edge cases ------------------------------
 assert.strictEqual(asrLanguage(normalizeTracks([])), null, 'empty tracklist -> null');

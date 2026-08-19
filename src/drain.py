@@ -6,7 +6,7 @@ pushes and needs no knowledge that this machine exists. That direction is
 deliberate: the desktop is the party behind a sleep state and a possibly-changing
 IP, and the only party that knows when it's ready to write.
 
-Disabled unless `inbox_url` is set. See plans/SERVER-PLAN.md and pi/README.md.
+Disabled unless `inbox_url` is set. See pi/README.md.
 """
 
 import json

@@ -762,7 +762,7 @@ class Api:
             return {"ok": False, "error": str(e)}
 
     # ── GSM per-sitting evidence (shadow phase) ───────────────────────────────
-    # plans/GSM-TODAY-PLAN.md. Read-only readout of what /api/today-stats says
+    # Read-only readout of what /api/today-stats says
     # the rollover split should have been, versus what the snapshot writer
     # actually recorded. Nothing here changes a displayed number.
     def gsm_evidence_report(self):
@@ -1214,6 +1214,15 @@ class Api:
             return {"ok": False, "error": str(e)}
         return {"ok": True, "applied": n, **self._drain.status()}
 
+    def get_backup_status(self):
+        """Offsite backup readout for Settings.
+
+        The staleness of `last_pushed` is the whole safety mechanism: two copies
+        quietly become one the moment the push stops working, and nothing else
+        in the app would ever say so.
+        """
+        return backup.push_status()
+
     def save_settings(self, data):
         for key, value in data.items():
             if isinstance(value, bool):
@@ -1272,7 +1281,10 @@ def main():
     init_db()
     catalog.init_catalog_db()
     backup.ensure_backup()
-    backup.schedule_backups()
+    # Short first tick so a brief session still gets its zip offsite. The push
+    # itself is never done here — a connect timeout to a sleeping Pi must not
+    # sit between launch and the window appearing.
+    backup.schedule_backups(delay=backup.FIRST_TICK_SECONDS)
 
     # Auto-mark existing users as having completed first-run setup so they don't see the prompt
     if get_setting("first_run_complete", "") == "":

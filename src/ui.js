@@ -2086,12 +2086,38 @@ function activityDatasets(byType, scale) {
   byType.forEach(m => Object.keys(m).forEach(t => typeSet.add(t)));
   return orderedTypes(typeSet).map(t => ({
     label: t,
+    // Not a Chart.js option — the tooltip filter maps a hovered dataset back to
+    // its type through it (see splitTooltip). The label happens to be the same
+    // string today; keying on data rather than on display text keeps it that way.
+    activityType: t,
     data: byType.map(m => (m[t] || 0) * scale),
     backgroundColor: acolor(t),
     stack: 'activity',
     borderRadius: 3,
     borderSkipped: false,
   }));
+}
+
+// Tooltip wiring shared by the two stacked-split charts (Stats split-by-activity
+// and the media/series detail split).
+//
+// A split chart carries every member as a dataset in EVERY bucket, and both use
+// an index-mode tooltip, so hovering listed members that weren't touched that
+// day: "Listening: 0m" on a day you only read, "Part Two: 0 chars" under a bar
+// it had no share of. `has(dataIndex, dataset)` decides who earned a row.
+//
+// Dropping rows means the callbacks can be handed an EMPTY array — Chart.js
+// filters the items and then passes whatever survives straight to title/footer,
+// so `c[0]` would throw on a bucket where nobody read. Hence the guards, and the
+// index kept from the filter pass: that pass sees every row, kept or not, so an
+// empty bucket can still name the day it's over instead of going blank.
+function splitTooltip(labels, has, foot) {
+  let hovered = null;
+  return {
+    filter: it => { hovered = it.dataIndex; return has(it.dataIndex, it.dataset); },
+    title:  c => labels[c.length ? c[0].dataIndex : hovered] ?? '',
+    footer: c => (c.length ? foot(c) : undefined),
+  };
 }
 
 async function refreshStatsHeatmap() {
@@ -2383,6 +2409,29 @@ function upsertChart(id, ctxId, config) {
   return charts[id];
 }
 
+// The brush is an absolutely-positioned overlay measured against the daily
+// chart's plot area, so it has to be re-measured every time that area is
+// re-laid out. Neither of Chart.js's resize hooks can do it, and both look like
+// they can:
+//   • `onResize` fires BEFORE the relayout — v4's `_resize` is
+//     notifyPlugins('resize') → onResize → _doResize → update() — so it reads
+//     the PRE-resize chartArea.
+//   • Chart.js's own ResizeObserver is rAF-throttled, so a plain
+//     window.onresize + requestAnimationFrame also runs a frame ahead of it.
+// Measuring at either point parks the handles at the old width: after a
+// maximize they sat inside the plot area, jutting into the graph, still
+// draggable and mapping pointer x to the wrong days. `afterLayout` is the first
+// hook where chart.chartArea is final, so the overlay follows the plot area
+// whatever caused it to move.
+const BRUSH_FOLLOW = {
+  id: 'brushFollow',
+  // charts['daily'] is assigned after the constructor returns, so the very
+  // first layout of a freshly built chart is skipped here — the
+  // requestAnimationFrame(positionDailyBrush) at the end of each render path
+  // covers that one.
+  afterLayout(chart) { if (chart === charts['daily']) positionDailyBrush(); },
+};
+
 // The Stats page's one chart, driven by the same Time / Chars / Speed control as
 // the detail views. It does NOT reuse renderDetailMetricChart: this chart also
 // carries granularity bucketing, the drag brush, the cumulative overlay and
@@ -2470,24 +2519,30 @@ function renderDailyChart(daily) {
          backgroundColor: isChars ? CT.success : CT.accent,
          borderRadius: 3, borderSkipped: false }];
 
+  // byType holds SECONDS per type (there is no per-type chars breakdown), so
+  // "this type has data in this bucket" is just a nonzero entry.
+  const tipSplit = doSplit
+    ? splitTooltip(labels, (i, ds) => (byType[i]?.[ds.activityType] || 0) > 0,
+                   c => `Total: ${fmt(c.reduce((a, x) => a + x.raw, 0))}`)
+    : null;
+
   reserveLegendRoom('chart-daily', 'daily', 180, doSplit);
   upsertChart('daily', 'chart-daily', {
+    plugins: [BRUSH_FOLLOW],          // inline plugin list, not options.plugins
     type: 'bar',
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
-      onResize: () => positionDailyBrush(),
       interaction: doSplit ? { mode: 'index', intersect: false } : undefined,
       plugins: {
         legend: { display: doSplit, position: 'bottom',
                   labels: { color:CT.dim, boxWidth:12, boxHeight:12, usePointStyle:true } },
         tooltip: {
+          filter: tipSplit?.filter,
           callbacks: {
-            title: c => labels[c[0].dataIndex],
+            title: tipSplit ? tipSplit.title : (c => labels[c[0].dataIndex]),
             label: c => `${c.dataset.label}: ${fmt(c.raw)}`,
-            footer: doSplit
-              ? c => `Total: ${fmt(c.reduce((a, x) => a + x.raw, 0))}`
-              : undefined,
+            footer: tipSplit?.footer,
           }
         }
       },
@@ -2539,6 +2594,7 @@ function renderDailyCumChart(bucket, isChars) {
   // no longer jumps 31px when you switch view.
   reserveLegendRoom('chart-daily', 'daily', 180, false);
   upsertChart('daily', 'chart-daily', {
+    plugins: [BRUSH_FOLLOW],          // inline plugin list, not options.plugins
     type: 'line',
     data: { labels, datasets: [{
       label: isChars ? 'Characters' : 'Time', data: cumVals,
@@ -2549,7 +2605,6 @@ function renderDailyCumChart(bucket, isChars) {
     }] },
     options: {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
-      onResize: () => positionDailyBrush(),
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: false },
@@ -2614,11 +2669,11 @@ function renderDailySpeedChart(bucket) {
 
   reserveLegendRoom('chart-daily', 'daily', 180, showRolling);
   upsertChart('daily', 'chart-daily', {
+    plugins: [BRUSH_FOLLOW],          // inline plugin list, not options.plugins
     type: 'line',
     data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
-      onResize: () => positionDailyBrush(),
       interaction: { mode: 'index', intersect: false },
       plugins: {
         legend: { display: showRolling, position: 'bottom',
@@ -3187,6 +3242,8 @@ function clearBrush() {
 }
 
 // ── Brush geometry + drag ───────────────────────────────────────────────────
+// Re-measures the overlay against the chart's plot area. Every relayout must
+// reach this — the BRUSH_FOLLOW plugin above is what guarantees it.
 function positionDailyBrush() {
   const chart  = charts['daily'];
   const brush  = document.getElementById('daily-brush');
@@ -3282,6 +3339,9 @@ function initDailyBrush() {
     h.addEventListener('pointerdown', e => startBrushDrag(e, h.dataset.side)));
   const reset = brush.querySelector('.brush-reset');
   if (reset) reset.addEventListener('click', clearBrush);
+  // Backstop only: on a window resize the chart relayouts a frame or two later
+  // (see BRUSH_FOLLOW), so this pass still measures the old plot area. It exists
+  // for layout shifts that move the chart without resizing its canvas.
   window.addEventListener('resize', () => requestAnimationFrame(positionDailyBrush));
 }
 
@@ -4000,7 +4060,7 @@ function showMediaView(name) {
 //   'manual'  — quick-log stopwatch rows, untitled by design
 //   'youtube' — the passive tracker pools all its time under one 'YouTube'
 //               title so the data stays queryable later; it is deliberately not
-//               a media entry (see plans/YOUTUBE-PLAN.md)
+//               a media entry
 const GRID_HIDDEN_SOURCES = new Set(['manual', 'youtube']);
 const isGridHidden = (m) => GRID_HIDDEN_SOURCES.has(m.source);
 
@@ -4950,12 +5010,31 @@ function splitBarDatasets(split, members, field, scale, stackName) {
     .filter(o => split.some(m => m[o.key] && m[o.key][field] > 0))
     .map(o => ({
       label: o.label,
+      // Not a Chart.js option — it's how the tooltip filter maps a hovered
+      // dataset back to its member to ask whether that member was read in the
+      // hovered bucket (see bucketHasMember in renderDetailMetricChart).
+      memberKey: o.key,
       data: split.map(m => ((m[o.key] && m[o.key][field]) || 0) * scale),
       backgroundColor: o.color,
       stack: stackName,
       borderRadius: 3,
       borderSkipped: false,
     }));
+}
+
+// Did `key` see any reading in bucket `i` of a split series? Partner to
+// splitBarDatasets: that builds a dataset per member across every bucket, this
+// says which of those datasets the bucket actually earned. A dataset with no
+// member key isn't a member split, so it always shows; `split[i]` is guarded
+// because a rolled-up bucket can be empty.
+//
+// The test is "any reading at all", not "nonzero in the metric on screen": a
+// chars-less sitting still lists itself (as 0 chars) on the day it happened,
+// rather than vanishing from the only view that could show it.
+function bucketHasMember(split, i, key) {
+  if (key == null) return true;
+  const v = split[i] && split[i][key];
+  return !!v && ((v.chars || 0) > 0 || (v.secs || 0) > 0);
 }
 
 // Splitting speed COLORS the existing line rather than recomputing per member.
@@ -5188,6 +5267,13 @@ function renderDetailMetricChart(view) {
 
   const m       = cum ? cumCfg() : cfgByMetric[metric]();
   const stacked = doSplit && m.type === 'bar';
+
+  // Only a stacked split puts more than one member in a bucket. Split speed and
+  // split cumulative are single lines the split merely recolors, so they have
+  // nothing to filter.
+  const tipSplit = stacked
+    ? splitTooltip(labels, (i, ds) => bucketHasMember(split, i, ds.memberKey), m.foot)
+    : null;
   const legend  = doSplit || metric === 'speed';
 
   charts[key] = new Chart(document.getElementById(canvasId).getContext('2d'), {
@@ -5211,11 +5297,14 @@ function renderDetailMetricChart(view) {
           // would try to toggle a dataset that isn't there.
           onClick: m.legendItems ? () => {} : undefined,
         },
-        tooltip: { callbacks: {
-          title:  c => labels[c[0].dataIndex],
-          label:  m.tip,
-          footer: stacked ? m.foot : undefined,
-        } },
+        tooltip: {
+          filter: tipSplit?.filter,
+          callbacks: {
+            title:  tipSplit ? tipSplit.title : (c => labels[c[0].dataIndex]),
+            label:  m.tip,
+            footer: tipSplit?.footer,
+          },
+        },
       },
       scales: {
         x: { stacked, grid: { color: CT.grid },
@@ -5616,6 +5705,10 @@ async function loadSettings() {
     document.getElementById('inbox-drain-secs').value = s.inbox_drain_secs || 120;
     // Status is a network round trip; only pay for it when it's configured.
     document.getElementById('inbox-status').textContent = s.inbox_url ? '' : 'Not configured.';
+    // The backup readout DOES render unprompted, unlike the drain's. Its whole
+    // job is to be seen without being asked for — a stale copy you have to
+    // click to discover is the same as no copy.
+    refreshBackupStatus();
   }
   const gsmTimeBox  = document.getElementById('gsm-history-include-time');
   const ttsuTimeBox = document.getElementById('ttsu-history-include-time');
@@ -5711,6 +5804,7 @@ async function saveInboxSettings() {
   appSettings = { ...appSettings, inbox_url, inbox_drain_secs };
   await window.pywebview.api.save_settings({ inbox_url, inbox_drain_secs });
   refreshInboxStatus();
+  refreshBackupStatus();
 }
 
 // Draining is meant to be invisible — an inbox that's merely unreachable is the
@@ -5730,6 +5824,43 @@ async function refreshInboxStatus() {
   if (s.applied) bits.push(`Collected ${s.applied} session${s.applied === 1 ? '' : 's'}`);
   bits.push(s.pending ? `${s.pending} still waiting` : 'nothing waiting');
   el.textContent = bits.join(' · ') + '.';
+}
+
+// A second copy nobody looks at is one copy. The failure this readout exists to
+// catch isn't both drives dying the same night — that's genuinely unlikely. It's
+// the push quietly breaking in March, nothing reading the copies so nobody
+// notices, and the desktop drive going in August. So the staleness is the
+// message; the count is just reassurance.
+async function refreshBackupStatus() {
+  const el = document.getElementById('backup-status');
+  if (!el) return;
+  const s = await window.pywebview.api.get_backup_status();
+  el.style.color = '';
+  if (!s || s.enabled === false) {
+    el.textContent = 'Kept on this computer only — set an inbox URL above to send copies there.';
+    return;
+  }
+  if (!s.reachable) {
+    el.style.color = 'var(--warn)';
+    el.textContent = `Can't reach the inbox${s.last_error ? ' — ' + s.last_error : ''}.`;
+    return;
+  }
+  // Not "isn't today": the day's copy is sent shortly after launch, so a strict
+  // same-day test would cry wolf every morning. More than a day behind is the
+  // point at which something is actually wrong.
+  const days = s.last_pushed
+    ? Math.round((Date.now() - new Date(s.last_pushed + 'T00:00:00')) / 86400000)
+    : null;
+  const stale = days === null || days > 1;
+  if (stale) el.style.color = 'var(--warn)';
+
+  const held = s.count === 1 ? '1 copy on the inbox' : `${s.count} copies on the inbox`;
+  if (days === null) {
+    el.textContent = `${held} · nothing sent from this computer yet.`;
+  } else {
+    const when = days <= 0 ? 'today' : days === 1 ? 'yesterday' : `${days} days ago`;
+    el.textContent = `${held} · last sent ${when}${stale ? ' — check the connection' : ''}.`;
+  }
 }
 
 async function onToggleLanIngest() {
@@ -5771,8 +5902,8 @@ async function saveSettings() {
   setStatus('Settings saved');
 }
 
-// Shadow-phase readout for plans/GSM-TODAY-PLAN.md. Pulls fresh evidence, then
-// shows what the per-sitting timestamps say the rollover split should have been
+// Shadow-phase readout for the per-sitting evidence work. Pulls fresh evidence,
+// then shows what the per-sitting timestamps say the rollover split should have been
 // versus what the snapshot writer recorded. Read-only — nothing here writes.
 async function refreshGsmEvidence() {
   const st  = document.getElementById('gsm-evidence-status');

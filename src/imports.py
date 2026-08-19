@@ -615,8 +615,8 @@ def _upsert_gsm_daily_history(con, game_name, game_id, daily_activity, speed_hea
 
 
 # ── GSM per-sitting evidence (/api/today-stats) ───────────────────────────────
-# Shadow phase of plans/GSM-TODAY-PLAN.md. See the matching section in db.py:
-# this records WHEN each sitting happened so the rollover split can become a
+# Shadow phase of the per-sitting evidence work. See the matching section in
+# db.py: this records WHEN each sitting happened so the rollover split can become a
 # computation instead of the snapshot-and-guess below. Nothing here writes a
 # session row or an attribution.
 
@@ -1099,8 +1099,8 @@ def import_youtube_day(session_date, time_seconds, client_id=None):
     **Adoption.** The first keyed post from a machine that used to post keyless
     claims that date's existing keyless row instead of inserting alongside it.
     Without that, the changeover day would carry two rows for one machine and
-    double-count. plans/YOUTUBE-PLAN.md proposed a one-shot backfill migration
-    for this; doing it at write time instead needs no guess about which device
+    double-count. A one-shot backfill migration was the original plan for this;
+    doing it at write time instead needs no guess about which device
     name the old rows belonged to, and is correct whether or not any exist.
 
     There is deliberately NO monotonic guard. ttsu skips when the incoming total

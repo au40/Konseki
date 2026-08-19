@@ -100,9 +100,11 @@ const PROBE = `
   get HEATMAP_CAP_HOURS() { return HEATMAP_CAP_HOURS; },
   get charts()   { return charts; },
   set charts(v)  { charts = v; },
-  reserveLegendRoom,
+  reserveLegendRoom, positionDailyBrush,
+  get BRUSH_FOLLOW() { return BRUSH_FOLLOW; },
   applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty, heatmapColor,
-  rollDetailSeries, twRolling, splitBarDatasets, speedSegmentColors, memberLegendLabels,
+  rollDetailSeries, twRolling, splitBarDatasets, bucketHasMember, splitTooltip, speedSegmentColors,
+  memberLegendLabels,
   bucketDaily, statsMetricAvail, statsCumSeries, sparkHTML, goalBurnupSeries, dateFromISO,
 };`;
 
@@ -589,6 +591,86 @@ P.charts = { daily: liveChart };
 canvasStub.setAttribute('height', String(Math.floor(211 * DPR)));
 P.reserveLegendRoom('chart-daily', 'daily', 180, true);
 check('a split chart is also left alone on the next render', destroyed, 1);
+
+// --- the range brush must follow the plot area through a resize --------------
+// The brush is an overlay measured against chart.chartArea. Chart.js's onResize
+// fires BEFORE the relayout and its ResizeObserver is rAF-throttled, so both of
+// the obvious hooks read the PRE-resize geometry and leave the handles parked at
+// the old width -- jutting into the graph after a maximize, still draggable, and
+// mapping pointer x to the wrong days. BRUSH_FOLLOW's afterLayout is the first
+// point where chartArea is final.
+console.log('\n--- the range brush must follow the plot area through a resize ---');
+const styled = () => ({
+  style: {}, dataset: {}, hidden: false, offsetLeft: 16, offsetTop: 16,
+  classList: { add: noop, remove: noop, toggle: noop, contains: () => false },
+  addEventListener: noop, querySelectorAll: () => [],
+  querySelector(sel) {
+    const k = this._k || (this._k = {});
+    return k[sel] || (k[sel] = { style: {}, textContent: '', addEventListener: noop });
+  },
+});
+const brushEl = styled();
+sandbox.document.getElementById = id =>
+  id === 'daily-brush' ? brushEl : (id === 'chart-daily' ? styled() : null);
+
+const dailyChart = { chartArea: { left: 62, right: 500, top: 8, bottom: 180 } };
+P.charts = { daily: dailyChart };
+
+P.positionDailyBrush();
+check('the brush spans the plot area', brushEl.style.width, '438px');
+check('and starts at its left edge', brushEl.style.left, '78px');
+
+dailyChart.chartArea.right = 1200;      // maximize: Chart.js re-lays the chart out
+P.BRUSH_FOLLOW.afterLayout(dailyChart);
+check('afterLayout re-measures it', brushEl.style.width, '1138px');
+check('vertically too', brushEl.style.height, '172px');
+
+P.BRUSH_FOLLOW.afterLayout({ chartArea: { left: 0, right: 10, top: 0, bottom: 10 } });
+check('another chart layout leaves it alone', brushEl.style.width, '1138px');
+
+P.charts = {};                          // mid-construction: charts.daily not assigned yet
+P.BRUSH_FOLLOW.afterLayout(dailyChart);
+check('the construction pass is skipped, not mis-measured', brushEl.hidden, false);
+
+// --- a split tooltip must not list members that weren't read that bucket -----
+// Stacked split = one dataset per member across EVERY bucket, and the tooltip is
+// index-mode, so a member with nothing that day still drew a row: "Part Two:
+// 0 chars" under a bar it had no share of. bucketHasMember is the tooltip's
+// filter; "any reading at all" is the test, so a chars-less sitting still lists.
+console.log('\n--- a split tooltip must not list members that were not read ---');
+const tipSplit = [
+  { A: { chars: 5000, secs: 3600 } },                                 // 0: A only
+  { A: { chars: 1000, secs: 600 }, B: { chars: 2000, secs: 1800 } },  // 1: handoff
+  { B: { chars: 0, secs: 1800 } },                                    // 2: chars-less
+  {},                                                                 // 3: nothing
+];
+check('the member read that bucket lists',        P.bucketHasMember(tipSplit, 0, 'A'), true);
+check('the one that was not does not',            P.bucketHasMember(tipSplit, 0, 'B'), false);
+check('both list on a handoff bucket',            P.bucketHasMember(tipSplit, 1, 'B'), true);
+check('chars-less reading still counts as data',  P.bucketHasMember(tipSplit, 2, 'B'), true);
+check('an empty bucket lists nobody',             P.bucketHasMember(tipSplit, 3, 'A'), false);
+check('a bucket past the end is not a crash',     P.bucketHasMember(tipSplit, 9, 'A'), false);
+check('a dataset with no member key always shows', P.bucketHasMember(tipSplit, 3, undefined), true);
+
+// the datasets have to carry the key the filter looks up, or every row vanishes
+const keyed = P.splitBarDatasets(splitDays, members, 'chars', 1, 'milestone');
+check('split datasets carry their member key', keyed[0].memberKey, 'm1');
+
+// splitTooltip is the shared rail behind both split charts (Stats
+// split-by-activity and the media/series detail split). Filtering rows out means
+// the title/footer callbacks can be handed an EMPTY array, which Chart.js passes
+// through unguarded -- c[0] would throw, and the hovered day would lose its name.
+const tipLabels = ['02-01', '02-02', '02-03'];
+const tipHas = (i, ds) => i === 1 || ds.key === 'keep';
+const st = P.splitTooltip(tipLabels, tipHas, c => `Total: ${c.length}`);
+check('the filter delegates to the predicate', st.filter({ dataIndex: 0, dataset: { key: 'drop' } }), false);
+check('and keeps what the predicate keeps',    st.filter({ dataIndex: 1, dataset: { key: 'drop' } }), true);
+check('the title names the hovered bucket',    st.title([{ dataIndex: 2 }]), '02-03');
+
+st.filter({ dataIndex: 2, dataset: { key: 'drop' } });   // hover a bucket where all rows drop
+check('a fully filtered bucket still names its day', st.title([]), '02-03');
+check('and shows no total',                          st.footer([]), undefined);
+check('a bucket with rows still totals them',        st.footer([1, 2]), 'Total: 2');
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

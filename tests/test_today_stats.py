@@ -1,6 +1,6 @@
 """GSM /api/today-stats per-sitting evidence — shadow phase.
 
-See plans/GSM-TODAY-PLAN.md. These cover the layer that turns GSM's per-sitting
+These cover the layer that turns GSM's per-sitting
 timestamps into the rollover split, WITHOUT any of it reaching a display path
 yet. test_attribution.py is the regression signal for the display paths and must
 keep passing untouched.

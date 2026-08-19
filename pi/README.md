@@ -3,9 +3,6 @@
 An always-on place for devices to drop sessions when the desktop is asleep.
 One file, stdlib only, no pip install.
 
-See [plans/SERVER-PLAN.md](../plans/SERVER-PLAN.md) for why this exists and what
-it must never become.
-
 ## What it is
 
 An append-only queue of raw payloads. Devices `POST /import` or `POST /log-manual`
@@ -34,6 +31,17 @@ belongs in `apply_payload()` in [src/ext_server.py](../src/ext_server.py).
 | GET | `/pending` | **none** | Backlog count + oldest timestamp, plus `boot_id` |
 | GET/POST | `/activity-types` | token | Desktop-pushed category cache |
 | GET/POST | `/config` | token | Desktop-pushed settings cache (`rollover_hour`) |
+| POST | `/backup` | token | Store a dated copy of the desktop's database (raw zip body) |
+| GET | `/backups` | token | List stored backups — **names and sizes only** |
+
+`/backup` takes two optional headers: `X-Backup-Sha256`, verified before the file
+is renamed into place, and `X-Backup-Date` (`YYYY-MM-DD`), naming the day the
+copy belongs to so the desktop can backfill zips it already holds. Absent means
+today. The date is validated to the point where it can only be a calendar day
+and the filename is still built here — **the client never supplies a path**. A
+past date whose slot is already filled is refused with a 409; only an empty slot
+or today's is writable, so a backfill can fill holes but can never overwrite an
+existing generation.
 
 `/pending` is intentionally open so you can check the backlog from a phone browser
 with nothing configured. It returns counts and timestamps only — never payload
@@ -86,6 +94,43 @@ KONSEKI_TOKEN=$(echo paste-token-here) python pi/inbox_server.py --port 18464 --
 ```
 
 Then set **inbox URL** in Konseki's Settings to `http://127.0.0.1:18464`.
+
+## Backups
+
+Konseki sends this box a dated copy of `tracker.db` + `catalog.db` once a day,
+so the backups aren't all sitting on the drive they're meant to protect against.
+They land in `/var/lib/konseki/backups/` (`--backup-dir`), 30 kept
+(`--backup-keep`), one per calendar day, mode `0600` in a `0700` directory —
+a backup carries the whole `settings` table, so it holds the token too.
+
+**This box will never hand one back over HTTP, and must not be taught to.**
+`KONSEKI_TOKEN` is copied onto every device that posts sessions — extensions,
+the e-reader, any second GSM machine — and each of those needs one capability:
+*append a session*. A download route behind that same token would let a single
+lost device pull the entire database. Listing is fine; contents are not. See
+`BackupStore` in `inbox_server.py`.
+
+### Restoring
+
+See what's there (from anywhere on the LAN, with the token):
+
+```bash
+curl -s -H "X-Tracker-Token: $KONSEKI_TOKEN" http://your-inbox-host:18463/backups
+```
+
+Then copy the one you want off the box — **this is the only way to retrieve it**:
+
+```bash
+scp konseki@your-inbox-host:/var/lib/konseki/backups/konseki_2026-08-17.zip .
+```
+
+Close Konseki, then unzip `tracker.db` and `catalog.db` over your data directory
+(`%APPDATA%`-adjacent on Windows — whatever `IMMERSION_TRACKER_DATA_DIR` points
+at, else `~/immersion-tracker`). Restart.
+
+The `scp` line is written out in full on purpose. A restore is rare, happens
+under stress, and quite possibly from a machine that isn't your usual one —
+which is exactly when "you'll work out the path" fails.
 
 ## Retention
 

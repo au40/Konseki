@@ -110,8 +110,8 @@ def apply_payload(path, body):
     can pass it straight through; the drain only cares that it's 200.
 
     Bodies may carry `device_id` and `captured_at`. THE APPLIER NEVER DECIDES A
-    DATE THE CAPTURER ALREADY DECIDED — that is the capture-time trap in
-    plans/SERVER-PLAN.md, and the queue makes it real: a payload can arrive
+    DATE THE CAPTURER ALREADY DECIDED — that is the capture-time trap, and the
+    queue makes it real: a payload can arrive
     seconds after capture or the next morning, and it must land identically.
 
     ttsu entries carry an explicit per-entry `dateKey`, so they're already
