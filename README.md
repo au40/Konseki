@@ -60,3 +60,8 @@ untouched:
 .\dev.ps1          # launch with existing dev data
 .\dev.ps1 -Fresh   # wipe dev data first (simulate a fresh install)
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE). Bundled third-party libraries (Chart.js,
+flatpickr) keep their own licenses; see [THIRD-PARTY.md](THIRD-PARTY.md).
