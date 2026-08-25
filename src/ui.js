@@ -5497,6 +5497,10 @@ function catCountText(r) {
   if (r.reading_type === 'manga') return `${r.volumes} vol${r.volumes === 1 ? '' : 's'}`;
   return `${fmtChars(r.chars)} chars`;
 }
+// book_equiv comes from the backend — the 100k-chars / 7-volumes constants live
+// in catalog.py and are not repeated here. Two decimals because a single manga
+// volume is 0.14 of a book and one-decimal rounding would show most rows as 0.1.
+function catBooksText(n) { return (+n || 0).toFixed(2); }
 
 // Series groups start collapsed — the point of grouping is to stop a long
 // series burying everything else. Which ones are open is per-session UI state:
@@ -5523,6 +5527,7 @@ function catRowEl(r, nested) {
           ondblclick="startCatTypeEdit(this, ${r.id})">${catTypeLabel(r.reading_type)}</span></td>
     <td class="cat-count-cell"><span class="cat-editable" title="Double-click to edit"
           ondblclick="startCatCountEdit(this, ${r.id})">${catCountText(r)}</span></td>
+    <td class="cat-books-cell">${catBooksText(r.book_equiv)}</td>
     <td><button class="cat-del" title="Remove" onclick="deleteCatalogEntry(${r.id})">✕</button></td>`;
   return tr;
 }
@@ -5538,6 +5543,12 @@ function catSeriesAggregate(rows) {
   return parts.join(' · ') || '0 vols';
 }
 
+// Linear in both volumes and chars, so a series header can just sum its members
+// — the same property that makes the grouping free in the first place.
+function catSeriesBooks(rows) {
+  return rows.reduce((a, r) => a + (+r.book_equiv || 0), 0);
+}
+
 function catSeriesHeaderEl(key, g, open) {
   const tr = document.createElement('tr');
   tr.className = 'cat-series-row' + (open ? ' open' : '');
@@ -5551,15 +5562,56 @@ function catSeriesHeaderEl(key, g, open) {
     </td>
     <td class="cat-series-type">Series</td>
     <td class="cat-count-cell">${catSeriesAggregate(g.rows)}</td>
+    <td class="cat-books-cell">${catBooksText(catSeriesBooks(g.rows))}</td>
     <td></td>`;
   tr.querySelector('.cat-series-toggle').onclick = () => toggleCatSeries(key);
   return tr;
+}
+
+// ── Column sort ────────────────────────────────────────────────────────────
+// Click a header to sort by it, click again to flip. Text columns open
+// ascending, numeric ones descending — clicking "Count" means "show me the big
+// ones". Sorting is purely a view over `catalogRows`; it never writes anything
+// back, and the empty key is the backend's own order (name A→Z), which the Name
+// column reaches too, so no state is stranded.
+let catSort = { key: '', dir: 1 };
+
+function setCatSort(key) {
+  if (catSort.key === key) catSort.dir = -catSort.dir;
+  else catSort = { key, dir: (key === 'name' || key === 'type') ? 1 : -1 };
+  renderCatalogBody();
+}
+
+// `count` and `books` deliberately sort on the SAME value. The Count column
+// mixes units — 12 volumes against 300,000 chars — and book-equivalents are the
+// only scale both convert to, so it is the one ordering that isn't nonsense.
+// Among chars rows that is exactly ordering by chars, which is what clicking
+// "Count" is asking for.
+function catRowSortVal(key, r) {
+  if (key === 'name') return (r.display_name || r.name || '').toLowerCase();
+  if (key === 'type') return catTypeLabel(r.reading_type).toLowerCase();
+  return +r.book_equiv || 0;
+}
+
+// A series header sorts on what it displays: its label, and its members' sum.
+// A one-member group renders as a plain row, so it must sort as one too, or the
+// row would jump to a position its visible name doesn't explain.
+function catGroupSortVal(key, g) {
+  if (g.rows.length < 2) return catRowSortVal(key, g.rows[0]);
+  if (key === 'name') return (g.label || '').toLowerCase();
+  if (key === 'type') return 'series';
+  return catSeriesBooks(g.rows);
+}
+
+function catCmp(a, b) {
+  return (typeof a === 'string') ? a.localeCompare(b) : (a - b);
 }
 
 function renderCatalogBody() {
   const body  = document.getElementById('catalog-body');
   const empty = document.getElementById('catalog-empty');
   body.innerHTML = '';
+  renderCatSortArrows();          // above the early return: the header is there
   if (!catalogRows.length) { empty.style.display = ''; return; }
   empty.style.display = 'none';
 
@@ -5581,6 +5633,19 @@ function renderCatalogBody() {
     g.rows.push(r);
   });
 
+  // Sort members within their group and groups among the standalone rows, so a
+  // sorted table still reads as series-then-members. Array.sort is stable, so
+  // ties keep the backend order rather than shuffling on every render.
+  if (catSort.key) {
+    const { key, dir } = catSort;
+    groups.forEach(g => g.rows.sort(
+      (a, b) => catCmp(catRowSortVal(key, a), catRowSortVal(key, b)) * dir));
+    const val = (it) => it.type === 'row'
+      ? catRowSortVal(key, it.row)
+      : catGroupSortVal(key, groups.get(it.key));
+    order.sort((a, b) => catCmp(val(a), val(b)) * dir);
+  }
+
   order.forEach(item => {
     if (item.type === 'row') { body.appendChild(catRowEl(item.row)); return; }
     const g = groups.get(item.key);
@@ -5590,6 +5655,14 @@ function renderCatalogBody() {
     const open = catOpenSeries.has(item.key);
     body.appendChild(catSeriesHeaderEl(item.key, g, open));
     if (open) g.rows.forEach(r => body.appendChild(catRowEl(r, true)));
+  });
+}
+
+function renderCatSortArrows() {
+  document.querySelectorAll('#catalog-table .cat-sort').forEach(btn => {
+    const on = btn.dataset.sort === catSort.key;
+    btn.classList.toggle('active', on);
+    btn.querySelector('.cat-arrow').textContent = on ? (catSort.dir > 0 ? '▲' : '▼') : '';
   });
 }
 

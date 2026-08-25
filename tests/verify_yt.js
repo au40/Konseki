@@ -20,6 +20,7 @@ const scenario = {
   tracklist:   [],
   title:       '',
   channelId:   '',
+  author:      '',
   audioTrack:  null,
   noPlayerApi: false,      // force the window.ytInitialPlayerResponse fallback
   globalResp:  null,       // window.ytInitialPlayerResponse
@@ -32,6 +33,7 @@ function playerResp() {
       videoId:   scenario.videoId,
       title:     scenario.title,
       channelId: scenario.channelId,
+      author:    scenario.author,
     },
     captions: { playerCaptionsTracklistRenderer: { captionTracks: scenario.tracklist } },
   };
@@ -113,7 +115,7 @@ const asr = (lang) => ({ languageCode: lang, vssId: 'a.' + lang, kind: 'asr' });
 const man = (lang) => ({ languageCode: lang, vssId: '.' + lang, kind: '' });
 
 const BASE = {
-  videoId: 'vid001', tracklist: [], title: '', channelId: '',
+  videoId: 'vid001', tracklist: [], title: '', channelId: '', author: '',
   audioTrack: null, noPlayerApi: false, globalResp: null,
 };
 
@@ -163,6 +165,31 @@ check('cached non-ja channel',  { title: 'nope', channelId: 'UCnope' }, 'other',
 
 check('ASR beats stale cache',
   { tracklist: [asr('en')], channelId: 'UCtest' }, 'other', /ASR en/);
+
+// --- 3b. "never" -- your rule, the one rung above ASR -------------------------
+// The case it exists for is a translation channel: the audio genuinely IS
+// Japanese and the ASR verdict is correct, but what you are actually doing is
+// reading the English subtitles on screen. The two ordinary cache values are
+// consulted only when ASR is silent, so neither can express that -- which is why
+// clicking the chip to "never count" never stuck on a channel with captions.
+vm.runInContext("channelCache['UCtrans'] = 'never';", ctx);
+check('never beats a correct ASR ja verdict',
+  { tracklist: [asr('ja')], channelId: 'UCtrans' }, 'other', /channel off/);
+
+Object.assign(scenario, BASE, { tracklist: [asr('ja')], channelId: 'UCtrans' });
+const blockedRes = classifyNow();
+assert.ok(blockedRes.blocked, 'a blocked verdict must be flagged for the chip');
+assert.ok(!blockedRes.cacheable, 'a rule is not a verdict to be re-learned');
+console.log('  ok  a blocked verdict is flagged and not written back');
+
+// THE silent-failure mode here. rememberChannel is the AUTOMATIC writer and it
+// fires on every settled ASR verdict, so without its guard the next video from a
+// blocked channel quietly unblocks it -- which looks exactly like the block
+// never having saved in the first place.
+rememberChannel('UCtrans', true, 'Translation Channel');
+assert.strictEqual(vm.runInContext("channelCache['UCtrans']", ctx), 'never',
+  'the ASR write-back must not overwrite a "never" rule');
+console.log('  ok  the ASR write-back cannot unblock a channel');
 
 // --- 4. the SPA navigation contract -------------------------------------------
 // REGRESSION, broken twice. First cut read getOption('captions','tracklist'),
@@ -605,6 +632,88 @@ async function manualYield() {
   await postingContract();
   await dayTotalDisplay();
   await manualYield();
+  await channelRules();
+}
+
+// --- 9. channel rules, live ---------------------------------------------------
+async function channelRules() {
+  const flush = vm.runInContext('flushAccrual', ctx);
+
+  // The chip has its OWN wording for a blocked channel. "not Japanese" would be
+  // a lie about the audio -- the whole point of the rule is that the audio IS
+  // Japanese and it still shouldn't count -- and a chip that misreports its
+  // reason is how you stop believing the chip.
+  resetAccrual();
+  st.videoId   = 'vid009';
+  st.channelId = 'UCtrans';
+  st.verdict   = 'other';
+  st.override  = null;
+  st.blocked   = true;
+  st.checking  = false;
+  draw();
+  assert.strictEqual(getChip().textContent, '— channel off',
+    `blocked chip should name the rule, got ${JSON.stringify(getChip().textContent)}`);
+  console.log('  ok  a blocked channel says so, not "not Japanese"');
+
+  // Blocking from the popup has to stop the tab you are watching, NOW. The cache
+  // is read once at page load, so without the storage listener the rule would
+  // wait for the next navigation -- appearing not to work at the exact moment
+  // you used it, on the video you were watching when you decided it shouldn't
+  // count.
+  resetAccrual();
+  Object.assign(scenario, BASE, {
+    videoId: 'vid010', tracklist: [asr('ja')], channelId: 'UClive',
+  });
+  scenario.href = 'https://www.youtube.com/watch?v=vid010';
+  st.videoId   = 'vid010';
+  st.channelId = 'UClive';
+  st.verdict   = 'ja';
+  st.override  = null;
+  st.blocked   = false;
+
+  tick(1); tick(1);
+  const before = st.secs;
+  assert.ok(before > 0, 'should be accruing before the block');
+
+  store.ytChannelVerdicts = { UClive: 'never' };
+  for (const fn of storageListeners) {
+    fn({ ytChannelVerdicts: { newValue: store.ytChannelVerdicts } }, 'local');
+  }
+  await drain();
+
+  tick(1); tick(1);
+  assert.strictEqual(st.secs, before,
+    `blocking must stop accrual on the open tab (was ${before}, now ${st.secs})`);
+  console.log('  ok  blocking a channel stops the tab already playing');
+
+  // The seconds have to arrive with the video they came from, or the ledger has
+  // nothing to name when it offers to take them back out again.
+  resetAccrual();
+  Object.assign(scenario, BASE, {
+    videoId: 'vid011', tracklist: [asr('ja')], channelId: 'UCsome',
+  });
+  scenario.href = 'https://www.youtube.com/watch?v=vid011';
+  st.videoId   = 'vid011';
+  st.title     = 'ある動画';
+  st.channel   = 'ある人';
+  st.channelId = 'UCsome';
+  st.reason    = 'ASR ja';
+  st.verdict   = 'ja';
+  st.override  = null;
+  st.blocked   = false;
+
+  tick(1); tick(1);
+  sent.length = 0;
+  await flush();
+
+  const accrue = sent.find(m => m.type === 'yt-accrue');
+  assert.ok(accrue && accrue.video, 'yt-accrue must carry the video it came from');
+  assert.strictEqual(accrue.video.videoId,   'vid011');
+  assert.strictEqual(accrue.video.title,     'ある動画');
+  assert.strictEqual(accrue.video.channel,   'ある人');
+  assert.strictEqual(accrue.video.channelId, 'UCsome');
+  assert.strictEqual(accrue.video.why,       'ASR ja');
+  console.log('  ok  accrual batches name the video they came from');
 }
 
 accrualChecks()

@@ -261,6 +261,7 @@ def get_catalog():
     out, total_books = [], 0.0
     for _id, name, rtype, chars, volumes, linked in rows:
         key = to_group.get(name)
+        be  = book_equiv(rtype, chars, volumes)
         out.append({
             "id":            _id,
             "name":          name,
@@ -268,11 +269,16 @@ def get_catalog():
             "reading_type":  rtype,
             "chars":         chars,
             "volumes":       volumes,
+            # The row's own contribution to `total_books`, shipped rather than
+            # re-derived in the UI so the 100k-chars / 7-volumes constants stay
+            # in exactly one place. Rounded for display only; the total above
+            # sums the full-precision value.
+            "book_equiv":    round(be, 4),
             "linked":        bool(linked),
             "series_key":    key or "",
             "series_label":  labels.get(key, "") if key else "",
         })
-        total_books += book_equiv(rtype, chars, volumes)
+        total_books += be
     return {"rows": out, "total_books": round(total_books, 3)}
 
 

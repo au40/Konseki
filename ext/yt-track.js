@@ -151,15 +151,16 @@ const KANA = /[぀-ヿ]/;   // kana is Japanese-specific; kanji alone is not
 // would poison the cache with the previous video's channel — worse than not
 // caching at all.
 function metaFromResponse(r) {
-  let title = "", channelId = "";
+  let title = "", channelId = "", channel = "";
   try {
     const vd = r && r.videoDetails;
     if (vd) {
       title     = String(vd.title || "");
       channelId = String(vd.channelId || "");
+      channel   = String(vd.author || "");
     }
   } catch {}
-  return { title, channelId };
+  return { title, channelId, channel };
 }
 
 // ── Channel verdict cache ────────────────────────────────────────────────────
@@ -167,10 +168,28 @@ function metaFromResponse(r) {
 // rescues videos whose ASR is disabled (music, some channels).
 
 const CACHE_KEY = "ytChannelVerdicts";
+const NAMES_KEY = "ytChannelNames"; // channelId → channel name, for the popup's list
 const DEBUG_KEY = "ytDebug";       // set true in storage to re-enable probe logs
 const TIMER_KEY = "timerRunning";  // the manual stopwatch — see the yield below
 let channelCache = {};
 let DEBUG = false;
+
+// ── "never" — a rule, not a remembered guess ─────────────────────────────────
+// The two original cache values are OBSERVATIONS: "last time we had to guess
+// about this channel, here's what we decided". They are consulted only when the
+// ASR track is missing, and the ASR verdict overwrites them.
+//
+// "never" is different in kind. It is the user saying this channel doesn't
+// count, and it has to beat a CORRECT ASR verdict — the case it exists for is a
+// translation channel, where the audio genuinely is Japanese and what you're
+// actually doing is reading the English subtitles on screen. A value the ASR
+// rung can overrule cannot express that, which is why the old "never count"
+// click never stuck on exactly the channels you most wanted it to.
+//
+// Same map, so there is one storage key and one list in the popup. Written only
+// from the popup; see the guard in rememberChannel, which is what stops the
+// automatic writer from quietly undoing it.
+const NEVER = "never";
 
 // ── Yielding to the manual stopwatch ─────────────────────────────────────────
 // The two features measure the same wall clock, and neither used to know the
@@ -201,24 +220,65 @@ async function loadSettings() {
   }
 }
 
-// The stopwatch starts and stops from the popup, so the state can flip under a
-// page that's already loaded. Wrapped because a top-level throw in a content
+// Both of these flip from the POPUP, under a page that is already loaded and
+// possibly already counting. Wrapped because a top-level throw in a content
 // script kills the whole tracker silently.
-function watchManualTimer() {
+function watchStorage() {
   try {
     browser.storage.onChanged.addListener((changes, area) => {
-      if (area !== "local" || !changes || !(TIMER_KEY in changes)) return;
-      manualTimer = !!changes[TIMER_KEY].newValue;
-      if (state.videoId) render();
+      if (area !== "local" || !changes) return;
+
+      if (TIMER_KEY in changes) {
+        manualTimer = !!changes[TIMER_KEY].newValue;
+        if (state.videoId) render();
+      }
+
+      // Blocking a channel has to stop THIS tab, now. Without this the rule
+      // wouldn't be read until the next navigation — so it would appear not to
+      // work at the exact moment you used it, on the video you were watching
+      // when you decided it shouldn't count.
+      if (CACHE_KEY in changes) {
+        channelCache = changes[CACHE_KEY].newValue || {};
+        if (state.channelId && channelCache[state.channelId] === NEVER) {
+          // A per-video "count anyway" is the more specific setting, but this is
+          // the more recent and more deliberate one — a channel rule set by hand
+          // from the popup outranks a click on the chip.
+          state.override = null;
+        }
+        if (state.videoId) scheduleClassify();
+      }
     });
   } catch {}
 }
 
-async function rememberChannel(channelId, isJa) {
+// The AUTOMATIC writer: fires on every settled ASR verdict, recording what we
+// decided so a later video from the same channel doesn't have to guess.
+//
+// It must never overwrite a "never" rule. It runs on every video, so without
+// this guard the next thing you watched from a blocked channel would silently
+// unblock it — and the failure would look like the block having never saved.
+async function rememberChannel(channelId, isJa, name) {
   if (!channelId) return;
+  if (channelCache[channelId] === NEVER) return;
   channelCache[channelId] = isJa ? "ja" : "other";
   try {
     await browser.storage.local.set({ [CACHE_KEY]: channelCache });
+  } catch {}
+  rememberChannelName(channelId, name);
+}
+
+// Names live in their own map rather than inside the verdict, so the cache keeps
+// its plain channelId → verdict shape and nothing needs migrating. They are
+// cosmetic — read only by the popup's channel list, never by the ladder — so a
+// missing one costs a readable label and nothing else.
+async function rememberChannelName(channelId, name) {
+  if (!channelId || !name) return;
+  try {
+    const got   = await browser.storage.local.get(NAMES_KEY);
+    const names = got[NAMES_KEY] || {};
+    if (names[channelId] === name) return;
+    names[channelId] = name;
+    await browser.storage.local.set({ [NAMES_KEY]: names });
   } catch {}
 }
 
@@ -244,6 +304,15 @@ function classifyNow(expectedId) {
   const asrLang = asrLanguage(tracks);
   const meta    = metaFromResponse(resp);
   const dubLang = selectedAudioLang();
+
+  // Rung 0, above everything including ASR: your rule for this channel. This is
+  // the ONLY rung that can overrule a correct `ja` verdict, which is exactly
+  // what a translation channel needs — Japanese audio, English subtitles, not
+  // listening practice. Deliberately not `cacheable`: there is nothing to learn
+  // here, the answer is already stored.
+  if (meta.channelId && channelCache[meta.channelId] === NEVER) {
+    return { verdict: "other", reason: "channel off", meta, settled: true, blocked: true };
+  }
 
   if (dubLang && dubLang !== "ja" && asrLang === "ja") {
     return { verdict: "other", reason: `dubbed (${dubLang})`, meta, settled: true };
@@ -285,6 +354,14 @@ const ANNOUNCE_MS   = 4500;
 const state = {
   videoId:    null,
   channelId:  "",
+  // Title and channel name are carried for the LEDGER, not for classification —
+  // they ride along with each batch of seconds so the popup can name what it is
+  // offering to take back out. Taken from the same validated player response the
+  // verdict came from, never a separate DOM read: a title describing the
+  // previous video would mislabel a correction, which is worse than no label.
+  title:      "",
+  channel:    "",
+  blocked:    false,   // this channel carries a "never" rule
   verdict:    "unknown",
   reason:     "",
   override:   null,     // true = count anyway, false = never count, null = auto
@@ -499,7 +576,21 @@ async function flushAccrual() {
     // what makes the handover seamless: the instant these seconds stop being
     // counted here they are already inside dayAnchor. Reversing the two would
     // reintroduce the gap in miniature.
-    takeAnchor(await browser.runtime.sendMessage({ type: "yt-accrue", secs }));
+    // `video` is what lets the background attribute these seconds in its ledger,
+    // so the popup can offer to take exactly them back out again. Sent with
+    // every batch rather than once per video: the background holds no per-page
+    // state, and the title can arrive a beat after the first batch does.
+    takeAnchor(await browser.runtime.sendMessage({
+      type: "yt-accrue",
+      secs,
+      video: {
+        videoId:   state.videoId,
+        title:     state.title,
+        channel:   state.channel,
+        channelId: state.channelId,
+        why:       state.override === true ? "you clicked count" : state.reason,
+      },
+    }));
     inFlight -= secs;
     return true;
   } catch {
@@ -617,7 +708,7 @@ function cycleOverride() {
   else if (state.override === true)  state.override = false;
   else                               state.override = null;
 
-  if (state.override !== null) rememberChannel(state.channelId, state.override);
+  if (state.override !== null) rememberChannel(state.channelId, state.override, state.channel);
   console.log(LOG, "override →", state.override);
   render();
 }
@@ -686,7 +777,13 @@ function render() {
   }
 
   if (!tracking()) {
-    el.textContent   = state.override === false ? "— off (click to re-enable)" : "— not Japanese";
+    // A blocked channel gets its OWN wording. "not Japanese" would be a lie
+    // about the audio — the whole point of the rule is that the audio is
+    // Japanese and it still shouldn't count — and a chip that misreports its
+    // reason is how you stop believing the chip.
+    el.textContent   = state.blocked && state.override === null
+      ? "— channel off"
+      : state.override === false ? "— off (click to re-enable)" : "— not Japanese";
     el.style.opacity = "0.55";
     return;
   }
@@ -803,13 +900,16 @@ function scheduleClassify(attempt = 0) {
   if (forId !== state.videoId) return;
 
   if (res.meta.channelId) state.channelId = res.meta.channelId;
+  if (res.meta.title)     state.title     = res.meta.title;
+  if (res.meta.channel)   state.channel   = res.meta.channel;
   state.verdict = res.verdict;
   state.reason  = res.reason;
+  state.blocked = !!res.blocked;
 
   if (res.settled) {
     state.checking = false;
     if (res.cacheable && res.meta.channelId) {
-      rememberChannel(res.meta.channelId, res.verdict === "ja");
+      rememberChannel(res.meta.channelId, res.verdict === "ja", res.meta.channel);
     }
     console.log(LOG, "classified", forId, res.verdict, "—", res.reason);
     if (tracking() && !state.announceUntil) state.announceUntil = Date.now() + ANNOUNCE_MS;
@@ -849,6 +949,9 @@ function onNavigate() {
   clearTimeout(classifyTimer);
   state.videoId       = id;
   state.channelId     = "";
+  state.title         = "";
+  state.channel       = "";
+  state.blocked       = false;
   state.verdict       = "unknown";
   state.reason        = "";
   state.override      = null;
@@ -868,7 +971,7 @@ function onNavigate() {
 
 async function start() {
   await loadSettings();
-  watchManualTimer();
+  watchStorage();
   refreshAnchor(true);     // show today's total straight away, not 00:00:00
   onNavigate();
 

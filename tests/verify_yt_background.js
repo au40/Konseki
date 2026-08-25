@@ -349,5 +349,132 @@ function reset(rollover) {
   assert.strictEqual(tabsQueried.length, 0, 'an unrelated grant must not even query tabs');
   console.log('  ok  an unrelated permission grant is ignored');
 
+  // --- 14. the ledger: what made up the day's number ---------------------------
+  // The day total alone is unfixable: once a second is credited it is anonymous,
+  // so a video that shouldn't have counted can't be pointed at or taken back out.
+  const credit = (secs, video) => onMessage({ type: 'yt-accrue', secs, video });
+  const vid = (id, extra) => Object.assign({
+    videoId: id, title: 'Video ' + id, channel: 'Ch ' + id, channelId: 'UC' + id, why: 'ASR ja',
+  }, extra || {});
+
+  reset(0);
+  at('2026-09-10T10:00:00');
+  await credit(60, vid('a'));
+  at('2026-09-10T10:01:00');
+  await credit(30, vid('b'));
+
+  let led = store.ytLedger['2026-09-10'];
+  assert.strictEqual(led.a.secs, 60, `expected 60 for a, got ${led.a.secs}`);
+  assert.strictEqual(led.b.secs, 30, `expected 30 for b, got ${led.b.secs}`);
+  assert.strictEqual(led.a.title, 'Video a', 'the entry should name its video');
+  assert.strictEqual(led.a.channelId, 'UCa', 'the entry should carry the channel to block');
+  console.log('  ok  the ledger records each video separately');
+
+  // THE property that makes the list worth looking at: it explains the number it
+  // sits under, exactly. If the ledger recorded what the page REPORTED rather
+  // than what the day was CREDITED, a clamped second would appear in one and not
+  // the other and the list would stop adding up.
+  at('2026-09-10T10:01:05');
+  await credit(9999, vid('c'));           // wildly over-reported; clamped to ~5s
+  led = store.ytLedger['2026-09-10'];
+  const sum = Object.keys(led).reduce((t, k) => t + led[k].secs, 0);
+  assert.strictEqual(sum, store.ytDays['2026-09-10'],
+    `ledger ${sum} should equal the day ${store.ytDays['2026-09-10']}`);
+  assert.ok(led.c.secs < 100, `the clamped credit should be recorded, got ${led.c.secs}`);
+  console.log('  ok  the ledger records the clamped credit, so it sums to the day');
+
+  // An older content script sends no `video`. Dropping those seconds from the
+  // ledger would leave the list quietly short of the total it claims to explain.
+  at('2026-09-10T10:02:00');
+  await credit(10);
+  assert.ok(store.ytLedger['2026-09-10'].unattributed.secs > 0,
+    'a credit with no video should land in the unattributed bucket');
+  console.log('  ok  a credit with no video is still accounted for');
+
+  // The shape the popup reads. Today is always present even when nothing has
+  // counted — a missing section reads as broken, an empty one reads as "nothing
+  // yet" — and entries come back longest-first, since the thing you are looking
+  // for is the block of time you don't recognise.
+  reset(0);
+  store.ytDays   = { '2026-09-15': 900 };
+  store.ytLedger = { '2026-09-15': { a: { secs: 300 }, b: { secs: 600 } } };
+  at('2026-09-15T21:00:00');
+  let view = await onMessage({ type: 'yt-ledger' });
+  assert.strictEqual(view.today, '2026-09-15');
+  assert.strictEqual(view.days[0].total, 900, 'the day total should ride along');
+  assert.deepStrictEqual(view.days[0].entries.map(e => e.videoId), ['b', 'a'],
+    'entries should be longest-first');
+
+  reset(0);
+  at('2026-09-16T21:00:00');
+  view = await onMessage({ type: 'yt-ledger' });
+  assert.strictEqual(view.days.length, 1, 'today should be listed even when empty');
+  assert.deepStrictEqual(view.days[0].entries, []);
+  console.log('  ok  the ledger view names today, sorted longest-first');
+
+  // --- 15. taking one video back out -------------------------------------------
+  reset(0);
+  store.token   = 'tok';
+  store.ytDays  = { '2026-09-11': 1800 };
+  store.ytPosted = { '2026-09-11': 1800 };
+  store.ytLedger = { '2026-09-11': { a: { secs: 1200 }, b: { secs: 600 } } };
+  fetchImpl  = () => ({ ok: true, json: () => Promise.resolve({ ok: true }) });
+  fetchCalls = [];
+  at('2026-09-11T20:00:00');
+
+  let rm = await onMessage({ type: 'yt-remove-video', date: '2026-09-11', videoId: 'a' });
+  assert.ok(rm.ok, 'removal should report success');
+  assert.strictEqual(store.ytDays['2026-09-11'], 600, 'the day should lose exactly that video');
+  assert.ok(!store.ytLedger['2026-09-11'].a, 'the entry should be gone');
+  assert.strictEqual(fetchCalls.length, 1, 'the correction should be posted immediately');
+  assert.strictEqual(fetchCalls[0].body.time_seconds, 600,
+    `the corrected total should be posted, got ${fetchCalls[0].body.time_seconds}`);
+  console.log('  ok  removing a video subtracts its time and re-posts the day');
+
+  // The case the whole milestone exists for: the accidental video WAS the day.
+  // The 60s floor stops a stray click minting a row; it must not stop a
+  // correction reaching one that already exists, or the extension would believe
+  // it had fixed a day whose stored total never moved.
+  fetchCalls = [];
+  rm = await onMessage({ type: 'yt-remove-video', date: '2026-09-11', videoId: 'b' });
+  assert.strictEqual(store.ytDays['2026-09-11'], 0, 'the day should empty out');
+  assert.strictEqual(fetchCalls.length, 1, 'an emptied day must still be posted');
+  assert.strictEqual(fetchCalls[0].body.time_seconds, 0,
+    'zero is what deletes the row server-side');
+  assert.ok(!store.ytLedger['2026-09-11'], 'an empty day should leave no ledger entry');
+  console.log('  ok  emptying a day posts zero, which deletes its row');
+
+  // ... but a day that never had a row still must not mint one.
+  reset(0);
+  store.token  = 'tok';
+  store.ytDays = { '2026-09-12': 30 };
+  fetchCalls = [];
+  await ytPostPending();
+  assert.strictEqual(fetchCalls.length, 0,
+    'an unposted sub-minute day must still not mint a row');
+  console.log('  ok  the floor still holds for a day with no row yet');
+
+  // --- 16. the ledger is pruned harder than the counter ------------------------
+  // It exists so you can find last night's mistake this morning, not to archive
+  // what you watched. Its cutoff is independent of the confirmation check that
+  // guards `ytDays` — dropping an explanation is harmless, dropping an unposted
+  // day is not.
+  reset(0);
+  store.ytDays   = { '2026-09-20': 100 };
+  store.ytPosted = { '2026-09-20': 100 };
+  store.ytLedger = {
+    '2026-09-20': { a: { secs: 100 } },   // today
+    '2026-09-19': { b: { secs: 200 } },   // yesterday
+    '2026-09-18': { c: { secs: 300 } },   // older
+  };
+  at('2026-09-20T09:00:00');
+  await ytPrunePosted();
+  assert.ok(store.ytLedger['2026-09-20'], 'today must survive');
+  assert.ok(store.ytLedger['2026-09-19'], 'yesterday must survive');
+  assert.ok(!store.ytLedger['2026-09-18'], 'anything older should be dropped');
+  assert.strictEqual(store.ytDays['2026-09-20'], 100,
+    'pruning the ledger must not touch the counter');
+  console.log('  ok  the ledger keeps today and yesterday only');
+
   console.log('\nbackground.js YouTube day counter + posting: all checks passed');
 })().catch(e => { console.error(e); process.exit(1); });

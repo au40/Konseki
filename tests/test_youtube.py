@@ -122,16 +122,129 @@ class TestValidation:
         assert "error" in im.import_youtube_day(bad, 600)
         assert _rows(db) == []
 
-    @pytest.mark.parametrize("secs", [0, -1, None, ""])
-    def test_rejects_non_positive_time(self, seed, db, secs):
+    @pytest.mark.parametrize("secs", [-1, -0.5, "abc"])
+    def test_rejects_negative_or_unparseable_time(self, seed, db, secs):
         assert "error" in im.import_youtube_day(seed.day(1), secs)
         assert _rows(db) == []
+
+    @pytest.mark.parametrize("secs", [None, "", "   "])
+    def test_rejects_a_missing_time_rather_than_reading_it_as_zero(self, seed, db, secs):
+        """Zero is a real payload that DELETES the day's row, so an absent value
+        must not be defaulted into one. This is the difference between a
+        malformed body being rejected and a malformed body wiping a day."""
+        d = seed.day(1)
+        im.import_youtube_day(d, 1500)
+        assert "error" in im.import_youtube_day(d, secs)
+        assert _rows(db, d)[0][3] == 1500.0
 
     def test_a_rejected_payload_leaves_an_existing_row_alone(self, seed, db):
         d = seed.day(1)
         im.import_youtube_day(d, 1500)
-        im.import_youtube_day(d, 0)        # rejected
+        im.import_youtube_day(d, -1)       # rejected
         assert _rows(db, d)[0][3] == 1500.0
+
+
+class TestZeroDeletes:
+    """The correction control's floor case: removing the day's only video leaves
+    nothing to store. The stored row has to follow the total down, or the
+    extension believes it corrected a day whose figure never moved.
+
+    Every branch here reports SUCCESS. The extension treats a 200 carrying
+    `error` as a failure and retries it forever, and the Pi drain never advances
+    its high-water mark past an inbox row that keeps failing — so "there was
+    nothing to delete" must settle, not fail.
+    """
+
+    def test_zero_deletes_the_days_row(self, seed, db):
+        d = seed.day(1)
+        im.import_youtube_day(d, 1500)
+        res = im.import_youtube_day(d, 0)
+        assert res["logged"] is True and res["deleted"] is True
+        assert _rows(db, d) == []
+
+    def test_zero_deletes_the_row_for_its_own_device_only(self, seed, db):
+        d = seed.day(1)
+        im.import_youtube_day(d, 1500, f"youtube:desk:{d}")
+        im.import_youtube_day(d, 900,  f"youtube:laptop:{d}")
+
+        im.import_youtube_day(d, 0, f"youtube:desk:{d}")
+        assert _keys(db, d) == [f"youtube:laptop:{d}"]
+        assert _rows(db, d)[0][3] == 900.0
+
+    def test_zero_on_a_day_with_no_row_is_a_no_op_success(self, seed, db):
+        res = im.import_youtube_day(seed.day(1), 0)
+        assert res["logged"] is True and res["deleted"] is False
+        assert _rows(db) == []
+
+    def test_a_replayed_zero_still_succeeds(self, seed, db):
+        d = seed.day(1)
+        im.import_youtube_day(d, 1500)
+        assert im.import_youtube_day(d, 0)["deleted"] is True
+        # The drain can replay the same inbox row; the second pass must settle.
+        again = im.import_youtube_day(d, 0)
+        assert again["logged"] is True and again["deleted"] is False
+        assert "error" not in again
+
+    def test_watching_again_after_a_delete_starts_a_fresh_row(self, seed, db):
+        d = seed.day(1)
+        im.import_youtube_day(d, 1500)
+        im.import_youtube_day(d, 0)
+        im.import_youtube_day(d, 300)
+        rows = _rows(db, d)
+        assert len(rows) == 1 and rows[0][3] == 300.0
+
+    def test_zero_leaves_other_days_and_other_sources_alone(self, seed, db):
+        d, prev = seed.day(1), seed.day(2)
+        im.import_youtube_day(d, 1500)
+        im.import_youtube_day(prev, 600)
+        seed.session(d, secs=1800, source="gsm", title="Something", game_id="g1")
+
+        im.import_youtube_day(d, 0)
+        assert _rows(db, d) == []
+        assert _rows(db, prev)[0][3] == 600.0
+
+        con = sqlite3.connect(db.DB_PATH)
+        assert con.execute(
+            "SELECT COUNT(*) FROM sessions WHERE source='gsm'").fetchone()[0] == 1
+        con.close()
+
+    def test_zero_adopts_and_deletes_a_keyless_row(self, seed, db):
+        """A machine that used to post keyless still owns that row — the normal
+        path adopts it rather than inserting beside it, so a correction from the
+        same machine has to be able to reach it."""
+        d = seed.day(1)
+        im.import_youtube_day(d, 1500)                     # keyless, older build
+        im.import_youtube_day(d, 0, f"youtube:desk:{d}")   # first keyed post is a correction
+        assert _rows(db, d) == []
+
+
+class TestDispatch:
+    """The /import arm, which is where the missing-vs-zero distinction is either
+    preserved or thrown away. A `body.get("time_seconds", 0)` default here would
+    turn every malformed payload into a deletion before `import_youtube_day`
+    ever got the chance to reject it."""
+
+    def test_an_omitted_time_is_rejected_not_read_as_a_deletion(self, seed, db):
+        import ext_server
+        d = seed.day(1)
+        im.import_youtube_day(d, 1500)
+
+        res, status = ext_server.apply_payload("/import", {
+            "source": "youtube", "session_date": d,
+        })
+        assert "error" in res
+        assert _rows(db, d)[0][3] == 1500.0
+
+    def test_an_explicit_zero_reaches_the_delete(self, seed, db):
+        import ext_server
+        d = seed.day(1)
+        im.import_youtube_day(d, 1500)
+
+        res, status = ext_server.apply_payload("/import", {
+            "source": "youtube", "session_date": d, "time_seconds": 0,
+        })
+        assert res.get("deleted") is True
+        assert _rows(db, d) == []
 
 
 class TestMultiDevice:

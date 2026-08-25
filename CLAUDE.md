@@ -202,6 +202,50 @@ That replaces the one-shot backfill migration this originally called for — it
 needs no guess about which device the old rows belonged to, and is correct
 whether or not any exist.
 
+#### Zero is a payload, not an absence
+
+`import_youtube_day` treats `time_seconds == 0` as **delete the row this key
+resolves to**. The extension's correction control can empty a day out entirely
+(one accidental video, and it was the whole day), and the stored row has to
+follow the total down or the extension believes it corrected a day whose figure
+never moved.
+
+Two consequences, both load-bearing:
+
+- **A missing value must never be defaulted into a zero.** The `/import`
+  dispatch in [ext_server.py](src/ext_server.py) passes `time_seconds` through
+  with no `, 0` default precisely so an omitted field arrives as `None` and is
+  rejected. Restoring that default turns every malformed body into a deletion.
+- **Deleting a row that isn't there is a SUCCESS.** A 200 carrying `error` reads
+  as a failure to the extension, which retries forever, and the Pi drain never
+  advances its high-water mark past that inbox row. Same reason a replayed post
+  must settle.
+
+`import_mangawari_day` shares the cumulative contract but **not** this: zero is
+still an error there.
+
+#### The per-video ledger is browser-local and stays that way
+
+`ytLedger` in [background.js](ext/background.js) records which video contributed
+what to each day's number, for today and yesterday only. It exists so a video
+that shouldn't have counted can be pointed at and taken back out — the popup
+lists it, and removing an entry subtracts its seconds and re-posts the corrected
+day total.
+
+**It is never posted, and it must not become a second source of session rows.**
+Same rule as `gsm_session_evidence` below, for the same reason: the `sessions`
+table still gets one pooled `title='YouTube'` row per logical day per device, and
+reading per-video data alongside it would double-count. If you want per-video
+data on the desktop, that is a schema decision, not a wiring one.
+
+The channel cache (`ytChannelVerdicts`) gained a third value, `"never"`, checked
+**above** the ASR rung rather than below it — the one rung that can overrule a
+correct `ja` verdict, which is what a translation channel needs. The two original
+values are observations the tracker may revise; `"never"` is the user's rule, so
+`rememberChannel` (the automatic write-back, which fires on every settled ASR
+verdict) **must refuse to overwrite it**. Without that guard the next video from
+a blocked channel silently unblocks it.
+
 ### The inbox distributes settings, it doesn't hold them
 
 The desktop is the sole source of anything a capturing device needs to know, and
@@ -413,6 +457,14 @@ the **same chokepoints** so the surface stays minimal:
   `{session_date: raw_secs}` then apply `get_gsm_day_adjustments()` per date,
   clamped to their window. They used to re-derive attribution+manual inline; that
   was consolidated so they can't drift.
+- **Reading speed goes through the chokepoint too.**
+  `get_daily_reading_speed_basis` ([db.py](src/db.py)) applies
+  `get_gsm_day_adjustments()` per date, and `get_extra_stats` /
+  `get_range_extra_stats` / the Stats brush / `get_prev_range_speed_basis` all
+  sum *that map* rather than running their own SQL. It used to add
+  `_manual_secs_sum(since)` to a raw denominator, which left the numerator on the
+  real calendar and the overlay on the display one. See the reading-speed
+  invariant below for the full basis.
 - **Paths that legitimately need a different aggregation** than per-day — leave
   these as-is, they're not whack-a-mole, they just can't use the per-day dict:
   - `get_activity_breakdown` ([db.py](src/db.py)) unions manual-overlay dates into its
@@ -423,11 +475,6 @@ the **same chokepoints** so the surface stays minimal:
     attribution nets to zero over all-time (both endpoints in range) so it's
     ignored there, but the manual overlay is a **true reduction** and must be
     subtracted or the dashboard all-time total drifts from the daily views.
-  - The chars/hour denominators in `get_extra_stats` / `get_range_extra_stats`
-    ([db.py](src/db.py)) use `_manual_secs_sum(since)` so reading speed is computed
-    against the same adjusted time the page shows as "Total time" (reading-speed
-    invariant below). The dashboard's cph falls out of the already-shaved
-    `get_today_stats` rows, so it's consistent for free.
 
 ## Per-title applies it too (via game_id)
 
@@ -490,6 +537,36 @@ then divide. Do **not** time-weight per-session stored speeds.
 In JS the canonical pattern is at `ui.js:2860` (milestone chart) and
 `ui.js:2013` (title chart, post-fix); in Python it's at the end of
 `_compute_title_core` and in `db_get_milestone_detail`. Mirror those.
+
+## Which sessions the speed basis counts — one map, four consumers
+
+Dividing the right way is only half of it; the surfaces also have to agree on
+*which rows* go into the ratio. There is now exactly one definition, in
+`get_daily_reading_speed_basis` ([db.py](src/db.py)): Reading rows with a tracked
+char count (`chars_read>0 AND time_seconds>0`) that are **not** `time_excluded`,
+bounded by `window_bounds`, with `get_gsm_day_adjustments()` applied per date so
+chars, time and both overlays sit on the display calendar. `get_extra_stats`,
+`get_range_extra_stats`, `get_prev_range_speed_basis` and the Stats brush
+(`computeBrushView` in [ui.js](src/ui.js), via `spd_chars`/`spd_secs`) all sum
+that one map. `_basis_cph` is the shared reducer; its `int()` truncation is what
+makes a full-span brush print the same digits as the 'All' preset.
+
+Three things that map got wrong when the Stats page ran its own SQL, all of which
+made the Chars/hour card disagree with the Total time card directly above it:
+
+- **`time_excluded` rows belong in neither side.** They are the default shape for
+  GSM-history and ttsu-history backfill ("chars-only"), and their time is
+  suppressed in every other figure — Total time, daily series, heatmap, donut,
+  streaks, `get_today_stats`. Leaving that time in the denominator alone made the
+  card read low; keeping their chars with no time would swing it high. Drop the
+  row. That's also what makes the dashboard's cph agree, since
+  `get_today_stats` filters them upstream.
+- **Chars-less reading belongs in neither side** — time in the denominator with
+  nothing in the numerator. (The media panes still count it; `_compute_title_core`
+  sums every session on a title regardless. Known, deliberately deferred.)
+- **An unbounded `session_date >= ?` leaks rollover-window future-dated rows**
+  into the speed while every other card on the page holds them back. See the
+  `window_bounds` note at the top of this file.
 
 ## The invariant
 

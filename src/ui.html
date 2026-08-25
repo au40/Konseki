@@ -779,9 +779,12 @@
       <table class="catalog-table" id="catalog-table">
         <thead>
           <tr>
-            <th>Name</th>
-            <th class="cat-col-type">Type</th>
-            <th class="cat-col-count">Count</th>
+            <th><button class="cat-sort" data-sort="name" onclick="setCatSort('name')">Name<span class="cat-arrow"></span></button></th>
+            <th class="cat-col-type"><button class="cat-sort" data-sort="type" onclick="setCatSort('type')">Type<span class="cat-arrow"></span></button></th>
+            <th class="cat-col-count"><button class="cat-sort" data-sort="count" onclick="setCatSort('count')">Count<span class="cat-arrow"></span></button></th>
+            <th class="cat-col-books"><button class="cat-sort" data-sort="books"
+                  title="Book equivalents — 100,000 characters or 7 manga volumes make 1 book"
+                  onclick="setCatSort('books')">Books<span class="cat-arrow"></span></button></th>
             <th class="cat-col-del"></th>
           </tr>
         </thead>

@@ -1114,14 +1114,32 @@ def import_youtube_day(session_date, time_seconds, client_id=None):
     rollover-attribution and manual_time_adjust rails in CLAUDE.md; leaving it
     NULL is what keeps this source outside those cross-cutting concerns. The
     extension pins the logical date itself, so attribution is never needed.
+
+    **Zero deletes the row.** A correction that removes the day's only video
+    leaves nothing to store, and the stored row must follow it down — otherwise
+    the extension believes it corrected a day that keeps its old, wrong total
+    forever. Deleting a row that isn't there is a SUCCESS, not an error, for the
+    same reason a replayed post is: the extension reads a 200 carrying `error`
+    as a failure and would retry it indefinitely, and the Pi drain would never
+    advance its high-water mark past that inbox row.
     """
     session_date = (session_date or "").strip()
     if not _YT_DATE_RE.match(session_date):
         return {"error": "session_date must be YYYY-MM-DD"}
 
-    secs = float(time_seconds or 0)
-    if secs <= 0:
-        return {"error": "time_seconds must be > 0"}
+    # A MISSING value and an explicit ZERO are different payloads, and conflating
+    # them deletes data: zero means "this day is now empty, drop its row", so a
+    # body that merely omitted `time_seconds` must never reach that branch. This
+    # is why the dispatch in ext_server.py passes the raw value through with no
+    # `, 0` default — the absence has to survive as far as here to be rejected.
+    if time_seconds is None or (isinstance(time_seconds, str) and not time_seconds.strip()):
+        return {"error": "time_seconds is required"}
+    try:
+        secs = float(time_seconds)
+    except (TypeError, ValueError):
+        return {"error": "time_seconds must be a number"}
+    if secs < 0:
+        return {"error": "time_seconds must not be negative"}
 
     key = (client_id or "").strip() or None
 
@@ -1154,7 +1172,15 @@ def import_youtube_day(session_date, time_seconds, client_id=None):
                 (session_date,),
             ).fetchone()
 
-        if row:
+        deleted = False
+        if secs == 0:
+            # The day emptied out. Drop the row this key resolves to — the same
+            # row a non-zero post would have rewritten — and report success
+            # whether or not one was there to drop.
+            if row:
+                con.execute("DELETE FROM sessions WHERE rowid=?", (row[0],))
+                deleted = True
+        elif row:
             con.execute(
                 "UPDATE sessions SET time_seconds=?, ingested_at=? WHERE rowid=?",
                 (secs, now, row[0]),
@@ -1171,7 +1197,10 @@ def import_youtube_day(session_date, time_seconds, client_id=None):
     finally:
         con.close()
 
-    return {"logged": True, "session_date": session_date, "time_seconds": secs}
+    out = {"logged": True, "session_date": session_date, "time_seconds": secs}
+    if secs == 0:
+        out["deleted"] = deleted
+    return out
 
 
 def import_mangawari_day(title, session_date, time_seconds, client_id=None):

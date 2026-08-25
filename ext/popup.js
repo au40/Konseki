@@ -366,6 +366,235 @@ refreshYtToday();
 // a storage read in the background script, bounded by how long the popup is open.
 setInterval(refreshYtToday, 1000);
 
+// ── What counted, and taking it back ─────────────────────────────────────────
+// The day's number is a single total, so when something counts that shouldn't
+// have there is nothing to point at and nothing to remove. This list is that
+// missing half: the background keeps a per-video ledger for today and yesterday
+// (browser-local, never posted anywhere), and each entry can be taken back out.
+//
+// Two DISTINCT actions per entry, never folded together. Removing the time fixes
+// what already happened; blocking the channel changes what happens next. A
+// channel you do want can still have one video that counted by accident —
+// autoplay while you were asleep — and blocking it then would be wrong.
+
+const CACHE_KEY   = "ytChannelVerdicts";
+const NAMES_KEY   = "ytChannelNames";
+const NEVER       = "never";
+
+const ytBreakdown = document.getElementById("yt-breakdown");
+const ytListEl    = document.getElementById("yt-list");
+const ytChannels  = document.getElementById("yt-channels");
+const ytChanEl    = document.getElementById("yt-chan-list");
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls)  n.className   = cls;
+  if (text) n.textContent = text;
+  return n;
+}
+
+// A button that asks once before doing something irreversible. The popup has no
+// dialog of its own, and window.confirm can take the popup down with it — so the
+// question lives in the button, which also makes a mis-click harmless.
+function confirmingBtn(label, confirmLabel, cls, onConfirm) {
+  const b = el("button", "yt-act" + (cls ? " " + cls : ""), label);
+  let armed = false;
+  b.title = confirmLabel;
+  b.addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!armed) {
+      armed = true;
+      b.textContent = confirmLabel;
+      b.classList.add("danger");
+      setTimeout(() => {
+        if (!armed) return;
+        armed = false;
+        b.textContent = label;
+      }, 4000);
+      return;
+    }
+    b.disabled = true;
+    await onConfirm();
+  });
+  return b;
+}
+
+function ytDayLabel(date, today) {
+  if (date === today) return "Today";
+  const d = new Date(today + "T00:00:00");
+  d.setDate(d.getDate() - 1);
+  const y = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return date === y ? "Yesterday" : date;
+}
+
+async function setChannelRule(channelId, rule, name) {
+  const got   = await browser.storage.local.get([CACHE_KEY, NAMES_KEY]);
+  const cache = got[CACHE_KEY] || {};
+  const names = got[NAMES_KEY] || {};
+  if (rule === null) delete cache[channelId];
+  else               cache[channelId] = rule;
+  if (name) names[channelId] = name;
+  // The content script watches this key, so an open YouTube tab picks the rule
+  // up immediately rather than on its next navigation.
+  await browser.storage.local.set({ [CACHE_KEY]: cache, [NAMES_KEY]: names });
+}
+
+// Rebuilding the list every second would fight with the pointer — a hovered
+// button or a half-armed confirmation would be replaced under the cursor. So a
+// tick only rewrites the seconds; the structure is rebuilt when the set of
+// entries actually changes.
+let ytListSig = null;
+
+async function refreshYtBreakdown(force) {
+  if (!ytListEl || !ytBreakdown || !ytBreakdown.open) return;
+  let res;
+  try {
+    res = await browser.runtime.sendMessage({ type: "yt-ledger" });
+  } catch {
+    return;
+  }
+  if (!res) return;
+
+  const days = res.days || [];
+  const sig  = days.map(d => d.date + ":" + d.entries.map(e => e.videoId).join(",")).join("|");
+  if (!force && sig === ytListSig) {
+    for (const day of days) {
+      for (const e of day.entries) {
+        const n = ytListEl.querySelector(`[data-secs="${day.date}/${e.videoId}"]`);
+        if (n) n.textContent = formatYtShort(e.secs || 0);
+      }
+    }
+    return;
+  }
+  ytListSig = sig;
+  ytListEl.textContent = "";
+
+  const multi = days.length > 1;
+
+  for (const day of days) {
+    if (multi) ytListEl.appendChild(el("div", "yt-day-head", ytDayLabel(day.date, res.today)));
+    if (!day.entries.length) {
+      ytListEl.appendChild(el("div", "yt-empty", "Nothing counted."));
+      continue;
+    }
+
+    for (const e of day.entries) {
+      const unattributed = e.videoId === res.unattributed;
+      const row  = el("div", "yt-item");
+      const main = el("div", "yt-item-main");
+
+      main.appendChild(el("div", "yt-item-title",
+        unattributed ? "Unrecorded viewing"
+                     : (e.title || "Untitled video")));
+
+      const sub = unattributed
+        ? "Counted before this list existed"
+        : [e.channel, e.why].filter(Boolean).join(" · ");
+      if (sub) main.appendChild(el("div", "yt-item-sub", sub));
+      row.appendChild(main);
+
+      const secs = el("span", "yt-item-secs", formatYtShort(e.secs || 0));
+      secs.dataset.secs = `${day.date}/${e.videoId}`;
+      row.appendChild(secs);
+
+      if (e.channelId && !unattributed) {
+        const block = el("button", "yt-act", "🚫");
+        block.title = "Stop counting this channel, even when it is Japanese";
+        block.addEventListener("click", async () => {
+          block.disabled = true;
+          await setChannelRule(e.channelId, NEVER, e.channel);
+          await refreshYtChannels();
+          if (!ytChannels.open) ytChannels.open = true;
+        });
+        row.appendChild(block);
+      }
+
+      row.appendChild(confirmingBtn("✕", "Remove?", "danger", async () => {
+        await browser.runtime.sendMessage({
+          type: "yt-remove-video", date: day.date, videoId: e.videoId,
+        });
+        await refreshYtToday();
+        await refreshYtBreakdown(true);
+      }));
+
+      ytListEl.appendChild(row);
+    }
+  }
+
+  if (!ytListEl.childNodes.length) {
+    ytListEl.appendChild(el("div", "yt-empty", "Nothing counted."));
+  }
+}
+
+async function refreshYtChannels() {
+  if (!ytChanEl || !ytChannels.open) return;
+  const got   = await browser.storage.local.get([CACHE_KEY, NAMES_KEY]);
+  const cache = got[CACHE_KEY] || {};
+  const names = got[NAMES_KEY] || {};
+  const ids   = Object.keys(cache);
+
+  ytChanEl.textContent = "";
+  if (!ids.length) {
+    ytChanEl.appendChild(el("div", "yt-empty", "No channels remembered yet."));
+    return;
+  }
+
+  // Your rules first — they're the ones you came here to check.
+  ids.sort((a, b) => {
+    const ra = cache[a] === NEVER ? 0 : 1, rb = cache[b] === NEVER ? 0 : 1;
+    if (ra !== rb) return ra - rb;
+    return (names[a] || a).localeCompare(names[b] || b);
+  });
+
+  for (const id of ids) {
+    const rule = cache[id];
+    const row  = el("div", "yt-item");
+    const main = el("div", "yt-item-main");
+    main.appendChild(el("div", "yt-item-title", names[id] || id));
+    main.appendChild(el("div", "yt-item-sub",
+      rule === NEVER ? "Never counts — your rule"
+      : rule === "ja" ? "Counts when YouTube can't tell"
+                      : "Doesn't count when YouTube can't tell"));
+    row.appendChild(main);
+
+    if (rule === NEVER) {
+      row.appendChild(el("span", "yt-tag off", "off"));
+      const undo = el("button", "yt-act", "↺");
+      undo.title = "Go back to deciding automatically";
+      undo.addEventListener("click", async () => {
+        undo.disabled = true;
+        await setChannelRule(id, null);
+        await refreshYtChannels();
+      });
+      row.appendChild(undo);
+    } else {
+      const block = el("button", "yt-act", "🚫");
+      block.title = "Stop counting this channel, even when it is Japanese";
+      block.addEventListener("click", async () => {
+        block.disabled = true;
+        await setChannelRule(id, NEVER);
+        await refreshYtChannels();
+      });
+      row.appendChild(block);
+      row.appendChild(confirmingBtn("✕", "Forget?", "danger", async () => {
+        await setChannelRule(id, null);
+        await refreshYtChannels();
+      }));
+    }
+
+    ytChanEl.appendChild(row);
+  }
+}
+
+// Both lists are built on open and refreshed only while open — a closed fold
+// costs nothing.
+if (ytBreakdown) {
+  ytBreakdown.addEventListener("toggle", () => refreshYtBreakdown(true));
+  setInterval(() => refreshYtBreakdown(false), 1000);
+}
+if (ytChannels) ytChannels.addEventListener("toggle", () => refreshYtChannels());
+
 // ── Site access ───────────────────────────────────────────────────────────────
 // Firefox MV3 treats everything in `host_permissions` as OPT-IN: listing
 // youtube.com grants nothing at install, so the content script never runs and

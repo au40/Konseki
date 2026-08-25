@@ -134,9 +134,14 @@ def apply_payload(path, body):
             # device's total for the day instead of adding to it. The key is
             # per-device because two machines watching on the same day must sum,
             # not overwrite each other.
+            #
+            # No `, 0` default on time_seconds, deliberately: zero is a real
+            # payload meaning "the day emptied out, delete its row", so a body
+            # that omitted the field entirely must arrive as None and be
+            # rejected rather than defaulted into a deletion.
             return import_youtube_day(
                 body.get("session_date", ""),
-                body.get("time_seconds", 0),
+                body.get("time_seconds"),
                 body.get("client_id"),
             ), 200
         if source == "mangawari":

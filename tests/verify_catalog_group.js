@@ -1,9 +1,10 @@
-// Load-time verification for the Catalog page's series grouping.
+// Load-time verification for the Catalog page's series grouping and column sort.
 //
 // The grouping is display-only, but it is ordering-sensitive: a series takes
 // the position of its FIRST member so the list doesn't reshuffle as volumes
 // arrive, singleton series must not be wrapped in a header that hides nothing,
-// and members must only render while their group is open. None of that is
+// and members must only render while their group is open. The column sort then
+// reorders on top of all that without breaking any of it. None of that is
 // reachable from pytest, so it is exercised here against a recording DOM.
 const fs = require('fs');
 const path = require('path');
@@ -63,7 +64,9 @@ const PROBE = `
 globalThis.__cat = {
   set catalogRows(v) { catalogRows = v; },
   get catOpenSeries() { return catOpenSeries; },
-  renderCatalogBody, catSeriesAggregate,
+  set catSort(v) { catSort = v; },
+  get catSort() { return catSort; },
+  renderCatalogBody, catSeriesAggregate, setCatSort,
 };`;
 vm.createContext(sandbox);
 vm.runInContext(uiJs + PROBE, sandbox, { filename: 'ui.js' });
@@ -79,10 +82,14 @@ function check(label, actual, expected) {
 }
 
 function row(name, opts = {}) {
+  const type = opts.type || 'manga';
+  const chars = opts.chars || 0, volumes = opts.volumes || 0;
   return {
     id: opts.id || name.length, name, display_name: name,
-    reading_type: opts.type || 'manga', chars: opts.chars || 0,
-    volumes: opts.volumes || 0, linked: true,
+    reading_type: type, chars, volumes, linked: true,
+    // Mirrors catalog.book_equiv — the UI never re-derives this, it only
+    // displays and sorts on what the backend sends.
+    book_equiv: type === 'manga' ? volumes / 7 : chars / 100000,
     series_key: opts.key || '', series_label: opts.label || '',
   };
 }
@@ -92,6 +99,15 @@ function render(rows) {
   body.children = [];
   P.renderCatalogBody();
   return body.children.map(c => c.className || 'plain');
+}
+
+// What the reader actually sees in the first column — a plain row shows its own
+// name, a series header its label. Both sit in the same .cat-name span.
+function renderNames(rows) {
+  P.catalogRows = rows;
+  body.children = [];
+  P.renderCatalogBody();
+  return body.children.map(c => (/class="cat-name">([^<]*)</.exec(c.innerHTML) || [, '?'])[1]);
 }
 
 console.log('--- series grouping in the catalog table ---');
@@ -165,6 +181,88 @@ check('a mixed series shows both units',
     row('b', { type: 'book', chars: 50000 }),
   ]),
   '2 vols · 50.0k chars');   // fmtChars is the app's compact format, not raw digits
+
+console.log("");
+console.log('--- column sort ---');
+
+const mixed = [
+  row('Small book',  { type: 'book',  chars: 50000 }),   // 0.50 books
+  row('Long game',   { type: 'game',  chars: 300000 }),  // 3.00 books
+  row('Full manga',  { type: 'manga', volumes: 7 }),     // 1.00 books
+];
+
+// Numeric columns open descending — clicking "Count" is asking for the big ones.
+P.setCatSort('books');
+check('books opens high to low', renderNames(mixed),
+  ['Long game', 'Full manga', 'Small book']);
+
+// A second click on the same header flips it.
+P.setCatSort('books');
+check('a second click flips to low to high', renderNames(mixed),
+  ['Small book', 'Full manga', 'Long game']);
+
+// Count and Books sort on the same book-equivalent value: it is the only scale
+// volumes and characters both convert to, so a 7-volume manga has to land above
+// a 50k-char book instead of the raw units being compared (7 against 50000).
+P.setCatSort('count');
+check('count normalises volumes against chars', renderNames(mixed),
+  ['Long game', 'Full manga', 'Small book']);
+
+// Text columns open ascending instead.
+P.setCatSort('name');
+check('name opens A to Z', renderNames(mixed),
+  ['Full manga', 'Long game', 'Small book']);
+P.setCatSort('name');
+check('and flips to Z to A', renderNames(mixed),
+  ['Small book', 'Long game', 'Full manga']);
+
+// Sorting is a view over the rows, never a mutation of them — with no sort key
+// the backend order is exactly what renders.
+P.catSort = { key: '', dir: 1 };
+check('clearing the sort restores the backend order', renderNames(mixed),
+  ['Small book', 'Long game', 'Full manga']);
+
+// A series sorts on its members summed, not on whichever member came first.
+P.setCatSort('books');
+check('a series sorts above a title it outweighs',
+  renderNames([
+    row('Solo', { type: 'book',  chars: 150000 }),                       // 1.50
+    row('S v1', { type: 'manga', volumes: 7, key: 'k1', label: 'Big Series' }),
+    row('S v2', { type: 'manga', volumes: 7, key: 'k1', label: 'Big Series' }),
+  ]),
+  ['Big Series', 'Solo']);   // 14 vols is 2.00 books, so the group leads
+
+// The total really is the sum: shrink the second volume and the series drops
+// below Solo. If the header sorted on its first member alone, this would not move.
+check('the summed total is what moves the group',
+  renderNames([
+    row('Solo', { type: 'book',  chars: 250000 }),                       // 2.50
+    row('S v1', { type: 'manga', volumes: 7, key: 'k1', label: 'Big Series' }),
+    row('S v2', { type: 'manga', volumes: 3, key: 'k1', label: 'Big Series' }),
+  ]),
+  ['Solo', 'Big Series']);   // 1.43
+
+// Members sort inside their own group; the group never scatters across the list.
+P.catOpenSeries.add('k1');
+check('members sort within their group',
+  renderNames([
+    row('Solo', { type: 'book',  chars: 250000 }),
+    row('S v1', { type: 'manga', volumes: 3, key: 'k1', label: 'Big Series' }),
+    row('S v2', { type: 'manga', volumes: 7, key: 'k1', label: 'Big Series' }),
+  ]),
+  ['Solo', 'Big Series', 'S v2', 'S v1']);
+P.catOpenSeries.clear();
+
+// A singleton series renders as a plain row, so it has to sort as one — on its
+// own name, not on the series label the reader cannot see.
+P.setCatSort('name');
+check('a singleton series sorts on its visible name',
+  renderNames([
+    row('Zulu'),
+    row('Alpha', { key: 'k9', label: 'Zzz Label' }),
+  ]),
+  ['Alpha', 'Zulu']);
+P.catSort = { key: '', dir: 1 };
 
 console.log(failures ? `\n${failures} CHECK(S) FAILED` : '\nALL CHECKS PASSED');
 process.exit(failures ? 1 : 0);

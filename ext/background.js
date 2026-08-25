@@ -163,6 +163,31 @@ const YT_DAYS_KEY     = "ytDays";
 const YT_ROLLOVER_KEY = "rolloverHour";   // fetched from the desktop; 0 until the first fetch lands
 const YT_KEEP_DAYS    = 14;
 
+// ── The ledger — what made up the day's number ───────────────────────────────
+// `ytDays` is one anonymous total per day, which is fine until something counts
+// that shouldn't have: nothing remembers what went into it, so there is nothing
+// to take back out. The ledger is that memory.
+//
+//   ytLedger: { "2026-08-22": { "<videoId>": { secs, title, channel, channelId, why, last } } }
+//
+// Three rules keep it worth trusting:
+//
+//   * It records the CLAMPED credit (below), never the seconds the page
+//     reported. Otherwise two tabs playing at once would put more into the
+//     ledger than into the day, and the list wouldn't add up to the number it
+//     claims to explain.
+//   * Credits with no videoId land under "unattributed" rather than being
+//     dropped, so the list stays reconcilable across an extension upgrade.
+//   * It is SUBORDINATE. `ytDays` is what gets posted; this only explains it.
+//     Never rederive the day total as a sum of these entries — the ledger is
+//     pruned on a far shorter horizon and would silently shrink older days.
+//
+// Browser-local and never posted anywhere. The tracker still stores one pooled
+// row per logical day; per-video data deliberately does not leave here.
+const YT_LEDGER_KEY  = "ytLedger";
+const YT_LEDGER_DAYS = 2;                 // today and yesterday; see below
+const YT_UNATTRIBUTED = "unattributed";
+
 let ytLastCredit = 0;
 
 function ytLogicalDate(ts, rolloverHour) {
@@ -182,15 +207,19 @@ function ytSerial(fn) {
 }
 
 async function ytRead() {
-  const cfg = await browser.storage.local.get([YT_DAYS_KEY, YT_ROLLOVER_KEY]);
+  const cfg = await browser.storage.local.get([YT_DAYS_KEY, YT_ROLLOVER_KEY, YT_LEDGER_KEY]);
   return {
     days:     cfg[YT_DAYS_KEY] || {},
+    ledger:   cfg[YT_LEDGER_KEY] || {},
     rollover: parseInt(cfg[YT_ROLLOVER_KEY], 10) || 0,
   };
 }
 
-async function ytCredit(secs) {
-  const { days, rollover } = await ytRead();
+// `meta` describes the video the seconds came from: { videoId, title, channel,
+// channelId, why }. Absent (an older content script mid-upgrade) the credit
+// still lands on the day — it just lands under "unattributed" in the ledger.
+async function ytCredit(secs, meta) {
+  const { days, ledger, rollover } = await ytRead();
   const now = Date.now();
 
   // Two tabs playing at once must not both credit the same wall-clock second.
@@ -203,9 +232,54 @@ async function ytCredit(secs) {
   const date = ytLogicalDate(now, rollover);
   if (credit > 0) {
     days[date] = (days[date] || 0) + credit;
-    await browser.storage.local.set({ [YT_DAYS_KEY]: days });
+
+    // Same clamped `credit` as the day got, written in the same storage set, so
+    // the two can't drift apart even if one write were to fail.
+    const day = ledger[date] || (ledger[date] = {});
+    const id  = (meta && meta.videoId) || YT_UNATTRIBUTED;
+    const e   = day[id] || (day[id] = { secs: 0 });
+    e.secs += credit;
+    e.last  = now;
+    if (meta) {
+      // Refreshed rather than written once: the title arrives a beat after the
+      // first credit on a slow classify, and `why` can legitimately change
+      // mid-video (an ASR verdict settling, or you clicking to count it).
+      if (meta.title)     e.title     = meta.title;
+      if (meta.channel)   e.channel   = meta.channel;
+      if (meta.channelId) e.channelId = meta.channelId;
+      if (meta.why)       e.why       = meta.why;
+    }
+
+    await browser.storage.local.set({ [YT_DAYS_KEY]: days, [YT_LEDGER_KEY]: ledger });
   }
   return days[date] || 0;
+}
+
+// ── Removing a video's time ──────────────────────────────────────────────────
+// The correction the ledger exists to make possible: take one video's seconds
+// back out of the day and re-post the corrected total. Serialised against
+// credits — it is a read-modify-write of the same two maps — and it posts
+// immediately rather than waiting for the interval, because a correction the
+// user can't see land is a correction they'll make twice.
+//
+// Floored at zero: the day can't go negative, and a day that reaches zero is
+// posted as zero, which deletes its row server-side.
+function ytRemoveVideo(date, videoId) {
+  return ytSerial(async () => {
+    const cfg    = await browser.storage.local.get([YT_DAYS_KEY, YT_LEDGER_KEY]);
+    const days   = cfg[YT_DAYS_KEY]   || {};
+    const ledger = cfg[YT_LEDGER_KEY] || {};
+    const day    = ledger[date];
+    const entry  = day && day[videoId];
+    if (!entry) return { ok: false, error: "no such entry" };
+
+    days[date] = Math.max(0, (days[date] || 0) - (entry.secs || 0));
+    delete day[videoId];
+    if (!Object.keys(day).length) delete ledger[date];
+
+    await browser.storage.local.set({ [YT_DAYS_KEY]: days, [YT_LEDGER_KEY]: ledger });
+    return { ok: true, dayTotal: days[date] };
+  });
 }
 
 // ── Posting ──────────────────────────────────────────────────────────────────
@@ -277,7 +351,12 @@ async function ytPostPending() {
   let changed = false;
   for (const date of Object.keys(days).sort()) {
     const secs = days[date];
-    if (secs < YT_MIN_SECS)      continue;
+    // The floor stops a stray click MINTING a row. It must not stop us
+    // CORRECTING one: a date already in `posted` has a row out there, and if a
+    // correction drops it below the floor the row has to follow it down (zero
+    // deletes it server-side). Without the second clause the extension would
+    // believe it had corrected a day whose stored total never moved.
+    if (secs < YT_MIN_SECS && !(date in posted)) continue;
     if (posted[date] === secs)   continue;
     try {
       const r = await fetch(`http://${host}:${port}/import`, {
@@ -312,9 +391,10 @@ async function ytPostPending() {
 // rewrites the whole map.
 function ytPrunePosted() {
   return ytSerial(async () => {
-    const cfg    = await browser.storage.local.get([YT_DAYS_KEY, YT_POSTED_KEY, YT_ROLLOVER_KEY]);
+    const cfg    = await browser.storage.local.get([YT_DAYS_KEY, YT_POSTED_KEY, YT_ROLLOVER_KEY, YT_LEDGER_KEY]);
     const days   = cfg[YT_DAYS_KEY]   || {};
     const posted = cfg[YT_POSTED_KEY] || {};
+    const ledger = cfg[YT_LEDGER_KEY] || {};
     const rollover = parseInt(cfg[YT_ROLLOVER_KEY], 10) || 0;
     const cutoff = ytLogicalDate(Date.now() - YT_KEEP_DAYS * 86400000, rollover);
 
@@ -326,8 +406,22 @@ function ytPrunePosted() {
         changed = true;
       }
     }
-    if (changed) {
-      await browser.storage.local.set({ [YT_DAYS_KEY]: days, [YT_POSTED_KEY]: posted });
+
+    // The ledger goes on a much shorter leash than the counter: it exists so
+    // you can find last night's mistake this morning, not to archive what you
+    // watched. Its cutoff is INDEPENDENT of the confirmation check above —
+    // dropping an explanation is harmless, dropping an unposted day is not.
+    const ledgerCutoff = ytLogicalDate(Date.now() - YT_LEDGER_DAYS * 86400000, rollover);
+    let ledgerChanged = false;
+    for (const d of Object.keys(ledger)) {
+      if (d <= ledgerCutoff) { delete ledger[d]; ledgerChanged = true; }
+    }
+
+    if (changed || ledgerChanged) {
+      const patch = {};
+      if (changed)       { patch[YT_DAYS_KEY] = days; patch[YT_POSTED_KEY] = posted; }
+      if (ledgerChanged) { patch[YT_LEDGER_KEY] = ledger; }
+      await browser.storage.local.set(patch);
     }
   });
 }
@@ -409,7 +503,7 @@ browser.permissions.onAdded.addListener(async (perms) => {
 
 browser.runtime.onMessage.addListener(async (msg) => {
   if (msg.type === "yt-accrue") {
-    const dayTotal = await ytSerial(() => ytCredit(Number(msg.secs) || 0));
+    const dayTotal = await ytSerial(() => ytCredit(Number(msg.secs) || 0, msg.video));
     // Opportunistic: a background event page can be unloaded, taking its
     // setInterval with it. Watching keeps messages arriving, so drive the post
     // cycle from here too rather than trusting the timer to survive.
@@ -422,6 +516,36 @@ browser.runtime.onMessage.addListener(async (msg) => {
   if (msg.type === "yt-post-now") {
     await ytPostForced();
     return;
+  }
+
+  // The popup's breakdown of the day. Shaped here rather than in the popup so
+  // the ledger's storage layout stays private to this file.
+  if (msg.type === "yt-ledger") {
+    const { days, ledger, rollover } = await ytRead();
+    const today = ytLogicalDate(Date.now(), rollover);
+
+    const dates = Object.keys(ledger);
+    // Today is always listed, even with nothing in it — an empty list reads as
+    // "nothing has counted yet", where a missing section reads as broken.
+    if (dates.indexOf(today) === -1) dates.push(today);
+
+    const out = dates.sort().reverse().map((date) => ({
+      date,
+      total:   days[date] || 0,
+      entries: Object.keys(ledger[date] || {})
+        .map((videoId) => Object.assign({ videoId }, ledger[date][videoId]))
+        .sort((a, b) => (b.secs || 0) - (a.secs || 0)),
+    }));
+    return { today, days: out, unattributed: YT_UNATTRIBUTED };
+  }
+
+  if (msg.type === "yt-remove-video") {
+    const res = await ytRemoveVideo(msg.date, msg.videoId);
+    // Posted straight away, not via ytPostForced: its 10s floor exists to
+    // swallow scrub-driven pauses, and swallowing a correction instead would
+    // leave the user staring at an unchanged number in the app.
+    if (res.ok) await ytPostOnce();
+    return res;
   }
 
   if (msg.type === "yt-day-total") {
