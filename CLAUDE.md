@@ -108,7 +108,8 @@ per-title detail, the Stats-page best-day/best-week/streak/consistency
 cards, and `get_range_totals` all already apply attribution; mirror
 whichever of those matches your query shape. The Stats-page extra-stats
 cards (`_best_day`/`_best_week`/`get_streak`/`get_range_totals`) build off
-the shared `_adjusted_day_totals` helper — reuse it rather than re-deriving.
+the shared `_adjusted_day_totals` helper — reuse it rather than re-deriving, as
+`get_hour_blocks` (the Lifetime pace chart) does.
 
 ## Misc related notes
 

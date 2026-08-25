@@ -48,6 +48,7 @@ from db import (
     get_gsm_evidence_report,
     get_media_stats, get_media_shelf, get_media_titles, get_series_data,
     get_title_streams, get_title_speed_distributions, get_activity_trend,
+    get_hour_blocks,
     get_extra_stats, get_range_extra_stats,
     db_get_goal_progress, db_get_goal_burnup,
     db_add_goal, db_update_goal, db_delete_goal, db_finish_goal,
@@ -264,14 +265,20 @@ class Api:
         }
 
     def get_showcase(self):
-        """The three lifetime views on the Stats page, in one round trip."""
+        """The four lifetime views on the Stats page, in one round trip."""
         return {
             # All-time by default: this sits under a "Lifetime" heading, so
             # nothing here truncates the history or hides a title you read.
             "streams":  get_title_streams(None),
             "speeds":   get_title_speed_distributions(5, None),
             "activity": get_activity_trend(None),
+            # Default block size; the seg control re-fetches via get_hour_blocks.
+            "blocks":   get_hour_blocks(100),
         }
+
+    def get_hour_blocks(self, block_hours=100):
+        """One Lifetime chart's block-size seg — cheap enough to re-fetch per click."""
+        return get_hour_blocks(int(block_hours or 0))
 
     def get_media_shelf(self):
         return get_media_shelf()

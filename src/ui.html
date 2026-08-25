@@ -329,6 +329,22 @@
         <span class="muted" style="font-size:11px">All-time — not affected by the range above</span>
       </div>
 
+      <!-- Leads the Lifetime section: it's the only one here that asks about
+           PACE rather than composition, and it physically can't respond to the
+           range selector (it's a cumulative walk over the whole history), which
+           is exactly what this heading is for. -->
+      <div class="detail-chart-head">
+        <h3 class="showcase-sub" style="margin:0">How long each block of hours took</h3>
+        <div class="seg" id="block-size-seg">
+          <button class="seg-btn"        data-block="50"  onclick="setBlockSize(50)">50h</button>
+          <button class="seg-btn active" data-block="100" onclick="setBlockSize(100)">100h</button>
+          <button class="seg-btn"        data-block="250" onclick="setBlockSize(250)">250h</button>
+        </div>
+      </div>
+      <p class="muted showcase-note">Calendar days from one milestone to the next — shorter bars mean a faster
+        stretch. The dashed bar is the block you're in now.</p>
+      <div class="chart-wrap"><canvas id="chart-hour-blocks" height="200"></canvas></div>
+
       <h3 class="showcase-sub">What you were reading</h3>
       <div class="chart-wrap"><canvas id="chart-streams" height="220"></canvas></div>
 

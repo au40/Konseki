@@ -1945,6 +1945,84 @@ def get_activity_trend(months=None):
     return out
 
 
+def get_hour_blocks(block_hours=100):
+    """Calendar days spent inside each Nth-hour block of lifetime immersion.
+
+    [{"index", "start_date", "end_date", "days", "active_days", "hours",
+      "complete"}], oldest first — the "how long did each 100 hours take" view
+    under the Stats page's Lifetime heading. It answers a question the daily
+    chart can't: whether the pace is accelerating across the whole history.
+
+    Built by walking _adjusted_day_totals() cumulatively, so GSM rollover
+    attribution and the manual time overlay are both already folded into every
+    day's seconds (see CLAUDE.md) and the walk is clamped to logical today.
+    Nothing here re-derives either overlay — that reuse is the point.
+
+    **A boundary day belongs to the EARLIER block.** The day that carries a
+    crossing has time on both sides of it, and assigning it to one side keeps
+    `sum(days)` equal to the elapsed calendar span and `sum(active_days)` equal
+    to the lifetime active-day count. Bars that add up to the numbers elsewhere
+    on the page are worth more than splitting a day two ways. So a block's
+    `days` is `end_date - start_date`, except the first block, which is
+    inclusive of its own start (no earlier block exists to own that day).
+
+    The trailing partial block is returned with complete=False and runs to
+    logical today, so an in-progress block reads as elapsed-so-far rather than
+    as a finished slow one; its `hours` is what has actually accumulated.
+
+    Days with no time (chars-only backfill, time_excluded rows) don't move the
+    walk, so the first block starts at the first day that actually carries time.
+    """
+    block_hours = float(block_hours or 0)
+    if block_hours <= 0:
+        return []
+    step = block_hours * 3600.0
+
+    tot  = _adjusted_day_totals()
+    days = sorted(d for d, (_c, s) in tot.items() if s > 0)
+    if not days:
+        return []
+
+    _, today = window_bounds()
+    as_date  = lambda s: datetime.strptime(s, "%Y-%m-%d").date()
+
+    out, cum, idx = [], 0.0, 1
+    block_start, active = days[0], 0
+    for d in days:
+        active += 1
+        cum    += tot[d][1]
+        # A single day can close more than one block when block_hours is small
+        # enough (unreachable at 50h+, but the loop shouldn't depend on that).
+        # Later blocks closed on the same day get days=0/active_days=0, which is
+        # the honest reading under the boundary rule above.
+        while cum >= idx * step:
+            out.append({
+                "index":       idx,
+                "start_date":  block_start,
+                "end_date":    d,
+                "days":        (as_date(d) - as_date(block_start)).days + (1 if idx == 1 else 0),
+                "active_days": active,
+                "hours":       block_hours,
+                "complete":    True,
+            })
+            idx        += 1
+            block_start = d
+            active      = 0          # the boundary day went to the block just closed
+
+    partial = cum - (idx - 1) * step
+    if partial > 0:
+        out.append({
+            "index":       idx,
+            "start_date":  block_start,
+            "end_date":    today,
+            "days":        (as_date(today) - as_date(block_start)).days + (1 if idx == 1 else 0),
+            "active_days": active,
+            "hours":       round(partial / 3600.0, 2),
+            "complete":    False,
+        })
+    return out
+
+
 def get_media_shelf():
     """In-progress titles with completion and a projected finish — the 'what's in
     flight' view for the media page.

@@ -2763,16 +2763,98 @@ function renderDonutChart(activity) {
 }
 
 // ── Lifetime showcase charts ───────────────────────────────────────────────
-// Three all-time views that deliberately ignore the range selector. Fetched
-// once per Stats load in a single round trip (Api.get_showcase).
+// Four all-time views that deliberately ignore the range selector. Fetched
+// once per Stats load in a single round trip (Api.get_showcase); only the block
+// chart re-fetches, and only when its size seg changes.
 let showcaseCache = null;
 
 async function renderShowcase() {
   if (!showcaseCache) showcaseCache = await window.pywebview.api.get_showcase();
   const d = showcaseCache || {};
+  renderHourBlocksChart(d.blocks || []);
   renderStreamsChart(d.streams || { dates: [], series: [] });
   renderSpeedDistChart(d.speeds || []);
   renderActivityTrendChart(d.activity || []);
+}
+
+// #17 — how long each block of lifetime hours took. The only Lifetime view
+// about PACE rather than composition, and the reason it belongs under this
+// heading rather than with the charts above: it is a cumulative walk over the
+// whole history, so it physically cannot answer the range selector. The
+// bucketing lives in db.get_hour_blocks the same way the activity trend's does
+// — JS only draws — which keeps it on the adjusted-day-totals rail.
+let blockHours = 100;
+
+// Pure: bar geometry for the block chart. Split out because the in-progress
+// block is the whole reason this needs care — drawn like a finished bar it
+// reads as "a very slow 100 hours" rather than "still going", so it gets a
+// hollow dashed treatment that verify_ui.js can pin without a DOM.
+function hourBlockBars(rows, size) {
+  return {
+    labels: rows.map(r => `${r.index * size}h`),
+    days:   rows.map(r => r.days),
+    bg:     rows.map(r => r.complete ? CT.accent : ctAlpha(CT.accent, 0.14)),
+    border: rows.map(() => CT.accent),
+    width:  rows.map(r => r.complete ? 0 : 1.5),
+    dash:   rows.map(r => r.complete ? [] : [4, 3]),
+  };
+}
+
+function renderHourBlocksChart(rows) {
+  if (!rows.length) {
+    destroyChart('hour-blocks');
+    setChartEmpty('chart-hour-blocks', 'No time logged yet');
+    return;
+  }
+  const b = hourBlockBars(rows, blockHours);
+  upsertChart('hour-blocks', 'chart-hour-blocks', {
+    type: 'bar',
+    data: { labels: b.labels, datasets: [{
+      label: 'Days', data: b.days,
+      backgroundColor: b.bg, borderColor: b.border, borderWidth: b.width,
+      borderDash: b.dash, borderRadius: 3, borderSkipped: false,
+    }] },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: CHART_ANIM,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: {
+          title: c => {
+            const r = rows[c[0].dataIndex];
+            const from = (r.index - 1) * blockHours;
+            return r.complete ? `${from}h → ${r.index * blockHours}h`
+                              : `${from}h → now (${r.hours.toFixed(1)}h in)`;
+          },
+          // The gap between the two numbers is the interesting part: 90 calendar
+          // days off 40 active ones is a different story from 90 off 85.
+          // "active", not "with reading" -- the walk sums every activity type
+          // that carries time, so a listening-only day counts here too.
+          label: c => `${rows[c.dataIndex].days} days · ${rows[c.dataIndex].active_days} active`,
+          footer: c => {
+            const r = rows[c[0].dataIndex];
+            return `${r.start_date} → ${r.end_date}${r.complete ? '' : ' (in progress)'}`;
+          },
+        } },
+      },
+      scales: {
+        x: { grid: { color: CT.grid },
+             ticks: { color: CT.dim, maxRotation: 0, autoSkip: true, maxTicksLimit: 14 } },
+        y: { grid: { color: CT.grid }, ticks: { color: CT.dim, callback: v => `${v}d` },
+             afterFit: sc => { sc.width = 62; } },
+      },
+    }
+  });
+}
+
+// Cheap enough to re-fetch per click (one local pywebview call), and writing the
+// result back into showcaseCache keeps the chosen size across a page switch.
+async function setBlockSize(h) {
+  blockHours = h;
+  document.querySelectorAll('#block-size-seg .seg-btn').forEach(btn =>
+    btn.classList.toggle('active', Number(btn.dataset.block) === h));
+  const rows = await window.pywebview.api.get_hour_blocks(h);
+  if (showcaseCache) showcaseCache.blocks = rows || [];
+  renderHourBlocksChart(rows || []);
 }
 
 // #10 — stacked area of characters per title per week. Chart.js has no true

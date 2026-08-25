@@ -106,6 +106,7 @@ const PROBE = `
   rollDetailSeries, twRolling, splitBarDatasets, bucketHasMember, splitTooltip, speedSegmentColors,
   memberLegendLabels,
   bucketDaily, statsMetricAvail, statsCumSeries, sparkHTML, goalBurnupSeries, dateFromISO,
+  hourBlockBars,
 };`;
 
 try {
@@ -671,6 +672,30 @@ st.filter({ dataIndex: 2, dataset: { key: 'drop' } });   // hover a bucket where
 check('a fully filtered bucket still names its day', st.title([]), '02-03');
 check('and shows no total',                          st.footer([]), undefined);
 check('a bucket with rows still totals them',        st.footer([1, 2]), 'Total: 2');
+
+// hourBlockBars -- the "how long each 100 hours took" bars. The in-progress
+// block must not render as a finished one: drawn solid it reads as a very slow
+// block rather than as still running, which inverts the chart's whole message.
+console.log('\n--- hour blocks: the in-progress bar must look unfinished ---');
+const hb = P.hourBlockBars([
+  { index: 1, days: 63, active_days: 55, hours: 100, complete: true },
+  { index: 2, days: 25, active_days: 24, hours: 100, complete: true },
+  { index: 3, days: 76, active_days: 26, hours: 76.5, complete: false },
+], 100);
+check('labels name the hour mark each block ENDS on', hb.labels.join(','), '100h,200h,300h');
+check('a finished block is solid accent',    hb.bg[0], P.CT.accent);
+check('and carries no border',               hb.width[0], 0);
+check('the in-progress block is washed out', hb.bg[2], P.ctAlpha(P.CT.accent, 0.14));
+check('and is dashed',                       hb.dash[2].join(','), '4,3');
+check('a finished block is not dashed',      hb.dash[0].length, 0);
+check('bar heights are calendar days',       hb.days.join(','), '63,25,76');
+
+// The label follows the seg size, not the row index: a 250h block at index 2 is
+// the 500h mark. Getting this wrong mislabels every bar on any non-default size.
+const hb250 = P.hourBlockBars([{ index: 2, days: 10, active_days: 9, hours: 250, complete: true }], 250);
+check('block size drives the mark, not the row', hb250.labels[0], '500h');
+
+check('no blocks yields no bars', P.hourBlockBars([], 100).labels.length, 0);
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
