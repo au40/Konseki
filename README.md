@@ -1,10 +1,7 @@
 # Konseki
 
-A language-immersion tracker for Windows. It pulls your reading/listening stats
-from [GameSentenceMiner (GSM)](https://github.com/bpwhelan/GameSentenceMiner) and
-[ッツ Reader (ttsu)](https://reader.ttsu.app) and aggregates everything — sessions,
-streaks, goals, per-title breakdowns, heatmaps — into one dashboard. It runs in your
-system tray and updates itself as you read.
+A language-immersion tracker for Windows. It pulls your reading/listening stats/sessions
+from [GameSentenceMiner (GSM)](https://github.com/bpwhelan/GameSentenceMiner), [ッツ Reader (ttsu)](https://reader.ttsu.app), and Youtube, and aggregates everything into one place. It runs in your system tray and updates itself as you read.
 
 ## Features
 
