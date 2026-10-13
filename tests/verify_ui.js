@@ -103,7 +103,7 @@ const PROBE = `
   reserveLegendRoom, positionDailyBrush,
   get BRUSH_FOLLOW() { return BRUSH_FOLLOW; },
   applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty, heatmapColor,
-  rollDetailSeries, twRolling, splitBarDatasets, bucketHasMember, splitTooltip, speedSegmentColors,
+  detailSeries, twRolling, splitBarDatasets, bucketHasMember, splitTooltip, speedSegmentColors,
   memberLegendLabels,
   bucketDaily, statsMetricAvail, statsCumSeries, sparkHTML, goalBurnupSeries, dateFromISO,
   hourBlockBars,
@@ -212,9 +212,7 @@ let threw = null;
 try { P.setChartEmpty('does-not-exist', 'msg'); } catch (e) { threw = e.message; }
 check('setChartEmpty tolerates a missing canvas', threw, null);
 
-console.log('\n--- M2: rollDetailSeries ---');
-// 100 days, deliberately uneven speed so a mean-of-daily-speeds would differ
-// from the correct total-chars / total-secs.
+console.log('\n--- M2: detailSeries ---');
 const mkDay = (i) => {
   const d = new Date(2026, 0, 1 + i);
   const iso = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -229,59 +227,20 @@ const mkDay = (i) => {
 const days100 = Array.from({ length: 100 }, (_, i) => mkDay(i));
 const days30  = days100.slice(0, 30);
 
-const passthru = P.rollDetailSeries(days30, days30.map(r => r.by_milestone), 90);
-check('under threshold: no rollup', passthru.labels.length, 30);
-check('under threshold: labels are MM-DD', passthru.labels[0], days30[0].date.slice(5));
+const short = P.detailSeries(days30, days30.map(r => r.by_milestone));
+check('one bar per day', short.labels.length, 30);
+check('labels are MM-DD', short.labels[0], days30[0].date.slice(5));
 
-const rolled = P.rollDetailSeries(days100, days100.map(r => r.by_milestone), 90);
-check('over threshold: rolls up to weeks', rolled.labels.length < 100, true);
-check('rollup conserves total chars',
-      rolled.chars.reduce((a, b) => a + b, 0),
-      days100.reduce((a, r) => a + r.chars, 0));
-check('rollup conserves total secs',
-      rolled.secs.reduce((a, b) => a + b, 0),
-      days100.reduce((a, r) => a + r.seconds, 0));
-check('rollup conserves split chars',
-      rolled.split.reduce((a, s) => a + (s.a ? s.a.chars : 0), 0),
-      days100.reduce((a, r) => a + r.by_milestone.a.chars, 0));
+// A long title stays daily — no weekly rollup past ~3 months any more.
+const long = P.detailSeries(days100, days100.map(r => r.by_milestone));
+check('a 100-day title is still one bar per day', long.labels.length, 100);
+check('the last label is the last day', long.labels[99], days100[99].date.slice(5));
+check('chars pass through per day', long.chars[1], days100[1].chars);
+check('secs pass through per day', long.secs[1], days100[1].seconds);
+check('split passes through per day', long.split[1].a.chars, days100[1].by_milestone.a.chars);
 
-// The invariant at the aggregation layer, with hand-computed expected values so
-// the assertion can actually fail. Two days in one bucket, chosen so that
-// mean-of-daily-speeds and total-chars/total-secs are far apart:
-//   day A 10000 chars / 1h  -> 10000/h
-//   day B  1000 chars / 10h ->   100/h
-//   mean of daily speeds  = 5050/h   <- what a naive average would give
-//   chars/secs over bucket = 11000 / 11h = 1000/h  <- the only correct answer
-const pair = [
-  { date: '2026-01-01', chars: 10000, seconds: 3600 },
-  { date: '2026-01-02', chars: 1000,  seconds: 36000 },
-];
-const pr = P.rollDetailSeries(pair, null, 1);   // weeklyOver=1 forces the rollup
-check('both days land in one week bucket', pr.labels.length, 1);
-const bucketSpeed = pr.chars[0] / (pr.secs[0] / 3600);
-check('bucket speed is chars/secs (1000/h)', Math.round(bucketSpeed), 1000);
-check('bucket speed is NOT the mean of daily speeds (5050/h)',
-      Math.round(bucketSpeed) === 5050, false);
-
-// The old day-of-month key merged Jan/Feb/Mar into one bucket. Distinct weeks
-// must stay distinct.
-const acrossMonths = [
-  { date: '2026-01-02', chars: 1, seconds: 60 },
-  { date: '2026-02-02', chars: 1, seconds: 60 },
-  { date: '2026-03-02', chars: 1, seconds: 60 },
-];
-check('dates in different months do not share a bucket',
-      P.rollDetailSeries(acrossMonths, null, 1).labels.length, 3);
-check('a full year rolls into ~52 weekly buckets, not 6',
-      P.rollDetailSeries(
-        Array.from({ length: 365 }, (_, i) => {
-          const d = new Date(2026, 0, 1 + i);
-          return { date: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`,
-                   chars: 1, seconds: 60 };
-        }), null, 90).labels.length >= 52, true);
-
-check('no split source is tolerated', P.rollDetailSeries(days30, null, null).split.length, 30);
-check('empty series is tolerated', P.rollDetailSeries([], null, 90).labels.length, 0);
+check('no split source is tolerated', P.detailSeries(days30, null).split.length, 30);
+check('empty series is tolerated', P.detailSeries([], null).labels.length, 0);
 
 console.log('\n--- M2: twRolling basis ---');
 // twRolling must be time-weighted over the window (sum chars / sum secs), which
@@ -435,22 +394,16 @@ check('an empty range yields an empty series',
       P.statsCumSeries(P.bucketDaily([], 'day'), false).length, 0);
 check('a bucket with no secs is tolerated', P.statsCumSeries({}, false).length, 0);
 
-// The media/series panels feed the SAME helper off rollDetailSeries, which rolls
-// long titles up to weekly buckets. The running total has to survive that: one
-// point per week bucket, still ending on the title's real total.
+// The media/series panels feed the SAME helper off detailSeries. A long title
+// gets one cumulative point per day, ending on the title's real total.
 const longDaily = Array.from({ length: 120 }, (_, i) => ({
   date: new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10),
   chars: 1000, seconds: 1800,
 }));
-const cumRolled = P.rollDetailSeries(longDaily, null, 90);
-const rollCum = P.statsCumSeries(cumRolled, false);
-check('weekly rollup still yields one cumulative point per bucket',
-      rollCum.length, cumRolled.labels.length);
-check('rollup does not lose time from the running total',
-      Math.round(rollCum[rollCum.length - 1] * 100) / 100, 60);
-check('the rolled-up total matches the unrolled one',
-      rollCum[rollCum.length - 1],
-      P.statsCumSeries(P.rollDetailSeries(longDaily, null, null), false).slice(-1)[0]);
+const detailCum = P.statsCumSeries(P.detailSeries(longDaily, null), false);
+check('a long title yields one cumulative point per day', detailCum.length, 120);
+check('the running total ends on the title total',
+      Math.round(detailCum[detailCum.length - 1] * 100) / 100, 60);
 
 console.log('\n--- M4: shelf activity strip ---');
 const spark = P.sparkHTML([0, 60, 600, 0, 300], '#5B8CFF');

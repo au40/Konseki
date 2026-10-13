@@ -40,6 +40,7 @@ _WIPE = (
     "title_aliases",
     "media_char_counts",
     "media_completions",
+    "media_chars_excluded",
     "book_covers",
     "series",
     "series_members",
@@ -65,15 +66,15 @@ class Seed:
 
     # -- rows --------------------------------------------------------------
     def session(self, date, chars=0, secs=0.0, source="gsm", title="Title",
-                game_id=None, atype="Reading", time_excluded=0):
+                game_id=None, atype="Reading", time_excluded=0, cards=0):
         con = sqlite3.connect(self.db.DB_PATH)
         con.execute(
             "INSERT INTO sessions (source,title,activity_type,session_date,"
             "chars_read,lines_read,time_seconds,reading_speed,cards_mined,"
-            "game_id,time_excluded,ingested_at) "
-            "VALUES (?,?,?,?,?,0,?,?,0,?,?,datetime('now'))",
+            "cards_done,game_id,time_excluded,ingested_at) "
+            "VALUES (?,?,?,?,?,0,?,?,0,?,?,?,datetime('now'))",
             (source, title, atype, date, chars, secs,
-             (chars / (secs / 3600)) if secs else 0, game_id, time_excluded),
+             (chars / (secs / 3600)) if secs else 0, cards, game_id, time_excluded),
         )
         con.commit()
         con.close()
@@ -104,6 +105,10 @@ class Seed:
         con.commit()
         con.close()
         return sid
+
+    def exclude_chars(self, title, excluded=True):
+        """Mark a title's characters as unrepresentative (the media-pane toggle)."""
+        self.db.db_set_media_chars_excluded(title, excluded)
 
     def setting(self, key, value):
         self.db.set_setting(key, str(value))

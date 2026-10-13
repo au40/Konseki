@@ -577,3 +577,215 @@ add a new chars/hour display and reach for that column because it's
 conveniently in the schema, you are reintroducing the bug — the gap only
 shows up on titles with GSM rollover attribution active, so it's easy to
 miss in spot-checks.
+
+# Per-title chars exclusion (`media_chars_excluded`)
+
+The user's escape hatch for media whose character counts are unrepresentative —
+a game whose text hooks catch a fraction of what's actually read. Presence of a
+row means **this title's characters are withheld from every global figure**.
+
+```
+media_chars_excluded (
+    title       TEXT PRIMARY KEY,
+    excluded_at TEXT NOT NULL
+)
+```
+
+Title-keyed and display-only, exactly like `media_completions` /
+`media_char_counts` above it: it never touches `sessions`, so it survives the GSM
+re-ingests that `DELETE`+re-insert those rows, and toggling it is instant and
+retroactive. A `sessions` column would have to be written at insert time and
+rewritten on every flip; that was considered and rejected for the same reason
+`manual_time_adjust` isn't one. Written by `db_set_media_chars_excluded`
+([db.py](src/db.py)), toggled from the **detail pane's "Don't count characters"
+button** next to "Complete game" (`renderMediaDetail`/`onCharsExcludedToggle` in
+[ui.js](src/ui.js), Api `set_media_chars_excluded` in [tracker.py](src/tracker.py)).
+
+**Two rules define the whole feature:**
+
+1. **Chars only. Time is never affected.** Every second an excluded title logged
+   still counts in Total time, the daily/weekly series, the heatmap, streaks,
+   consistency, the Lifetime pace chart and the activity donut. This is what
+   separates it from `time_excluded`, which is the mirror concept for time.
+2. **Global figures only. Per-title surfaces keep the full count.** The detail
+   pane, its per-day chars/speed line, the progress bar and its completion mark,
+   the milestone splits, the media grid card, series totals, the title-streams
+   chart and the speed box plots all show the title's real characters. That is
+   the point of the feature — the count is still worth having, just not worth
+   pooling. (Consequence worth knowing: the stacked title-streams chart can sum
+   higher than the Stats chars card. Deliberate.)
+
+## How to apply it
+
+**Global chars sums** use the `_counted_chars()` SQL expression
+([db.py](src/db.py)) in place of a bare `chars_read`, mirroring the
+`CASE WHEN time_excluded ... THEN time_seconds ELSE 0 END` idiom already used for
+time. Keeping it as one expression is the point: this is a cross-cutting concern
+like GSM rollover attribution, and what keeps it consistent is that every global
+chars sum spells it the same way. Applied in `get_weekly_summary`,
+`get_all_time_totals`, `get_daily_time_series`, `_adjusted_day_totals` (and so
+range totals, prev-range deltas, best day/week, streak and consistency),
+`get_extra_stats`, `db_get_goal_progress` and `db_get_goal_burnup`.
+
+**Reading speed drops the title from BOTH sides**, and this is the trap.
+Zeroing an excluded title's chars while leaving its time would put its hours in
+the cph denominator with nothing above them and collapse the figure — the exact
+failure a chars-less Reading session causes, and the rule already documented
+under the speed basis below. So `get_daily_reading_speed_basis` filters the rows
+out with `title NOT IN (SELECT title FROM media_chars_excluded)` rather than
+zeroing them. The filter is per row, so the rest of a mixed day survives.
+
+**The per-day adjustment chokepoint has to know too.**
+`get_gsm_day_adjustment(s)` is game-agnostic by design, so an excluded game's
+rollover displacement would hand its chars straight back to the figures the raw
+sum had just zeroed. Both helpers now resolve the exclusion to game ids
+(`_chars_excluded_game_ids`) and drop those games' **chars**, keeping their
+**seconds** — except under `drop_excluded_secs=True`, which the reading-speed
+basis passes to get the both-sides treatment there too. The manual overlay rides
+the same switch (`get_manual_time_adjusts_by_day(skip_games=…)`): for the speed
+basis, a shave on an excluded game must not come off a denominator its time never
+entered.
+
+**Per-row lists show the chars and withhold them from the total.**
+`get_dashboard` and `get_history` ([tracker.py](src/tracker.py)) stamp each row
+with `chars_counted`, from `get_chars_excluded_titles()`. The row still renders
+its characters with a muted "not counted" badge — they really were read, and
+hiding them would make the row disagree with the media pane — while the
+dashboard's client-side day total and cph skip it (`refreshDashboard` in
+[ui.js](src/ui.js)). An absent flag reads as counted, so other payloads are
+unaffected.
+
+## The invariant
+
+Same shape as the attribution rule at the top of this file: **if you add a query
+that surfaces a chars total pooled across titles, it must apply this.** Ask which
+rail it's on — a figure that aggregates ACROSS titles applies the exclusion; a
+figure that is per-title does not. Getting it wrong is quiet: it only shows up
+once a title is actually excluded, so it survives spot-checks. `time_excluded` is
+not a substitute — that suppresses time and leaves chars, this does the reverse.
+
+# Anki review time — `source='anki'`, and the two rules it adds
+
+The Anki addon (`anki/konseki_anki/`) reads Anki's `revlog` — a complete
+per-answer ledger with millisecond timestamps — buckets it into Konseki's
+logical days, and posts each day's cumulative total to `/import`. Rows land as
+`source='anki'`, `title='Anki'`, `activity_type='Vocabulary'`, `chars_read=0`,
+**`game_id` NULL** (which is what keeps this source outside the GSM rollover
+attribution and `manual_time_adjust` rails entirely). Written by
+`import_anki_days` in [imports.py](src/imports.py); dispatched in
+`apply_payload` ([ext_server.py](src/ext_server.py)).
+
+`revlog.time` is already capped by the deck preset's "maximum answer seconds",
+so AFK time is bounded at the source — Anki needs no equivalent of the manual
+time overlay GSM has.
+
+## The `client_id` is collection-scoped, NOT device-scoped
+
+This **inverts** the YouTube rule documented above, and getting it backwards
+double-counts silently. YouTube keys per device because a browser only knows its
+own viewing and two machines must *sum*. An Anki collection is **synced**: every
+device that opens it computes the same day totals from the same `revlog`. A
+per-device key would make a second desktop insert a second row and double the
+day; the collection-scoped `anki:<date>` makes it rewrite the first instead.
+
+The generalisation, which the YouTube note above states and this is the second
+instance of: **the key names the thing being accumulated.** There, one device's
+viewing on one day. Here, one collection's studying on one day. `collection_tag`
+(default empty) adds a segment only for the two-collections case.
+
+Both counters zero **deletes** the row, same as `import_youtube_day` and for the
+same reason — so neither `days` nor the per-entry counters get a `, 0` default
+anywhere in the chain. A day with no reviews is still *sent* as `0/0`, which is
+what deletes the row of a day the user emptied out.
+
+## `skip_days_with_vocabulary_time` — the backfill's don't-double-count rule
+
+Some of the user's Anki history is already in Konseki, hand-logged or
+CSV-imported as Vocabulary sessions. Importing on top of it would double-count.
+Rather than a date cutoff (considered and rejected — it needs a date chosen, and
+goes stale where the hand-logging was patchy rather than continuous), the rule is
+per day: **a day that already has counted Vocabulary time keeps it, and that
+day's Anki row imports with `time_excluded=1`.**
+
+`_days_with_vocabulary_time` in [imports.py](src/imports.py) answers it. Every
+clause is load-bearing:
+
+- **`source <> 'anki'`** is what makes the rule idempotent. Without it the second
+  backfill run sees the row the first run wrote and flips every day to excluded,
+  one run at a time.
+- **`time_excluded = 0`** reads "already tracked" as *already counting*. A day
+  whose only Vocabulary row is itself excluded contributes nothing to any total,
+  so Anki should fill it.
+- **`activity_type = 'Vocabulary'`** and not "any activity" — a day of reading
+  must not suppress genuine Anki time logged nowhere else.
+- **No source allowlist**: hand-logged, stopwatch and CSV-imported Vocabulary all
+  block equally.
+
+The flag is **tri-state, and the absent state is the point**: `None` (the
+periodic push) leaves an existing row's `time_excluded` alone, so a nightly push
+can never un-suppress what the backfill decided; `True`/`False` write it on
+INSERT *and* UPDATE, so re-running the backfill re-decides. The `/import`
+dispatch passes `body.get(...)` straight through for exactly this reason —
+coercing it to a bool there would break the first case.
+
+The decision is **server-side only**. The addon has no view of Konseki's
+sessions and cannot make it.
+
+## `cards_done` — and why it is not `cards_mined`
+
+`sessions.cards_done` holds reviews answered. It is a **separate column from
+`cards_mined`**, which means GSM's "cards mined from this game", is inert, and is
+still summed into media-detail payloads by `_compute_title_core` — reusing it
+would make Anki reviews surface there as mined cards.
+
+Cards use **two different bases on purpose**, and the split mirrors how chars are
+already treated:
+
+- **Totals count every row**, `time_excluded` included — `get_daily_cards` in
+  [db.py](src/db.py), same as `total_chars`. This is what makes the backfill rule
+  work: a suppressed day still did those cards, and they were never logged
+  anywhere else.
+- **Rates drop excluded rows from both sides** — `get_card_speed_basis` +
+  `_basis_cardsph`, the exact mirror of `get_daily_reading_speed_basis` +
+  `_basis_cph`. A suppressed row has no usable time to divide by.
+
+Cards/hour is **always derived** from a cards total over a time total, never
+stored — the same invariant as chars/hour, for the same reason.
+
+`get_today_stats` and `get_recent_sessions` carry `cards_done` as the **last**
+tuple element (phantom rollover rows carry 0), and it joins their
+drop-if-all-zero liveness test so an all-cards row survives. GSM rows carry
+`cards_done=0`, so none of their behaviour changes.
+
+## The add-on pushes on events, never on a clock
+
+There is deliberately no repeating timer. Pushes are triggered by: a debounce
+after the last answered card (`idle_push_mins`), a finished sync, and profile
+open/close. Each one re-states a **seven-day** window; the confirmed-days map
+filters out anything that hasn't moved, so the width is free.
+
+**If you touch the failure path, restore the dirty flag.** `push_now` clears it
+before handing the request to `taskman`, so a failure that returns without
+setting it back means every later trigger short-circuits on `not _dirty` and
+that day is never sent again. That was a real bug — the polling timer's comment
+claimed "the next tick retries" while the code guaranteed it could not.
+`tests/test_anki_addon_glue.py` pins this by stubbing `aqt`, and a mutation back
+to the old shape fails three of its tests.
+
+## Accepted limits
+
+- A **suppressed Anki day is invisible in History and on the dashboard** — those
+  two paths drop `time_excluded` rows outright and an Anki row has no chars to
+  carry it. Benign under this rule rather than surprising: a day is only ever
+  suppressed *because* it already has a counted Vocabulary row, so the day still
+  shows Vocabulary time — just the hand-logged row. Its cards still reach the
+  totals via `get_daily_cards`.
+- **A day's hand-logged figure wins even when it is wrong.** 5 minutes logged by
+  hand against 60 really done keeps the 5; the rule is all-or-nothing per day
+  (topping up the difference was rejected — it blends an estimate with a
+  measurement inside one figure). Delete the hand-logged row and re-run.
+- **Anki's own "cards studied today" can disagree** with Konseki's Anki row when
+  Anki's rollover hour differs from Konseki's. Deliberate: every source in
+  Konseki sits on Konseki's calendar.
+- `db_get_goal_progress` applies no `time_excluded` filter at all — a
+  pre-existing quirk, now reachable by Anki rows too.

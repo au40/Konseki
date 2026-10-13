@@ -45,6 +45,7 @@ from db import (
     get_streak, get_top_titles, get_heatmap_data,
     get_manual_time_adjust, set_manual_time_adjust, get_manual_time_adjusts_for_date,
     get_manual_time_adjusts_all,
+    get_chars_excluded_titles,
     get_gsm_evidence_report,
     get_media_stats, get_media_shelf, get_media_titles, get_series_data,
     get_title_streams, get_title_speed_distributions, get_activity_trend,
@@ -177,6 +178,11 @@ class Api:
         weekly = get_weekly_summary()
         totals = get_all_time_totals()
         aliases = _get_aliases()
+        # Rows of a chars-excluded title still SHOW their chars (they happened),
+        # but carry chars_counted=false so the header total and the day's cph —
+        # both summed client-side from these rows — skip them, matching the
+        # backend figures on every other page.
+        chars_excl = get_chars_excluded_titles()
         cs, _  = get_streak()
         today_date = get_today()
         # Per-game shave active today, so each row can show a "−Nm" indicator.
@@ -187,6 +193,8 @@ class Api:
                  "raw_title": r[2],
                  "activity_type": r[3], "chars": r[4], "lines": r[5], "seconds": r[6],
                  "game_id": r[7], "date": today_date, "session_date": r[8],
+                 "cards": r[9],
+                 "chars_counted": r[2] not in chars_excl,
                  "adjust_secs": adj.get(r[7], 0)}
                 for r in today
             ],
@@ -204,6 +212,7 @@ class Api:
     # ── History ───────────────────────────────────────────────────────────────
     def get_history(self):
         aliases = _get_aliases()
+        chars_excl = get_chars_excluded_titles()
         manual  = get_manual_time_adjusts_all()   # {(date, game_id): secs_delta}
         # Indicator on the real GSM row that absorbed the shave (one per date+game);
         # phantom rows (id=None) don't carry it, to avoid double-display.
@@ -211,7 +220,8 @@ class Api:
             {"id": r[0], "date": r[1], "source": r[2], "title": aliases.get(r[3], r[3]),
              "raw_title": r[3],
              "activity_type": r[4], "chars": r[5], "lines": r[6], "seconds": r[7],
-             "game_id": r[8], "session_date": r[1],
+             "game_id": r[8], "session_date": r[1], "cards": r[9],
+             "chars_counted": r[3] not in chars_excl,
              "adjust_secs": (manual.get((r[1], r[8]), 0) if r[0] is not None else 0)}
             for r in get_recent_sessions(30)
         ]
@@ -249,6 +259,8 @@ class Api:
             "cur_streak":      cs,
             "avg_secs":        rs / max(w, 1),
             "chars_per_hour":  extra["chars_per_hour"],
+            "total_cards":     extra["total_cards"],
+            "cards_per_hour":  extra["cards_per_hour"],
             "best_day_secs":   extra["best_day_secs"],
             "best_day_date":   extra["best_day_date"],
             "best_week_secs":  extra["best_week_secs"],
@@ -1140,6 +1152,17 @@ class Api:
         """Mark a media entry finished (or clear the mark). Display-only flag."""
         try:
             return db.db_set_media_complete(title, bool(complete))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def set_media_chars_excluded(self, title, excluded):
+        """Withhold a title's characters from global figures (or restore them).
+
+        Display-only overlay, like set_media_complete: it never touches session
+        rows, so it survives GSM re-ingests and toggles retroactively. Time is
+        unaffected — the title keeps every second it logged."""
+        try:
+            return db.db_set_media_chars_excluded(title, bool(excluded))
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

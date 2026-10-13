@@ -12,3 +12,8 @@ konseki.log
 konseki.lock
 .konseki.flock
 plans/
+
+# Anki addon runtime state. Written into the addon folder at run time;
+# lands in the repo only when the addon is installed with --link.
+anki/konseki_anki/user_files/*
+!anki/konseki_anki/user_files/.gitkeep

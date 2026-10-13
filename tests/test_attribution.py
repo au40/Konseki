@@ -313,6 +313,22 @@ def _scenarios(seed):
                          title="Podcast", atype="Listening"),
             seed.displace(seed.day(4), seed.day(3), "g1", 4_000, 1200),
         ),
+        # Anki carries no game_id, so neither overlay can reach it — but its time
+        # still has to agree across every surface, and sit on the same day as a
+        # displacement that moved GSM's time off that date.
+        "with_anki": lambda: (
+            seed.gsm(seed.day(3), 10_000, 3600, game_id="g1"),
+            seed.session(seed.day(3), secs=1800, source="anki", title="Anki",
+                         atype="Vocabulary", cards=210),
+            seed.displace(seed.day(4), seed.day(3), "g1", 4_000, 1200),
+        ),
+        # A suppressed Anki day: its cards count everywhere, its time nowhere.
+        "anki_suppressed": lambda: (
+            seed.session(seed.day(3), secs=900, source="manual", title=None,
+                         atype="Vocabulary"),
+            seed.session(seed.day(3), secs=1800, source="anki", title="Anki",
+                         atype="Vocabulary", cards=210, time_excluded=1),
+        ),
     }
 
 

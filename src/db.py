@@ -56,6 +56,10 @@ def init_db():
         ("time_excluded",  "INTEGER DEFAULT 0"),
         # Idempotency key supplied by a network client (see the index below).
         ("client_id",      "TEXT"),
+        # Reviews answered, from the Anki addon. NOT `cards_mined`, which means
+        # GSM's "cards mined from this game" and is inert; conflating the two
+        # would make `_compute_title_core` report Anki reviews as mined cards.
+        ("cards_done",     "INTEGER DEFAULT 0"),
     ]:
         if col_name not in cols:
             con.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
@@ -382,6 +386,23 @@ def init_db():
         CREATE TABLE IF NOT EXISTS media_completions (
             title        TEXT PRIMARY KEY,
             completed_at TEXT NOT NULL
+        )
+    """)
+
+    # Media whose character counts the user has declared unrepresentative
+    # ("Don't count chars"): presence of a row = excluded. Same title-keyed,
+    # display-only pattern as media_completions above — it survives GSM
+    # re-ingests (which churn session rows but keep titles) and never mutates
+    # `sessions`, so toggling it is instant, retroactive and reversible.
+    #
+    # It suppresses the title's chars in GLOBAL figures only; every per-title
+    # surface (detail pane, progress bar, milestones, media grid card) still
+    # shows them in full. Time is untouched everywhere — only chars come out.
+    # See the "Per-title chars exclusion" section of CLAUDE.md.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS media_chars_excluded (
+            title       TEXT PRIMARY KEY,
+            excluded_at TEXT NOT NULL
         )
     """)
 
@@ -804,30 +825,49 @@ def get_gsm_evidence_report():
     return out
 
 
-def get_gsm_day_adjustment(d):
+def get_gsm_day_adjustment(d, drop_excluded_secs=False):
     """Return (chars, time_seconds, cards) net adjustment to apply to date d's GSM totals.
     Adds attributions where rollover_date=d (chars belonging to d from another source_date),
-    subtracts attributions where source_date=d (chars belonging elsewhere)."""
+    subtracts attributions where source_date=d (chars belonging elsewhere).
+
+    Chars-excluded titles (see `_counted_chars`) contribute no CHARS here: the raw
+    per-day sum already zeroes them, so letting their displacement through the
+    delta would leak them straight back in. Their SECONDS still count, because
+    the exclusion is about chars only — except for the reading-speed basis, which
+    drops such a title from both sides of the ratio and passes
+    `drop_excluded_secs=True` to get the same treatment out of this helper."""
+    excl = _chars_excluded_game_ids()
     con = sqlite3.connect(DB_PATH)
-    add = con.execute(
-        "SELECT COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0), COALESCE(SUM(cards),0) "
-        "FROM gsm_rollover_attributions WHERE rollover_date=? AND source_date<>?",
-        (d, d)
-    ).fetchone()
-    sub = con.execute(
-        "SELECT COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0), COALESCE(SUM(cards),0) "
-        "FROM gsm_rollover_attributions WHERE source_date=? AND rollover_date<>?",
-        (d, d)
-    ).fetchone()
-    man = con.execute(
-        "SELECT COALESCE(SUM(secs_delta),0) FROM manual_time_adjust WHERE date=?", (d,)
-    ).fetchone()
+
+    def _split(where, params):
+        """(chars, secs, cards) for one side, partitioned by exclusion."""
+        rows = con.execute(
+            "SELECT game_id, COALESCE(SUM(chars),0), COALESCE(SUM(time_seconds),0), "
+            "COALESCE(SUM(cards),0) FROM gsm_rollover_attributions "
+            f"WHERE {where} GROUP BY game_id", params).fetchall()
+        c, t, k = 0, 0.0, 0     # keep chars/cards integral, as SUM() returned
+        for gid, ch, sec, cd in rows:
+            if gid in excl:
+                if not drop_excluded_secs:
+                    t += sec
+                continue
+            c += ch; t += sec; k += cd
+        return (c, t, k)
+
+    add = _split("rollover_date=? AND source_date<>?", (d, d))
+    sub = _split("source_date=? AND rollover_date<>?", (d, d))
+    man_sql, man_params = (
+        "SELECT COALESCE(SUM(secs_delta),0) FROM manual_time_adjust WHERE date=?", [d])
+    if drop_excluded_secs and excl:
+        man_sql += f" AND game_id NOT IN ({','.join('?' * len(excl))})"
+        man_params += sorted(excl)
+    man = con.execute(man_sql, man_params).fetchone()
     con.close()
     man_secs = float(man[0]) if man else 0.0
     return (add[0] - sub[0], add[1] - sub[1] + man_secs, add[2] - sub[2])
 
 
-def get_gsm_day_adjustments():
+def get_gsm_day_adjustments(drop_excluded_secs=False):
     """Batch form of get_gsm_day_adjustment: {date: (chars, time_seconds, cards)}
     net adjustment for every date a GSM rollover displacement touches.
 
@@ -840,14 +880,24 @@ def get_gsm_day_adjustments():
     exactly mirroring get_gsm_day_adjustment's add/sub split. Dates absent from
     the returned dict have a zero adjustment; callers default with
     `adj.get(d, (0, 0, 0))`."""
+    excl = _chars_excluded_game_ids()
     con  = sqlite3.connect(DB_PATH)
     rows = con.execute(
-        "SELECT rollover_date, source_date, chars, time_seconds, cards "
+        "SELECT rollover_date, source_date, game_id, chars, time_seconds, cards "
         "FROM gsm_rollover_attributions WHERE rollover_date<>source_date"
     ).fetchall()
     con.close()
     adj = {}
-    for rd, sd, ch, sec, cd in rows:
+    for rd, sd, gid, ch, sec, cd in rows:
+        # A chars-excluded title contributes no chars (the raw per-day sums it is
+        # added to have already zeroed them, so passing the displacement through
+        # would put them back), but its time still moves — the exclusion is about
+        # chars only. drop_excluded_secs=True suppresses the time too, for the
+        # reading-speed basis, which drops such a title from both sides.
+        if gid in excl:
+            if drop_excluded_secs:
+                continue
+            ch = cd = 0
         c, s, k = adj.get(rd, (0, 0, 0))
         adj[rd] = (c + ch, s + sec, k + cd)
         c, s, k = adj.get(sd, (0, 0, 0))
@@ -855,20 +905,29 @@ def get_gsm_day_adjustments():
     # Fold in the manual overlay (summed across games per date) so every
     # net-per-day consumer picks it up for free (this helper is the chokepoint —
     # see CLAUDE.md). Manual edits only touch time, never chars/cards.
-    for d, secs in get_manual_time_adjusts_by_day().items():
+    for d, secs in get_manual_time_adjusts_by_day(
+            skip_games=excl if drop_excluded_secs else None).items():
         c, s, k = adj.get(d, (0, 0, 0))
         adj[d] = (c, s + secs, k)
     return adj
 
 
-def get_manual_time_adjusts_by_day():
+def get_manual_time_adjusts_by_day(skip_games=None):
     """{date: summed secs_delta} across all games — the day-level rollup used by
-    net-per-day consumers (aggregates don't care which game was shaved)."""
+    net-per-day consumers (aggregates don't care which game was shaved).
+
+    `skip_games` omits those game_ids entirely. Used by the reading-speed basis,
+    which drops a chars-excluded title's rows from both sides of the ratio: its
+    seconds were never in the denominator, so its shave must not come off one."""
+    sql = ("SELECT date, COALESCE(SUM(secs_delta),0) FROM manual_time_adjust "
+           "WHERE secs_delta <> 0")
+    params = []
+    if skip_games:
+        params = sorted(skip_games)
+        sql += f" AND game_id NOT IN ({','.join('?' * len(params))})"
+    sql += " GROUP BY date"
     con = sqlite3.connect(DB_PATH)
-    rows = con.execute(
-        "SELECT date, COALESCE(SUM(secs_delta),0) FROM manual_time_adjust "
-        "WHERE secs_delta <> 0 GROUP BY date"
-    ).fetchall()
+    rows = con.execute(sql, params).fetchall()
     con.close()
     return {d: s for d, s in rows}
 
@@ -1057,6 +1116,70 @@ def _get_aliases():
     return {r[0]: r[1] for r in rows}
 
 
+# ── Per-title chars exclusion ─────────────────────────────────────────────────
+# The user can mark a title's character counts unrepresentative (a game whose
+# text hooks catch a fraction of what's actually read). Its chars then drop out
+# of every GLOBAL figure while staying intact on every per-title surface. Time
+# is never affected — only chars. See CLAUDE.md.
+
+def _counted_chars(alias=""):
+    """SQL expression for chars_read with excluded titles zeroed.
+
+    Drop-in replacement for a bare `chars_read` inside any global aggregate,
+    mirroring the `CASE WHEN time_excluded ... THEN time_seconds ELSE 0 END`
+    idiom already used for time. Keeping it as one expression is deliberate:
+    the exclusion is a cross-cutting concern like GSM rollover attribution, and
+    the way it stays consistent is that every global chars sum spells it the
+    same way. `alias` is the table alias when the query joins (e.g. "s")."""
+    p = f"{alias}." if alias else ""
+    return (f"CASE WHEN {p}title IN (SELECT title FROM media_chars_excluded) "
+            f"THEN 0 ELSE {p}chars_read END")
+
+
+def get_chars_excluded_titles():
+    """Set of raw session titles excluded from global char figures."""
+    if not Path(DB_PATH).exists():
+        return set()
+    return {r[0] for r in _q("SELECT title FROM media_chars_excluded")}
+
+
+def _chars_excluded_game_ids():
+    """Set of GSM game_ids belonging to excluded titles.
+
+    Rollover attribution and the manual overlay are keyed by game_id, not title,
+    so the per-day adjustment helpers need the exclusion translated into game
+    ids before they can honour it.
+
+    Short-circuited on an empty table: the day-adjustment helpers below are
+    called several times per Stats render, and the join is over `sessions.title`,
+    which carries no index. With nothing excluded (the usual case) that scan
+    would be pure overhead."""
+    if not (_q1("SELECT 1 FROM media_chars_excluded LIMIT 1")):
+        return set()
+    rows = _q(
+        "SELECT DISTINCT s.game_id FROM sessions s "
+        "JOIN media_chars_excluded x ON x.title = s.title "
+        "WHERE s.source='gsm' AND s.game_id IS NOT NULL AND s.game_id <> ''"
+    )
+    return {r[0] for r in rows}
+
+
+def db_set_media_chars_excluded(title, excluded):
+    """Toggle a title's exclusion from global char figures. Presence = excluded."""
+    if not title:
+        return {"ok": False, "error": "no title"}
+    con = sqlite3.connect(DB_PATH)
+    if excluded:
+        con.execute(
+            "INSERT OR REPLACE INTO media_chars_excluded (title, excluded_at) VALUES (?, ?)",
+            (title, datetime.now().isoformat()))
+    else:
+        con.execute("DELETE FROM media_chars_excluded WHERE title=?", (title,))
+    con.commit()
+    con.close()
+    return {"ok": True, "chars_excluded": bool(excluded)}
+
+
 # ── Queries ───────────────────────────────────────────────────────────────────
 def get_today_stats():
     # Today's bucket = get_today(). When rollover is active, also include sessions at
@@ -1068,7 +1191,8 @@ def get_today_stats():
     bucket = (today,) if today == real else (today, real)
     placeholders = ",".join("?" * len(bucket))
     rows = _q(f"""
-        SELECT id,source,title,activity_type,chars_read,lines_read,time_seconds,session_date,game_id
+        SELECT id,source,title,activity_type,chars_read,lines_read,time_seconds,session_date,game_id,
+               COALESCE(cards_done,0)
         FROM sessions WHERE session_date IN ({placeholders})
           AND (time_excluded IS NULL OR time_excluded=0)
         ORDER BY session_date DESC, ingested_at DESC
@@ -1089,7 +1213,7 @@ def get_today_stats():
 
     result = []
     for r in rows:
-        rid, src, title, atype, chars, lines, secs, sd, gid = r
+        rid, src, title, atype, chars, lines, secs, sd, gid, cards = r
         key = (sd, gid)
         if src == 'gsm' and key not in deducted_for and key in out_by:
             oc, os_ = out_by[key]
@@ -1097,10 +1221,12 @@ def get_today_stats():
                 chars = max(0, chars - int(oc))
                 secs  = max(0, secs - float(os_))
                 deducted_for.add(key)
-        # Drop sessions whose displayed values are all zero (e.g. fully attributed-away GSM rows)
-        if chars == 0 and secs == 0 and (lines or 0) == 0:
+        # Drop sessions whose displayed values are all zero (e.g. fully attributed-away GSM rows).
+        # `cards` joins the test so an Anki row that is all cards and no time survives;
+        # GSM rows carry cards_done=0, so their behaviour is unchanged.
+        if chars == 0 and secs == 0 and (lines or 0) == 0 and (cards or 0) == 0:
             continue
-        result.append((rid, src, title, atype, chars, lines, secs, gid, sd))
+        result.append((rid, src, title, atype, chars, lines, secs, gid, sd, cards))
 
     # Incoming attributions: chars coming from outside the bucket → add phantom rows,
     # per (source_date, game_id) so each phantom borrows the title of the SPECIFIC
@@ -1120,7 +1246,7 @@ def get_today_stats():
             game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
             # sd=None: phantom rows aren't a logical-day-native row, so they're
             # lowest priority for the manual shave below.
-            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), gid, None))
+            result.append((None, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), gid, None, 0))
 
     # Manual overlay: shave secs off the SPECIFIC game's row(s) for this display
     # date, so the right game absorbs the dead time (the user picks which). Tracked
@@ -1141,7 +1267,7 @@ def get_today_stats():
     add_by_game = {g: s for g, s in day_adj.items() if s > 0}
     if rem_by_game or add_by_game:
         for i in sorted(range(len(result)), key=lambda i: 0 if result[i][8] == today else 1):
-            rid, src, title, atype, chars, lines, secs, gid, sd = result[i]
+            rid, src, title, atype, chars, lines, secs, gid, sd, cards = result[i]
             if src != 'gsm':
                 continue
             rem = rem_by_game.get(gid, 0)
@@ -1153,14 +1279,14 @@ def get_today_stats():
             if add > 0:
                 secs += add
                 add_by_game[gid] = 0
-            result[i] = (rid, src, title, atype, chars, lines, secs, gid, sd)
+            result[i] = (rid, src, title, atype, chars, lines, secs, gid, sd, cards)
 
     # Keep session_date as the trailing element: the dashboard needs each real
     # row's true source_date to target the rollover-edit control (phantom rows carry
     # sd=None and get no control). Drop rows zeroed by the shave.
-    return [(rid, src, title, atype, chars, lines, secs, gid, sd)
-            for (rid, src, title, atype, chars, lines, secs, gid, sd) in result
-            if not (chars == 0 and secs == 0 and (lines or 0) == 0)]
+    return [(rid, src, title, atype, chars, lines, secs, gid, sd, cards)
+            for (rid, src, title, atype, chars, lines, secs, gid, sd, cards) in result
+            if not (chars == 0 and secs == 0 and (lines or 0) == 0 and (cards or 0) == 0)]
 
 def get_weekly_summary():
     days = [(get_today_date() - timedelta(days=i)).isoformat() for i in range(6, -1, -1)]
@@ -1169,7 +1295,7 @@ def get_weekly_summary():
     out  = []
     for d in days:
         chars, secs = con.execute(
-            "SELECT COALESCE(SUM(chars_read),0), "
+            f"SELECT COALESCE(SUM({_counted_chars()}),0), "
             "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0) "
             "FROM sessions WHERE session_date=?", (d,)).fetchone()
         adj_c, adj_t, _ = adj.get(d, (0, 0, 0))
@@ -1178,8 +1304,8 @@ def get_weekly_summary():
     return out
 
 def get_all_time_totals():
-    chars, lines, secs, days = _q1("""
-        SELECT COALESCE(SUM(chars_read),0), COALESCE(SUM(lines_read),0),
+    chars, lines, secs, days = _q1(f"""
+        SELECT COALESCE(SUM({_counted_chars()}),0), COALESCE(SUM(lines_read),0),
                COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0),
                COUNT(DISTINCT CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN session_date END)
         FROM sessions
@@ -1248,7 +1374,8 @@ def get_recent_sessions(limit=30):
     # each date, drop fully-zeroed rows, and synthesize phantom rows for incoming
     # attributions. Over-fetch raw to absorb drops before slicing to `limit`.
     raw = _q("""
-        SELECT id,session_date,source,title,activity_type,chars_read,lines_read,time_seconds,game_id
+        SELECT id,session_date,source,title,activity_type,chars_read,lines_read,time_seconds,game_id,
+               COALESCE(cards_done,0)
         FROM sessions WHERE (time_excluded IS NULL OR time_excluded=0)
         ORDER BY session_date DESC,ingested_at DESC LIMIT ?
     """, limit * 2)
@@ -1291,7 +1418,7 @@ def get_recent_sessions(limit=30):
         deducted = set()   # game_ids already deducted on this date
         day_rows = []
         for r in by_date.get(d, []):
-            rid, sd, src, title, atype, chars, lines, secs, gid = r
+            rid, sd, src, title, atype, chars, lines, secs, gid, cards = r
             key = (sd, gid)
             if src == 'gsm' and gid not in deducted and key in out_by:
                 oc, os_ = out_by[key]
@@ -1299,9 +1426,9 @@ def get_recent_sessions(limit=30):
                     chars = max(0, chars - int(oc))
                     secs  = max(0, secs  - float(os_))
                     deducted.add(gid)
-            if chars == 0 and secs == 0 and (lines or 0) == 0:
+            if chars == 0 and secs == 0 and (lines or 0) == 0 and (cards or 0) == 0:
                 continue
-            day_rows.append((rid, sd, src, title, atype, chars, lines, secs, gid))
+            day_rows.append((rid, sd, src, title, atype, chars, lines, secs, gid, cards))
 
         for sd2, gid, ch, sec in in_by_date.get(d, []):
             if (ch or 0) <= 0 and (sec or 0) <= 0:
@@ -1311,7 +1438,7 @@ def get_recent_sessions(limit=30):
                 "ORDER BY ingested_at DESC LIMIT 1", sd2, gid
             )
             game_name = (game_row[0] if game_row and game_row[0] else 'GSM')
-            day_rows.append((None, d, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), gid))
+            day_rows.append((None, d, 'gsm', game_name, 'Reading', int(ch or 0), 0, float(sec or 0), gid, 0))
 
         # Manual overlay for display date d — adjust secs on the SPECIFIC game's
         # row(s), keeping History consistent with the per-game dashboard edit.
@@ -1323,7 +1450,7 @@ def get_recent_sessions(limit=30):
         add_by_game = {g: s for (dd, g), s in manual.items() if dd == d and s > 0}
         if rem_by_game or add_by_game:
             shaved = []
-            for rid, sd, src, title, atype, chars, lines, secs, gid in day_rows:
+            for rid, sd, src, title, atype, chars, lines, secs, gid, cards in day_rows:
                 if src == 'gsm':
                     rem = rem_by_game.get(gid, 0)
                     if rem > 0 and secs > 0:
@@ -1334,9 +1461,9 @@ def get_recent_sessions(limit=30):
                     if add > 0:
                         secs += add
                         add_by_game[gid] = 0
-                if chars == 0 and secs == 0 and (lines or 0) == 0:
+                if chars == 0 and secs == 0 and (lines or 0) == 0 and (cards or 0) == 0:
                     continue
-                shaved.append((rid, sd, src, title, atype, chars, lines, secs, gid))
+                shaved.append((rid, sd, src, title, atype, chars, lines, secs, gid, cards))
             day_rows = shaved
 
         result.extend(day_rows)
@@ -1356,7 +1483,7 @@ def get_daily_time_series(days):
     rows = _q(
         "SELECT session_date, "
         "COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0), "
-        "COALESCE(SUM(chars_read),0) "
+        f"COALESCE(SUM({_counted_chars()}),0) "
         "FROM sessions WHERE session_date>=? GROUP BY session_date",
         earliest.isoformat()
     )
@@ -1439,11 +1566,17 @@ def get_daily_reading_speed_basis(days):
     else:
         earliest = get_today_date() - timedelta(days=days - 1)
     since = earliest.isoformat()
+    # A chars-excluded title is dropped from BOTH sides, not chars-zeroed: leaving
+    # its time in the denominator with nothing above it would collapse cph exactly
+    # the way a chars-less Reading session does (see the note below and CLAUDE.md).
+    # The filter is per row, so the rest of a mixed day survives intact.
     rows = _q(
         "SELECT session_date, COALESCE(SUM(chars_read),0), COALESCE(SUM(time_seconds),0) "
         "FROM sessions WHERE session_date>=? AND session_date<=? AND activity_type='Reading' "
         "AND time_seconds>0 AND chars_read>0 "
-        "AND (time_excluded IS NULL OR time_excluded=0) GROUP BY session_date",
+        "AND (time_excluded IS NULL OR time_excluded=0) "
+        "AND title NOT IN (SELECT title FROM media_chars_excluded) "
+        "GROUP BY session_date",
         since, today
     )
     out = {d: [c, s] for d, c, s in rows}
@@ -1454,12 +1587,93 @@ def get_daily_reading_speed_basis(days):
     # sums above are on the real one, and mixing the two mis-splits a rollover
     # session at a window edge (the chars land in one window, the shave in the
     # other). Don't re-apply the manual overlay on top of this; adj already has it.
-    for d, (adj_c, adj_t, _cards) in get_gsm_day_adjustments().items():
+    # drop_excluded_secs: same both-sides rule as the WHERE above. The general
+    # form of this dict keeps an excluded title's seconds (the exclusion is about
+    # chars), which is right everywhere except here.
+    for d, (adj_c, adj_t, _cards) in get_gsm_day_adjustments(drop_excluded_secs=True).items():
         if since <= d <= today:
             v = out.setdefault(d, [0, 0])
             v[0] = max(0, v[0] + adj_c)
             v[1] = max(0, v[1] + adj_t)
     return {d: (c, s) for d, (c, s) in out.items()}
+
+def get_daily_cards(days=None):
+    """Per-day Anki cards answered: {date: cards}, dense over the same window
+    as get_daily_time_series.
+
+    Cards are summed **unconditionally**, time_excluded rows included — exactly
+    how chars are treated in get_weekly_summary and _adjusted_day_totals. That
+    is what makes the backfill's don't-double-count rule work: a day whose Anki
+    time was suppressed because it was already logged by hand still contributes
+    its card count, because the cards were never logged anywhere else.
+
+    No source filter. `cards_done>0` already implies an Anki row today, and a
+    second SRS source later is counted for free rather than needing a new
+    branch. GSM rollover attribution is irrelevant here — it never moves cards,
+    and Anki rows carry no game_id to be moved.
+    """
+    _, today = window_bounds()
+    if days is None:
+        row = _q1("SELECT MIN(session_date) FROM sessions")
+        if not row or not row[0]:
+            return {}
+        earliest = datetime.strptime(row[0], "%Y-%m-%d").date()
+    else:
+        earliest = get_today_date() - timedelta(days=days - 1)
+    since = earliest.isoformat()
+    rows = _q(
+        "SELECT session_date, COALESCE(SUM(cards_done),0) FROM sessions "
+        "WHERE session_date>=? AND session_date<=? AND COALESCE(cards_done,0)>0 "
+        "GROUP BY session_date",
+        since, today
+    )
+    return {d: int(c) for d, c in rows}
+
+
+def get_card_speed_basis(days=None):
+    """Per-day (cards, secs) for card speed: {date: (cards, secs)}.
+
+    The exact mirror of get_daily_reading_speed_basis, and it drops
+    time_excluded rows from **both** sides for the same reason: their time is
+    suppressed in every other figure on the page, so leaving it in the
+    denominator alone would read low, and keeping their cards with no time would
+    swing it high. Drop the row.
+
+    Note the deliberate asymmetry with get_daily_cards above, which counts every
+    row: a *total* wants the suppressed day's cards, a *rate* cannot use them
+    because it has no time to divide them by.
+
+    Bounded by window_bounds — an unbounded `session_date >= ?` leaks
+    rollover-window future-dated rows that every other card on the page holds
+    back. No GSM overlay: attribution and the manual shave both key on game_id,
+    which an Anki row never has.
+    """
+    _, today = window_bounds()
+    if days is None:
+        row = _q1("SELECT MIN(session_date) FROM sessions")
+        if not row or not row[0]:
+            return {}
+        earliest = datetime.strptime(row[0], "%Y-%m-%d").date()
+    else:
+        earliest = get_today_date() - timedelta(days=days - 1)
+    since = earliest.isoformat()
+    rows = _q(
+        "SELECT session_date, COALESCE(SUM(cards_done),0), COALESCE(SUM(time_seconds),0) "
+        "FROM sessions WHERE session_date>=? AND session_date<=? "
+        "AND COALESCE(cards_done,0)>0 AND time_seconds>0 "
+        "AND (time_excluded IS NULL OR time_excluded=0) GROUP BY session_date",
+        since, today
+    )
+    return {d: (int(c), float(s)) for d, c, s in rows}
+
+
+def _basis_cardsph(basis):
+    """Cards/hour from a {date: (cards, secs)} basis: sum both sides, THEN
+    divide. Same Method-A rule as _basis_cph — never a mean of per-day rates,
+    and never a stored column. int() to match the chars/hour card's truncation."""
+    cards = sum(c for c, _ in basis.values())
+    secs  = sum(s for _, s in basis.values())
+    return int(cards / secs * 3600) if secs > 0 and cards > 0 else 0
 
 def _basis_cph(basis):
     """Chars/hour from a {date: (chars, secs)} speed basis: sum both sides, THEN
@@ -2090,11 +2304,13 @@ def get_media_stats():
             MAX(s.session_date)              AS last_date,
             MIN(s.session_date)              AS first_date,
             COALESCE(MAX(b.image_data), MAX(g.image_data)) AS image_data,
-            MAX(mc.completed_at)             AS completed_at
+            MAX(mc.completed_at)             AS completed_at,
+            MAX(xc.excluded_at)              AS chars_excluded_at
         FROM sessions s
         LEFT JOIN gsm_games   g ON s.title = g.game_name
         LEFT JOIN book_covers b ON s.title = b.title
         LEFT JOIN media_completions mc ON s.title = mc.title
+        LEFT JOIN media_chars_excluded xc ON s.title = xc.title
         WHERE s.title IS NOT NULL AND s.title != ''
         GROUP BY s.title
         ORDER BY total_secs DESC
@@ -2114,6 +2330,9 @@ def get_media_stats():
             "first_date":    r[7],
             "image":         r[8] or "",
             "completed":     bool(r[9]),
+            # total_chars stays the title's real figure — the exclusion only
+            # withholds it from global totals, never from the title's own card.
+            "chars_excluded": bool(r[10]),
         }
         for r in rows
     ]
@@ -2198,7 +2417,7 @@ def _adjusted_day_totals(since=None, until=None):
     rows = _q(
         f"SELECT session_date, "
         f"COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0), "
-        f"COALESCE(SUM(chars_read),0) "
+        f"COALESCE(SUM({_counted_chars()}),0) "
         f"FROM sessions {where} GROUP BY session_date", *params
     )
     raw = {r[0]: (r[2], r[1]) for r in rows}  # date -> (chars, secs)
@@ -2284,7 +2503,15 @@ def get_extra_stats():
     ) or (0,))[0] or 0
     _, longest_streak = get_streak()
 
-    total_chars = (_q1("SELECT COALESCE(SUM(chars_read),0) FROM sessions") or (0,))[0]
+    total_chars = (_q1(
+        f"SELECT COALESCE(SUM({_counted_chars()}),0) FROM sessions") or (0,))[0]
+
+    # Cards use two different bases on purpose. The TOTAL counts every row,
+    # time_excluded included, exactly as total_chars does below — a day whose
+    # Anki time was suppressed because it was already hand-logged still did
+    # those cards. The RATE cannot use those rows: it has no time to divide by.
+    total_cards    = sum(get_daily_cards(None).values())
+    cards_per_hour = _basis_cardsph(get_card_speed_basis(None))
 
     best_week_start, best_week_secs = _best_week(secs)
 
@@ -2294,6 +2521,8 @@ def get_extra_stats():
         "best_week_start":        best_week_start,
         "best_week_secs":         best_week_secs,
         "chars_per_hour":         chars_per_hour,
+        "total_cards":            total_cards,
+        "cards_per_hour":         cards_per_hour,
         "unique_titles":          unique_titles,
         "consistency_pct":        consistency,
         "total_tracked_days":     total_tracked_days,
@@ -2320,6 +2549,13 @@ def get_range_extra_stats(n):
     # see get_extra_stats for why this isn't its own query any more.
     chars_per_hour = _basis_cph(get_daily_reading_speed_basis(n))
 
+    # Cards use two different bases on purpose. The TOTAL counts every row,
+    # time_excluded included, exactly as total_chars does below — a day whose
+    # Anki time was suppressed because it was already hand-logged still did
+    # those cards. The RATE cannot use those rows: it has no time to divide by.
+    total_cards    = sum(get_daily_cards(n).values())
+    cards_per_hour = _basis_cardsph(get_card_speed_basis(n))
+
     # The window always ends at logical today (window_bounds); an unlogged today is
     # in-progress, not a missed day, so drop it from the consistency denominator
     # until it's logged. window_days follows so the "N/Md active" sub-label matches.
@@ -2333,6 +2569,8 @@ def get_range_extra_stats(n):
         "best_week_start": best_week_start,
         "best_week_secs":  best_week_secs,
         "chars_per_hour":  chars_per_hour,
+        "total_cards":     total_cards,
+        "cards_per_hour":  cards_per_hour,
         "consistency_pct": consistency,
         "active_days":     active_days,
         "window_days":     window,
@@ -2447,13 +2685,19 @@ def db_get_goal_progress():
         # Same date window/activity filter as the goal; never affects pacing.
         want_chars = (g["metric"] == "time_seconds" and g.get("track_chars"))
 
+        # A chars-graded goal counts chars the same way every other global figure
+        # does, so a title the user marked unrepresentative can't pad it. Metrics
+        # other than chars_read are untouched — the exclusion is chars-only.
+        metric_expr = (_counted_chars() if g["metric"] == "chars_read"
+                       else g["metric"])
+
         where_parts = ["session_date >= ?", "session_date <= ?"]
         params      = [g["start_date"], count_up_to]
         if g["activity_type"]:
             where_parts.append("activity_type=?")
             params.append(g["activity_type"])
 
-        sql       = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(where_parts)}"
+        sql       = f"SELECT COALESCE(SUM({metric_expr}),0) FROM sessions WHERE {' AND '.join(where_parts)}"
         completed = (_q1(sql, *params) or (0,))[0] or 0.0
         count_up_to_d = min(today_d, deadline_d)
         if start_d <= count_up_to_d:
@@ -2461,7 +2705,7 @@ def db_get_goal_progress():
 
         today_where  = ["session_date=?"] + (["activity_type=?"] if g["activity_type"] else [])
         today_params = [today_str] + ([g["activity_type"]] if g["activity_type"] else [])
-        today_sql    = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(today_where)}"
+        today_sql    = f"SELECT COALESCE(SUM({metric_expr}),0) FROM sessions WHERE {' AND '.join(today_where)}"
         today_completed = (_q1(today_sql, *today_params) or (0,))[0] or 0.0
 
         # Apply GSM rollover attribution to today's number (GSM is always 'Reading')
@@ -2482,7 +2726,7 @@ def db_get_goal_progress():
         week_sum_end_str = week_sum_end_d.strftime("%Y-%m-%d")
         week_where       = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
         week_params      = [week_start_str, week_sum_end_str] + ([g["activity_type"]] if g["activity_type"] else [])
-        week_sql         = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(week_where)}"
+        week_sql         = f"SELECT COALESCE(SUM({metric_expr}),0) FROM sessions WHERE {' AND '.join(week_where)}"
         week_completed   = (_q1(week_sql, *week_params) or (0,))[0] or 0.0
 
         # Monthly period: clamp start to goal start, end to min(end-of-month, deadline)
@@ -2500,7 +2744,7 @@ def db_get_goal_progress():
         month_sum_end_str = month_sum_end_d.strftime("%Y-%m-%d")
         month_where       = ["session_date>=?", "session_date<=?"] + (["activity_type=?"] if g["activity_type"] else [])
         month_params      = [month_start_str, month_sum_end_str] + ([g["activity_type"]] if g["activity_type"] else [])
-        month_sql         = f"SELECT COALESCE(SUM({g['metric']}),0) FROM sessions WHERE {' AND '.join(month_where)}"
+        month_sql         = f"SELECT COALESCE(SUM({metric_expr}),0) FROM sessions WHERE {' AND '.join(month_where)}"
         month_completed   = (_q1(month_sql, *month_params) or (0,))[0] or 0.0
 
         # GSM rollover attribution: per-day deltas for Reading goals (and untyped goals)
@@ -2514,7 +2758,8 @@ def db_get_goal_progress():
         chars_completed = chars_today = chars_week = chars_month = 0.0
         if want_chars:
             def _chars_sum(where, prms):
-                sql = f"SELECT COALESCE(SUM(chars_read),0) FROM sessions WHERE {' AND '.join(where)}"
+                sql = (f"SELECT COALESCE(SUM({_counted_chars()}),0) FROM sessions "
+                       f"WHERE {' AND '.join(where)}")
                 return (_q1(sql, *prms) or (0,))[0] or 0.0
             chars_completed = _chars_sum(where_parts, params)
             chars_today     = _chars_sum(today_where, today_params)
@@ -2646,8 +2891,11 @@ def db_get_goal_burnup(goal_id):
     if g["activity_type"]:
         where.append("activity_type=?")
         params.append(g["activity_type"])
+    # Same chars basis as db_get_goal_progress: a chars-excluded title is out of
+    # a chars-graded goal, so the burn-up line lands on the card's own number.
+    metric_expr = _counted_chars() if g["metric"] == "chars_read" else g["metric"]
     rows = _q(
-        f"SELECT session_date, COALESCE(SUM({g['metric']}),0) FROM sessions "
+        f"SELECT session_date, COALESCE(SUM({metric_expr}),0) FROM sessions "
         f"WHERE {' AND '.join(where)} GROUP BY session_date", *params
     )
     raw = {r[0]: (r[1] or 0.0) for r in rows}
@@ -3108,6 +3356,10 @@ def _compute_title_core(title):
 
     completion = _q1("SELECT completed_at FROM media_completions WHERE title=?", title)
     user_cc    = _q1("SELECT char_count FROM media_char_counts WHERE title=?", title)
+    # Reported so the detail pane can render the toggle and its badge. Purely a
+    # flag: nothing above or below it changes, because the exclusion is a global
+    # -figures concern and this is the per-title rail it deliberately spares.
+    chars_excl = _q1("SELECT 1 FROM media_chars_excluded WHERE title=?", title)
 
     total_chars = sum(d["chars"]   for d in daily)
     total_secs  = sum(d["seconds"] for d in daily)
@@ -3138,6 +3390,7 @@ def _compute_title_core(title):
         "user_char_count": int(user_cc[0]) if user_cc else 0,
         "completed":     bool(completion),
         "completed_at":  completion[0] if completion else "",
+        "chars_excluded": bool(chars_excl),
     }
 
 

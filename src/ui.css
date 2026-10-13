@@ -677,6 +677,19 @@ select:focus { border-color: var(--accent); }
   pointer-events: none;
 }
 
+/* Chars-excluded badge — sits under the completed checkmark when both are on,
+   so neither hides the other. Muted rather than alarming: it is a deliberate
+   user choice about a title, not a problem with it. */
+.media-card-nochars {
+  position: absolute; top: 6px; left: 6px; z-index: 1;
+  padding: 1px 6px; border-radius: 9px;
+  background: rgba(0,0,0,0.6); color: var(--text-muted);
+  border: 1px solid var(--border);
+  font-size: 9px; font-weight: 700; letter-spacing: 0.3px; line-height: 15px;
+  box-shadow: 0 1px 5px rgba(0,0,0,0.45);
+  pointer-events: none;
+}
+
 /* ── Drag-to-series ──────────────────────────────────────────────────────── */
 .media-card.dragging      { opacity: 0.4; }
 .media-card.series-target { box-shadow: 0 0 0 2px var(--accent), 0 0 18px rgba(91,140,255,0.35); transform: scale(1.04); z-index: 4; }

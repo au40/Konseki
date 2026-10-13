@@ -268,6 +268,19 @@
           <div class="value" id="es-consistency" style="color:var(--purple)">—</div>
           <div class="sub" id="es-consistency-sub"></div>
         </div>
+        <!-- Anki. Hidden entirely until there are cards to show, so a setup with
+             no Anki addon doesn't carry two permanent em-dashes. --pink is the
+             Vocabulary activity colour, so the cards match their donut slice. -->
+        <div class="extra-stat-card" id="es-cards-card" style="display:none">
+          <div class="label" id="es-cards-lbl">Cards</div>
+          <div class="value" id="es-cards" style="color:var(--pink)">—</div>
+          <div class="sub" id="es-cards-sub"></div>
+        </div>
+        <div class="extra-stat-card" id="es-cph-card" style="display:none">
+          <div class="label" id="es-cardsph-lbl">Cards / hour</div>
+          <div class="value" id="es-cardsph" style="color:var(--pink)">—</div>
+          <div class="sub" id="es-cardsph-sub"></div>
+        </div>
       </div>
 
       <div class="detail-chart-head" style="margin:20px 0 8px">
@@ -533,7 +546,10 @@
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
           <button class="btn btn-outline btn-sm" onclick="closeMediaDetail()">← Back</button>
           <span class="muted" id="detail-breadcrumb" style="font-size:12px"></span>
-          <button id="detail-complete-btn" class="btn btn-outline btn-sm" style="display:none;margin-left:auto"></button>
+          <div style="display:flex;align-items:center;gap:8px;margin-left:auto">
+            <button id="detail-chars-excl-btn" class="btn btn-outline btn-sm" style="display:none"></button>
+            <button id="detail-complete-btn" class="btn btn-outline btn-sm" style="display:none"></button>
+          </div>
         </div>
 
         <!-- Hero: cover + info -->

@@ -155,6 +155,30 @@ function fmtChars(n) {
   if (n >= 1000)      return `${(n/1000).toFixed(1)}k`;
   return String(n);
 }
+// ── Stat-card hover ────────────────────────────────────────────────────────
+// The big stat-card values are abbreviated for space ("123.4k", "12h 30m");
+// hovering the card shows the same figure unabbreviated. Display only — each
+// tip formats the number its card already shows, never a recomputed one. A zero
+// or missing value gives '' (no tip), matching the card's "—"/"0 min".
+// Seconds are floored, not rounded, so the tip never reads a minute ahead of
+// fmtTime, which floors too.
+function tipTime(s) {
+  const t = Math.floor(s || 0);
+  if (t <= 0) return '';
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+  return h > 0 ? `${h}h ${m}m ${sec}s` : (m > 0 ? `${m}m ${sec}s` : `${sec}s`);
+}
+function tipChars(n) { return n > 0 ? `${Math.round(n).toLocaleString()} characters` : ''; }
+function tipSpeed(n) { return n > 0 ? `${Math.round(n).toLocaleString()} characters/hour` : ''; }
+// The whole card is the hover target, not just the number. A falsy tip clears
+// it, so a card that falls back to "—" doesn't keep the previous figure.
+function setStatTip(valueId, tip) {
+  const card = document.getElementById(valueId)?.closest('.stat-card, .extra-stat-card');
+  if (!card) return;
+  if (tip) card.title = tip; else card.removeAttribute('title');
+}
+// Same, for cards built as an innerHTML string.
+function statTipAttr(tip) { return tip ? ` title="${escHtml(tip)}"` : ''; }
 // ── Decimal places ─────────────────────────────────────────────────────────
 // A metric that shows a decimal shows it *always*: 24 renders as "24.0", never
 // collapsing to a whole number just because the fraction happens to be zero.
@@ -289,11 +313,19 @@ async function loadDashboard() {
   document.getElementById('today-date').textContent = today();
 
   const todaySec = d.today.reduce((a,r) => a + r.seconds, 0);
-  const todayChars = d.today.reduce((a,r) => a+r.chars, 0);
+  // chars_counted === false marks a title the user flagged as having
+  // unrepresentative character counts. Its row still shows its chars (with a
+  // badge), but they're withheld from the day's total — the same withholding
+  // every backend global figure applies. Time is untouched, so todaySec above
+  // deliberately counts every row. Absent flag (other payloads) reads as counted.
+  const todayChars = d.today.reduce((a,r) => a + (r.chars_counted === false ? 0 : r.chars), 0);
   // Only reading with a tracked char count feeds the day's speed: a chars-less
   // Reading session (e.g. time-only manual entry) would add time to the
   // denominator with no chars, dragging cph down. Exclude it from both sides.
-  const readingRows = d.today.filter(r => r.activity_type === 'Reading' && r.chars > 0);
+  // A chars-excluded title goes out for exactly the same reason — its time with
+  // no chars would drag cph down — which is what the backend basis does too.
+  const readingRows = d.today.filter(r => r.activity_type === 'Reading' && r.chars > 0
+                                          && r.chars_counted !== false);
   const readingSec = readingRows.reduce((a,r) => a + r.seconds, 0);
   const readingChars = readingRows.reduce((a,r) => a + r.chars, 0);
   const cph = (readingSec > 0 && readingChars > 0) ? Math.round(readingChars / (readingSec / 3600)) : 0;
@@ -301,6 +333,9 @@ async function loadDashboard() {
   document.getElementById('d-chars').textContent = fmtChars(todayChars);
   document.getElementById('d-lines').textContent = cph > 0 ? fmtChars(cph) + '/h' : '—';
   document.getElementById('d-days').textContent  = `${d.cur_streak ?? 0}d`;
+  setStatTip('d-time',  tipTime(todaySec));
+  setStatTip('d-chars', tipChars(todayChars));
+  setStatTip('d-lines', tipSpeed(cph));
 
   const list = document.getElementById('today-sessions');
   list.innerHTML = '';
@@ -391,6 +426,18 @@ function wireEditLogBtn(el, s) {
   }
 }
 
+// Badge on a row whose title the user excluded from global char figures. The
+// chars themselves stay on the row — they really were read, and hiding them
+// would make the row disagree with the media pane — this just says they aren't
+// in the totals. Rows outside the dashboard/History payloads carry no flag and
+// render nothing.
+function charsExcludedBadgeHtml(counted) {
+  return counted === false
+    ? `<span class="session-chars" style="color:var(--text-muted)" ` +
+      `title="Characters for this title are excluded from your totals and reading speed">not counted</span>`
+    : '';
+}
+
 function makeSessionRow(s) {
   const color  = acolor(s.activity_type);
   // Signed: a negative overlay reads "−Nm dead time", a positive one "+Nm added".
@@ -406,6 +453,8 @@ function makeSessionRow(s) {
     <div class="session-right">
       ${s.seconds > 0 ? `<span class="session-time" style="color:${color}">${fmtTime(s.seconds)}</span>` : ''}
       ${s.chars   > 0 ? `<span class="session-chars">${fmtChars(s.chars)} chars</span>` : ''}
+      ${s.chars   > 0 ? charsExcludedBadgeHtml(s.chars_counted) : ''}
+      ${s.cards   > 0 ? `<span class="session-chars">${fmtChars(s.cards)} cards</span>` : ''}
       ${adjM ? `<span class="session-chars" style="color:var(--warn)">${adjM < 0 ? `−${-adjM}m dead time` : `+${adjM}m added`}</span>` : ''}
       <button class="btn btn-xs btn-danger" onclick="doDeleteSession(${s.id}, this)">✕</button>
       ${editTimeBtnHtml(s)}
@@ -420,6 +469,7 @@ function makeGroupedSessionRow(sessions) {
   const s = sessions[0];
   const totalSeconds = sessions.reduce((a, r) => a + r.seconds, 0);
   const totalChars   = sessions.reduce((a, r) => a + r.chars, 0);
+  const totalCards   = sessions.reduce((a, r) => a + (r.cards || 0), 0);
   // adjust_secs is per game_id and identical across a game's rows — sum once per
   // distinct game so the indicator isn't multiplied by the session count.
   const seenG = {};
@@ -442,6 +492,8 @@ function makeGroupedSessionRow(sessions) {
     <div class="session-right">
       ${totalSeconds > 0 ? `<span class="session-time" style="color:${color}">${fmtTime(totalSeconds)}</span>` : ''}
       ${totalChars   > 0 ? `<span class="session-chars">${fmtChars(totalChars)} chars</span>` : ''}
+      ${totalChars   > 0 ? charsExcludedBadgeHtml(s.chars_counted) : ''}
+      ${totalCards   > 0 ? `<span class="session-chars">${fmtChars(totalCards)} cards</span>` : ''}
       ${shavedM ? `<span class="session-chars" style="color:var(--warn)">${shavedM < 0 ? `−${-shavedM}m dead time` : `+${shavedM}m added`}</span>` : ''}
       <button class="btn btn-xs btn-danger" onclick="doDeleteSessionGroup([${ids.join(',')}], this)">✕</button>
       ${editTimeBtnHtml(s)}
@@ -2162,6 +2214,40 @@ function renderStats(d) {
   document.getElementById('sc-avg').textContent        = fmtTime(d.avg_secs);
   document.getElementById('es-consistency').textContent    = `${fmtPct(d.consistency_pct)}%`;
   document.getElementById('es-consistency-sub').textContent = d.active_days ? `${d.active_days}/${d.window_days}d active` : '';
+  setStatTip('sc-time',      tipTime(d.r_secs));
+  setStatTip('sc-chars',     tipChars(d.r_chars));
+  setStatTip('sc-cph',       tipSpeed(d.chars_per_hour));
+  setStatTip('sc-avg',       tipTime(d.avg_secs));
+  setStatTip('es-best-day',  tipTime(d.best_day_secs));
+  setStatTip('es-best-week', tipTime(d.best_week_secs));
+
+  // Anki. Both cards stay hidden until there is something to put in them, so a
+  // setup with no addon doesn't carry two permanent em-dashes.
+  //
+  // The two numbers deliberately sit on DIFFERENT bases and the sub-labels say
+  // so: the total counts every day, including one whose Anki time was suppressed
+  // because it was already hand-logged; the rate can't use those days because it
+  // has no time to divide by. Cards/hour is derived from the totals backend-side
+  // (never a stored column) — same rule as chars/hour. The Anki-native
+  // seconds/card goes in the tooltip, since that's the figure Anki itself shows.
+  const cards   = d.total_cards    || 0;
+  const cardsPH = d.cards_per_hour || 0;
+  const cardsCard = document.getElementById('es-cards-card');
+  const cphCard   = document.getElementById('es-cph-card');
+  if (cardsCard) cardsCard.style.display = cards   ? '' : 'none';
+  if (cphCard)   cphCard.style.display   = cardsPH ? '' : 'none';
+  if (cards) {
+    document.getElementById('es-cards-lbl').textContent = `Cards (${rl})`;
+    document.getElementById('es-cards').textContent     = fmtChars(cards);
+    document.getElementById('es-cards-sub').textContent = '';
+    setStatTip('es-cards', `${cards.toLocaleString()} cards`);
+  }
+  if (cardsPH) {
+    document.getElementById('es-cardsph').textContent     = fmtChars(cardsPH);
+    document.getElementById('es-cardsph-sub').textContent = `${(3600 / cardsPH).toFixed(1)}s / card`;
+    cphCard?.setAttribute('title',
+      `${cardsPH} cards/hour — ${(3600 / cardsPH).toFixed(1)} seconds per card`);
+  }
   // Preset range: park the brush handles at the edges (full span, no dimming)
   // and restore the streak card to its live "Current Streak" meaning.
   selStartDay = 0; selEndDay = Infinity;
@@ -2548,7 +2634,10 @@ function renderDailyChart(daily) {
       },
       scales: {
         x: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim,maxRotation:0,autoSkip:true,maxTicksLimit:14} },
-        y: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => fmt(v)}, afterFit: s => { s.width = 62; } },
+        // Ticks drop the tooltip's " chars" suffix: "100.0k chars" overflows the
+        // pinned 62px axis and clips its leading digit. Same bare fmtChars the
+        // cumulative and speed views already use on this axis.
+        y: { stacked: doSplit, grid:{color:CT.grid}, ticks:{color:CT.dim, callback: v => isChars ? fmtChars(v) : fmt(v)}, afterFit: s => { s.width = 62; } },
       }
     }
   });
@@ -2756,7 +2845,19 @@ function renderDonutChart(activity) {
       responsive: true, maintainAspectRatio: false, animation: CHART_ANIM, cutout: '60%',
       plugins: {
         legend: { position:'bottom', labels:{color:CT.dim,padding:10,boxWidth:12,boxHeight:12,usePointStyle:true} },
-        tooltip: { callbacks: { label: c => `${c.label}: ${fmtTime(c.raw)}` } }
+        tooltip: { callbacks: {
+          // Chart.js blanks the title for doughnuts; name the slice there so the
+          // swatch line can carry just the figures.
+          title: c => c[0].label,
+          // Share of the slices currently drawn, so it still sums to 100% after
+          // a legend click hides one.
+          label: c => {
+            const shown = c.dataset.data.reduce((a, v, i) =>
+              a + (c.chart.getDataVisibility(i) ? v : 0), 0);
+            return shown > 0 ? `${fmtTime(c.raw)} · ${fmtPct(c.raw / shown * 100)}%`
+                             : fmtTime(c.raw);
+          },
+        } }
       }
     }
   });
@@ -3276,6 +3377,12 @@ function applyBrushCards(v) {
   document.getElementById('es-consistency').textContent     = `${fmtPct(v.consistency_pct)}%`;
   document.getElementById('es-consistency-sub').textContent =
     v.active_days ? `${v.active_days}/${v.window_days}d active` : '';
+  setStatTip('sc-time',      tipTime(v.secs));
+  setStatTip('sc-chars',     tipChars(v.chars));
+  setStatTip('sc-cph',       tipSpeed(v.cph));
+  setStatTip('sc-avg',       tipTime(v.avg_secs));
+  setStatTip('es-best-day',  tipTime(v.best_day ? v.best_day.secs : 0));
+  setStatTip('es-best-week', tipTime(v.best_week ? v.best_week.secs : 0));
 }
 
 // Client-recompute render path, used whenever a brush sub-range and/or an
@@ -4143,7 +4250,7 @@ function showMediaView(name) {
 //   'youtube' — the passive tracker pools all its time under one 'YouTube'
 //               title so the data stays queryable later; it is deliberately not
 //               a media entry
-const GRID_HIDDEN_SOURCES = new Set(['manual', 'youtube']);
+const GRID_HIDDEN_SOURCES = new Set(['manual', 'youtube', 'anki']);
 const isGridHidden = (m) => GRID_HIDDEN_SOURCES.has(m.source);
 
 async function loadMedia() {
@@ -4333,6 +4440,9 @@ function makeMediaCard(m) {
   }
   if (m.completed) {
     innerHTML += `<div class="media-card-complete" title="Completed">✓</div>`;
+  }
+  if (m.chars_excluded) {
+    innerHTML += `<div class="media-card-nochars" title="Characters here are excluded from your totals and reading speed">NO CHARS</div>`;
   }
   innerHTML += `
     <div class="media-card-footer">
@@ -4652,19 +4762,19 @@ function renderSeriesDetail(s, memberDetails = []) {
   const statsEl = document.getElementById('series-detail-stats');
   statsEl.style.gridTemplateColumns = 'repeat(4,1fr)';
   statsEl.innerHTML = `
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipTime(totalSecs))}>
       <div class="label">Total time</div>
       <div class="value" style="color:var(--accent);font-size:22px">${fmtTime(totalSecs)}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipChars(totalChars))}>
       <div class="label">Characters</div>
       <div class="value" style="color:var(--success);font-size:22px">${totalChars > 0 ? fmtChars(totalChars) : '—'}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipSpeed(avgSpeed))}>
       <div class="label">Avg read speed</div>
       <div class="value" style="color:var(--warn);font-size:22px">${avgSpeed > 0 ? fmtChars(avgSpeed) + '/h' : '—'}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipSpeed(l7speed))}>
       <div class="label">Speed last 7d</div>
       <div class="value" style="color:var(--purple);font-size:22px">${l7display}</div>
     </div>
@@ -4695,9 +4805,6 @@ function renderSeriesCharts() {
     viewSegId: 'series-view-seg',
     splitLabelId: 'series-split-label',
     daily,
-    // Series keep per-day resolution (unchanged from before the merge); only
-    // media detail rolls up to weeks.
-    weeklyOver: null,
     splitOn: splitBySeriesBook && books.length > 1,
     splitSource: byBook,
     splitMembers: () => books,      // books are already [{key, color, label}]
@@ -4951,6 +5058,26 @@ function renderMediaDetail(d) {
     compBtn.onclick = null;
   }
 
+  // "Don't count characters": withholds this title's chars from every global
+  // figure (totals, daily/weekly series, chars/hour, chars-graded goals) while
+  // this pane — and the grid card, progress bar and milestones — keep showing
+  // them in full. For media whose text hooks catch a fraction of what's really
+  // read, where the count would otherwise drag the lifetime average down.
+  // Time is never affected. Offered only where there are chars to exclude.
+  const exclBtn = document.getElementById('detail-chars-excl-btn');
+  const charsExcluded = !!d.chars_excluded;
+  if (d.total_chars > 0) {
+    exclBtn.style.display = 'inline-flex';
+    exclBtn.textContent = charsExcluded ? "↺ Count characters" : "⊘ Don’t count characters";
+    exclBtn.title = charsExcluded
+      ? "Put this title’s characters back into your totals and reading speed"
+      : "Keep counting the characters here, but leave them out of your totals and reading speed";
+    exclBtn.onclick = () => onCharsExcludedToggle(d, !charsExcluded);
+  } else {
+    exclBtn.style.display = 'none';
+    exclBtn.onclick = null;
+  }
+
   // Milestones replace the description when present; otherwise description shows.
   currentMilestones = d.milestones || [];
 
@@ -4995,19 +5122,19 @@ function renderMediaDetail(d) {
   statsGrid.style.gridTemplateColumns = 'repeat(4,1fr)';
 
   statsGrid.innerHTML = `
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipTime(d.total_secs))}>
       <div class="label">Total time</div>
       <div class="value" style="color:var(--accent);font-size:22px">${fmtTime(d.total_secs)}</div>
     </div>
-    <div class="stat-card">
-      <div class="label">Characters</div>
+    <div class="stat-card"${statTipAttr(tipChars(d.total_chars))}>
+      <div class="label">Characters${charsExcluded ? ' <span style="color:var(--text-muted);font-weight:600">· not in totals</span>' : ''}</div>
       <div class="value" style="color:var(--success);font-size:22px">${d.total_chars > 0 ? fmtChars(d.total_chars) : '—'}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipSpeed(computedSpeed))}>
       <div class="label">Avg read speed</div>
       <div class="value" style="color:var(--warn);font-size:22px">${speedDisplay}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipSpeed(l7speed))}>
       <div class="label">Speed last 7d</div>
       <div class="value" style="color:var(--purple);font-size:22px">${l7display}</div>
     </div>
@@ -5039,48 +5166,16 @@ let detailMetric = 'time';        // 'time' | 'chars' | 'speed' — shared by al
 let detailCumulative = false;     // chart shape: per-bucket bars vs running total, likewise shared
 const detailChartCfg = {};        // view -> config, set by that view's render fn
 
-// Roll a daily series up to weekly buckets past `weeklyOver` days, so a long
-// title doesn't render hundreds of 1px bars. `splitSource` is an array parallel
+// Unpack a daily series into the parallel arrays the chart plots. Always one
+// bar per day, however long the title runs. `splitSource` is an array parallel
 // to `daily` of { key: { chars, secs } } — the same shape for milestone splits
-// and book splits, so one rollup serves both.
-function rollDetailSeries(daily, splitSource, weeklyOver) {
-  const blank = daily.map(() => ({}));
-  if (!weeklyOver || daily.length <= weeklyOver) {
-    return {
-      labels: daily.map(r => r.date.slice(5)),
-      chars:  daily.map(r => r.chars),
-      secs:   daily.map(r => r.seconds),
-      split:  splitSource || blank,
-    };
-  }
-  const cb = {}, tb = {}, sb = {};
-  daily.forEach((r, i) => {
-    const d = new Date(r.date);
-    // Bucket by the Monday of that date's week. The previous key was built from
-    // the day of MONTH -- `year-W{ceil((getDate() + jan1Dow) / 7)}` -- so Jan 2,
-    // Feb 2 and Mar 2 all landed in "W01" and a full year collapsed into six
-    // buckets, silently averaging months together in one bar.
-    const monday = new Date(d);
-    monday.setDate(d.getDate() - ((d.getDay() + 6) % 7));
-    const wk = isoDateFromObj(monday);
-    cb[wk] = (cb[wk] || 0) + r.chars;
-    tb[wk] = (tb[wk] || 0) + r.seconds;
-    const src = splitSource && splitSource[i];
-    if (src) {
-      const dst = sb[wk] || (sb[wk] = {});
-      for (const k in src) {
-        const s = dst[k] || (dst[k] = { chars: 0, secs: 0 });
-        s.chars += src[k].chars || 0;
-        s.secs  += src[k].secs  || 0;
-      }
-    }
-  });
-  const keys = Object.keys(cb).sort();   // ISO week-start dates sort chronologically
+// and book splits.
+function detailSeries(daily, splitSource) {
   return {
-    labels: keys.map(k => k.slice(5)),   // MM-DD of the week start, like the daily labels
-    chars:  keys.map(k => cb[k]),
-    secs:   keys.map(k => tb[k]),
-    split:  keys.map(k => sb[k] || {}),
+    labels: daily.map(r => r.date.slice(5)),
+    chars:  daily.map(r => r.chars),
+    secs:   daily.map(r => r.seconds),
+    split:  splitSource || daily.map(() => ({})),
   };
 }
 
@@ -5108,7 +5203,7 @@ function splitBarDatasets(split, members, field, scale, stackName) {
 // splitBarDatasets: that builds a dataset per member across every bucket, this
 // says which of those datasets the bucket actually earned. A dataset with no
 // member key isn't a member split, so it always shows; `split[i]` is guarded
-// because a rolled-up bucket can be empty.
+// in case a day carries no split entry.
 //
 // The test is "any reading at all", not "nonzero in the metric on screen": a
 // chars-less sitting still lists itself (as 0 chars) on the day it happened,
@@ -5206,7 +5301,7 @@ function setDetailView(view, v) {
 function renderDetailMetricChart(view) {
   const cfg = detailChartCfg[view];
   if (!cfg) return;
-  const { key, canvasId, daily, splitOn, splitMembers, stackName, splitSource, weeklyOver, splitLabelId } = cfg;
+  const { key, canvasId, daily, splitOn, splitMembers, stackName, splitSource, splitLabelId } = cfg;
 
   destroyChart(key);
   if (!daily || !daily.length) {
@@ -5214,7 +5309,7 @@ function renderDetailMetricChart(view) {
     return;
   }
 
-  const { labels, chars, secs, split } = rollDetailSeries(daily, splitSource, weeklyOver);
+  const { labels, chars, secs, split } = detailSeries(daily, splitSource);
   const speed   = chars.map((c, i) => secs[i] > 0 && c > 0 ? c / (secs[i] / 3600) : 0);
   const rolling = twRolling(chars, secs, 7);
 
@@ -5408,9 +5503,6 @@ function renderDetailChart(daily, isGSM) {
     viewSegId: 'detail-view-seg',
     splitLabelId: 'ms-split-label',
     daily,
-    // Media detail is the one view that rolls up to weeks past ~3 months; a
-    // long title otherwise renders hundreds of hairline bars.
-    weeklyOver: 90,
     splitOn: splitByMilestone && currentMilestones.length > 0,
     splitSource: daily.map(r => r.by_milestone || {}),
     splitMembers: milestoneMembers,
@@ -6741,6 +6833,29 @@ async function onCompleteMediaToggle(d, complete) {
   await refreshCurrentMediaDetail();
 }
 
+// Excluding asks for confirmation (it moves every global char figure); including
+// again is the one-click undo, same shape as the completion toggle above.
+async function onCharsExcludedToggle(d, excluded) {
+  if (excluded) {
+    const disp = d.display_title || d.title;
+    const ok = await showConfirm(
+      `Stop counting characters from "${disp}" in your stats? This pane, the progress bar ` +
+      `and milestones keep the full count — but your totals, daily chart, chars/hour and any ` +
+      `character goals will leave it out. Time logged here is unaffected.`,
+      "Don’t count", CT.warn);
+    if (!ok) return;
+  }
+  const r = await window.pywebview.api.set_media_chars_excluded(d.title, excluded);
+  if (!r || !r.ok) { alert((r && r.error) || 'Failed to update'); return; }
+  // Keep the cached grid data (and its badge) in sync without a full reload.
+  if (Array.isArray(mediaAllData)) {
+    const m = mediaAllData.find(x => x.title === d.title);
+    if (m) m.chars_excluded = excluded;
+    renderMediaGrid();
+  }
+  await refreshCurrentMediaDetail();
+}
+
 // ── Media length (custom progress bar) modal ────────────────────────────────
 // Lets the user punch in a total character count for media GSM has no length
 // for, creating the same completion bar games get. Saving 0 (the Remove-bar
@@ -7000,19 +7115,19 @@ function renderMilestoneDetail(d) {
   const grid = document.getElementById('milestone-stats-grid');
   grid.style.gridTemplateColumns = 'repeat(4,1fr)';
   grid.innerHTML = `
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipTime(d.total_secs))}>
       <div class="label">Total time</div>
       <div class="value" style="color:var(--accent);font-size:22px">${fmtTime(d.total_secs)}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipChars(d.total_chars))}>
       <div class="label">Characters</div>
       <div class="value" style="color:var(--success);font-size:22px">${d.total_chars > 0 ? fmtChars(d.total_chars) : '—'}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipSpeed(computedSpeed))}>
       <div class="label">Avg read speed</div>
       <div class="value" style="color:var(--warn);font-size:22px">${speedDisplay}</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card"${statTipAttr(tipSpeed(l7speed))}>
       <div class="label">Speed last 7d</div>
       <div class="value" style="color:var(--purple);font-size:22px">${l7display}</div>
     </div>
@@ -7029,7 +7144,6 @@ function renderMilestoneCharts(daily) {
     viewSegId: 'milestone-view-seg',
     splitLabelId: null,
     daily: daily || [],
-    weeklyOver: null,
     splitOn: false,          // a milestone is already one slice; nothing to split by
     splitSource: null,
     splitMembers: null,

@@ -31,7 +31,7 @@ against the desktop and the inbox; that is deliberate, so one config serves both
 
 | Method | Path | Purpose |
 |---|---|---|
-| POST | `/import` | A source-tagged content session (has a title) — `ttsureader`, `mangawari`, `youtube` |
+| POST | `/import` | A source-tagged content session (has a title) — `ttsureader`, `mangawari`, `youtube`, `anki` |
 | POST | `/log-manual` | A time-only session (no title) |
 | POST | `/cover` | A cover image for a title — metadata, sent once |
 | GET | `/activity-types` | String list for a category picker |
@@ -198,6 +198,63 @@ POST /import
   hours in every total while staying out of the chars/hour denominators.
 
 The title is a real media entry, so `/cover` attaches to it.
+
+### A batch of days (SRS review time)
+
+The Anki addon's shape, and the one to copy for anything that reports **whole
+days at once** rather than one sitting at a time — a backfill of a source that
+keeps its own complete history.
+
+```http
+POST /import
+{
+  "source": "anki",
+  "days": [
+    {"session_date": "2026-08-12", "time_seconds": 1834.5, "cards": 210,
+     "client_id": "anki:2026-08-12"}
+  ],
+  "skip_days_with_vocabulary_time": true
+}
+```
+
+- `days` is **always a list**, even for one day. The periodic push sends one or
+  two entries; the history backfill sends hundreds. One shape, so there is no
+  second path to keep in step.
+- `time_seconds` and `cards` are both **required and both cumulative** — the
+  day's running total, re-posted as it grows.
+- **Both zero deletes the day's row.** Same contract as `youtube`, for the same
+  reason: the client must be able to empty a day out. Neither field is
+  defaulted, so an omitted one is an error rather than a deletion.
+- **Validation is all-or-nothing.** One bad entry rejects the whole batch and
+  stores nothing, so your retry is a clean replay. Cap is 400 entries per
+  request; chunk a bigger backfill.
+- Answers `{"logged": true, "days": N, "inserted": n, "updated": n,
+  "deleted": n, "skipped_days": [...]}`.
+
+**`client_id` here is COLLECTION-scoped, not device-scoped** — the one case that
+inverts rule 2's advice. That advice assumes each device only knows its own
+activity, which is true of a browser and false of a synced Anki collection:
+every device that opens it computes the same day totals from the same review
+log. Keyed per device, a second desktop would insert a second row and double the
+day. Keyed per collection, it rewrites the first — which is what you want. The
+rule generalises to: **the key must name the thing being accumulated.** For
+YouTube that is one device's viewing; here it is one collection's studying.
+
+`skip_days_with_vocabulary_time` is **tri-state, and the third state is the
+absent key**:
+
+| Value | Meaning |
+|---|---|
+| omitted | Periodic push. New rows count; an existing row's excluded-ness is left alone. |
+| `true` | Backfill. A day that already has counted Vocabulary time from a non-Anki source imports with its time suppressed (cards still count). Written on insert *and* update. |
+| `false` | Backfill, count everything. Also written on both, so it undoes a previous `true` run. |
+
+Send `false` rather than omitting the key when the user unticks that box, or a
+re-run won't un-suppress what the last one suppressed.
+
+Only Konseki can answer that question — your client has no view of what is
+already logged there — so send the flag and read `skipped_days` to report what
+happened.
 
 ### A time-only session
 

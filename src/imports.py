@@ -5,6 +5,7 @@ Handles GSM (GameSentenceMiner) pulls and ッツ Reader zip imports.
 
 import os
 import re
+import math
 import sqlite3
 import json
 import zipfile
@@ -1302,6 +1303,239 @@ def import_mangawari_day(title, session_date, time_seconds, client_id=None):
         "time_seconds": secs,
     }
 
+
+
+# ── Anki ──────────────────────────────────────────────────────────────────────
+# One pooled Vocabulary row per LOGICAL day, cumulative, keyed per collection.
+# The addon reads Anki's `revlog` — a complete per-answer ledger — buckets it
+# into Konseki's logical days and re-posts each day's running total.
+
+ANKI_MAX_DAYS = 400   # matches the addon's chunk size; keeps one payload small
+
+
+def _days_with_vocabulary_time(con, dates):
+    """Of `dates`, which already carry COUNTED Vocabulary time from a non-Anki source.
+
+    This is the backfill's "don't double-count" test, and it can only be
+    answered here: the addon has no view of Konseki's sessions, so it asks the
+    question and we answer it.
+
+    Every clause is load-bearing:
+
+    - `source<>'anki'` is what makes the rule IDEMPOTENT. Without it the second
+      backfill run would see the row the first run wrote and flip every day to
+      excluded, one run at a time.
+    - `time_excluded=0` reads "already tracked" as *already counting*. A day
+      whose only Vocabulary row is itself excluded contributes nothing to any
+      total, so Anki should fill it rather than defer to it.
+    - `activity_type='Vocabulary'` and not "any activity": a day of reading must
+      not suppress genuine Anki time that was never logged anywhere.
+    - No source allowlist, so hand-logged sessions, the extension's stopwatch and
+      CSV-imported history all block equally. `import_csv_file` writes
+      source='csv' with the activity type straight from the CSV column, which is
+      where hand-logged Anki history is most likely to be sitting.
+    """
+    found = set()
+    dates = list(dates)
+    for i in range(0, len(dates), ANKI_MAX_DAYS):
+        chunk = dates[i:i + ANKI_MAX_DAYS]
+        placeholders = ",".join("?" * len(chunk))
+        rows = con.execute(
+            "SELECT session_date, COALESCE(SUM(time_seconds),0) FROM sessions "
+            f"WHERE session_date IN ({placeholders}) "
+            "  AND activity_type='Vocabulary' "
+            "  AND source<>'anki' "
+            "  AND (time_excluded IS NULL OR time_excluded=0) "
+            "GROUP BY session_date",
+            chunk,
+        ).fetchall()
+        found.update(d for d, secs in rows if (secs or 0) > 0)
+    return found
+
+
+def import_anki_days(days, skip_vocab_days=None):
+    """Upsert a batch of logical days of Anki review time and card counts.
+
+    Always a LIST. The addon's periodic push sends one or two entries (today and
+    yesterday), the history backfill sends hundreds; one code path serves both,
+    so there is no second shape to keep in step.
+
+    Modelled on `import_youtube_day`, NOT on `import_ttsu_entries` — the chars
+    guard there only rewrites a row when the character count grows, and an Anki
+    day has no characters at all, so every push after the first would be skipped
+    and its time dropped.
+
+    **The key is collection-scoped, not device-scoped** — the one place this
+    inverts the YouTube rule. YouTube keys per device because a browser only
+    knows its own viewing and two machines must SUM. An Anki collection is
+    synced: every device that opens it sees the same `revlog` and computes the
+    same totals, so a per-device key would make two desktops write two rows and
+    double-count. `anki:<date>` (or `anki:<tag>:<date>`) is what a second
+    desktop must REWRITE rather than add to.
+
+    Because we ship with a key from day one, none of `import_youtube_day`'s
+    keyless-row adoption is needed. A post that carries no key at all is still
+    honoured, and matches only rows that are themselves keyless.
+
+    There is deliberately no monotonic guard: a correction — undoing reviews,
+    deleting a deck — must be able to lower a day.
+
+    **Both counters zero deletes the row**, for the same reason it does for
+    YouTube: the addon has to be able to empty a day out, and the stored row must
+    follow it down. Deleting a row that isn't there is a SUCCESS, not an error —
+    a 200 carrying `error` makes the addon retry forever and stalls the Pi
+    drain's high-water mark.
+
+    `skip_vocab_days` is tri-state, and the third state is the point:
+
+    - `None`  — the periodic push. New rows count (`time_excluded=0`); existing
+      rows keep whatever they have, so a nightly push can never silently
+      un-suppress a day the backfill decided about.
+    - `True`  — the backfill with "skip days I already logged" on. Each day is
+      decided by `_days_with_vocabulary_time` and written on INSERT *and*
+      UPDATE, so re-running after hand-logging or deleting a Vocabulary session
+      re-decides those days.
+    - `False` — the backfill with that box off. Every day counts, written on
+      INSERT and UPDATE, so it actively undoes a previous `True` run.
+
+    Validation runs over the whole batch BEFORE anything is written: a bad entry
+    rejects the payload whole rather than half-applying it, so the retry is a
+    clean replay.
+    """
+    if not isinstance(days, list):
+        return {"error": "days must be a list"}
+    if not days:
+        return {"error": "days must not be empty"}
+    if len(days) > ANKI_MAX_DAYS:
+        return {"error": f"too many days in one payload (max {ANKI_MAX_DAYS})"}
+
+    parsed   = []
+    seen     = set()
+    seen_key = set()
+    for i, entry in enumerate(days):
+        if not isinstance(entry, dict):
+            return {"error": f"days[{i}] must be an object"}
+
+        d = str(entry.get("session_date") or "").strip()
+        if not _YT_DATE_RE.match(d):
+            return {"error": f"days[{i}]: session_date must be YYYY-MM-DD"}
+        try:
+            date.fromisoformat(d)          # the regex accepts 2026-13-45
+        except ValueError:
+            return {"error": f"days[{i}]: session_date {d!r} is not a real date"}
+        if d in seen:
+            return {"error": f"days[{i}]: duplicate session_date {d}"}
+        seen.add(d)
+
+        # A MISSING value and an explicit ZERO are different payloads, and
+        # conflating them deletes data — zero means "this day emptied out, drop
+        # its row". This is why the dispatch passes the raw values through with
+        # no defaults: the absence has to survive as far as here to be rejected.
+        secs = entry.get("time_seconds")
+        if secs is None or (isinstance(secs, str) and not secs.strip()):
+            return {"error": f"days[{i}]: time_seconds is required"}
+        try:
+            secs = float(secs)
+        except (TypeError, ValueError):
+            return {"error": f"days[{i}]: time_seconds must be a number"}
+        if not math.isfinite(secs):
+            return {"error": f"days[{i}]: time_seconds must be finite"}
+        if secs < 0:
+            return {"error": f"days[{i}]: time_seconds must not be negative"}
+
+        cards = entry.get("cards")
+        if cards is None or (isinstance(cards, str) and not cards.strip()):
+            return {"error": f"days[{i}]: cards is required"}
+        try:
+            cards = int(cards)
+        except (TypeError, ValueError):
+            return {"error": f"days[{i}]: cards must be an integer"}
+        if cards < 0:
+            return {"error": f"days[{i}]: cards must not be negative"}
+
+        key = str(entry.get("client_id") or "").strip() or None
+        if key is not None:
+            if key in seen_key:
+                return {"error": f"days[{i}]: duplicate client_id {key}"}
+            seen_key.add(key)
+
+        parsed.append((d, secs, cards, key))
+
+    con = sqlite3.connect(DB_PATH)
+    try:
+        now = datetime.now().isoformat()
+
+        # Decided up front, before a single row of this payload is written.
+        already = set()
+        if skip_vocab_days:
+            already = _days_with_vocabulary_time(con, [p[0] for p in parsed])
+
+        inserted = updated = deleted = 0
+        skipped_days = []
+
+        for d, secs, cards, key in parsed:
+            if key:
+                # Looked up on the key alone: the partial unique index on
+                # client_id is global, so a narrower WHERE could only miss.
+                row = con.execute(
+                    "SELECT rowid FROM sessions WHERE client_id=?", (key,)
+                ).fetchone()
+            else:
+                row = con.execute(
+                    "SELECT rowid FROM sessions WHERE source='anki' "
+                    "AND session_date=? AND client_id IS NULL",
+                    (d,),
+                ).fetchone()
+
+            if secs == 0 and cards == 0:
+                if row:
+                    con.execute("DELETE FROM sessions WHERE rowid=?", (row[0],))
+                    deleted += 1
+                continue
+
+            if skip_vocab_days is None:
+                excl = None                      # periodic push: don't touch it
+            else:
+                excl = 1 if d in already else 0
+                if excl:
+                    skipped_days.append(d)
+
+            if row:
+                if excl is None:
+                    con.execute(
+                        "UPDATE sessions SET time_seconds=?, cards_done=?, "
+                        "ingested_at=? WHERE rowid=?",
+                        (secs, cards, now, row[0]),
+                    )
+                else:
+                    con.execute(
+                        "UPDATE sessions SET time_seconds=?, cards_done=?, "
+                        "ingested_at=?, time_excluded=? WHERE rowid=?",
+                        (secs, cards, now, excl, row[0]),
+                    )
+                updated += 1
+            else:
+                con.execute(
+                    "INSERT INTO sessions "
+                    "(source, title, activity_type, session_date, chars_read, "
+                    " time_seconds, cards_done, ingested_at, time_excluded, client_id) "
+                    "VALUES ('anki','Anki','Vocabulary',?,0,?,?,?,?,?)",
+                    (d, secs, cards, now, excl or 0, key),
+                )
+                inserted += 1
+
+        con.commit()
+    finally:
+        con.close()
+
+    return {
+        "logged":       True,
+        "days":         len(parsed),
+        "inserted":     inserted,
+        "updated":      updated,
+        "deleted":      deleted,
+        "skipped_days": sorted(skipped_days),
+    }
 
 # ── Book-cover downscaling ────────────────────────────────────────────────────
 # Covers are never displayed larger than ~250px anywhere in the UI (the media

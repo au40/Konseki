@@ -18,8 +18,8 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from db import get_setting, set_setting, db_get_custom_categories, logical_date_for
-from imports import (import_cover, import_mangawari_day, import_ttsu_entries,
-                     import_youtube_day, log_manual_session)
+from imports import (import_anki_days, import_cover, import_mangawari_day,
+                     import_ttsu_entries, import_youtube_day, log_manual_session)
 
 BUILTIN_ACTIVITY_TYPES = ["Listening", "Reading", "Speaking", "Vocabulary", "Other"]
 
@@ -158,6 +158,26 @@ def apply_payload(path, body):
                 body.get("session_date", ""),
                 body.get("time_seconds", 0),
                 body.get("client_id"),
+            ), 200
+        if source == "anki":
+            # A BATCH of logical days, always — the addon's periodic push sends
+            # today and yesterday, the history backfill sends hundreds. One
+            # shape, so there is no second path to keep in step.
+            #
+            # Neither `days` nor the per-entry counters get a default, for the
+            # same reason `youtube` refuses one: an omitted `time_seconds` must
+            # arrive as None and be rejected, never be read as the zero that
+            # means "delete this day".
+            #
+            # `skip_days_with_vocabulary_time` is passed through as-is because
+            # it is TRI-STATE, and `.get` returning None for an absent key is
+            # exactly the third state: the periodic push leaves an existing
+            # row's time_excluded alone, while an explicit true/false from the
+            # backfill re-decides it. Coercing it to a bool here would let every
+            # nightly push un-suppress a day the backfill had skipped.
+            return import_anki_days(
+                body.get("days"),
+                body.get("skip_days_with_vocabulary_time"),
             ), 200
         return {"error": f"unknown source {source!r}"}, 400
 
