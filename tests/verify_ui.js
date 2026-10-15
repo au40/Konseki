@@ -110,7 +110,7 @@ const PROBE = `
   bucketDaily, statsMetricAvail, statsCumSeries, sparkHTML, goalBurnupSeries, dateFromISO,
   hourBlockBars,
   dashRingArcs, lineSparkSVG, applyMode, normMode, modeIsLight,
-  TEXT_COLORS, MODE_SURFACE, MODE_CARD, textVarsFor, applyTextColor, textTintFragment,
+  TEXT_COLORS, MODE_SURFACE, MODE_CARD, TEXT_TARGETS, textVarsFor, applyTextColor, textTintFragment,
   hexMix, contrastRatio, textCustomPair,
   get appSettings() { return appSettings; }, set appSettings(v) { appSettings = v; },
   goalHasPeriodLine, goalDailyShare, fmtGoalMetric, todayGoalRows,
@@ -169,22 +169,53 @@ check('MODE_CARD.dark matches ui.css',     P.MODE_CARD.dark,     rootVars['--car
 check('MODE_CARD.light matches ui.css',    P.MODE_CARD.light,    lightCss['--card']);
 check('Default is the stylesheet\'s own dark text',  P.TEXT_COLORS[0].pair[0], rootVars['--text']);
 check('Default is the stylesheet\'s own light text', P.TEXT_COLORS[0].pair[1], lightCss['--text']);
-check('every preset reads easily on tiles in both modes (7:1+)',
-      P.TEXT_COLORS.every(t => P.contrastRatio(t.pair[0], P.MODE_CARD.dark) >= 7 &&
-                               P.contrastRatio(t.pair[1], P.MODE_CARD.light) >= 7), true);
 check('contrast of white on black', Math.round(P.contrastRatio('#FFFFFF', '#000000')), 21);
+const near = (a, b) => Math.abs(a - b) < 0.02;
+check('label targets are the default palette\'s own label contrast',
+      near(P.contrastRatio(rootVars['--dim'], P.MODE_CARD.dark), 5.71) &&
+      near(P.contrastRatio(lightCss['--dim'], P.MODE_CARD.light), 5.66), true);
+check('caption targets are the default palette\'s own caption contrast',
+      near(P.contrastRatio(rootVars['--muted'], P.MODE_CARD.dark), 2.94) &&
+      near(P.contrastRatio(lightCss['--muted'], P.MODE_CARD.light), 2.66), true);
+check('every preset is readable on tiles: 9:1+ in Dark, 7:1+ in Light',
+      P.TEXT_COLORS.every(t => P.contrastRatio(t.pair[0], P.MODE_CARD.dark) >= 9 &&
+                               P.contrastRatio(t.pair[1], P.MODE_CARD.light) >= 7), true);
+// A name has to match what you see in both modes; this is what caught a
+// "Rose" ink that read as brown and a "Violet" that read as navy.
+const hueOf = h => {
+  const n = parseInt(h.slice(1), 16), r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  if (!d) return { hue: 0, sat: 0 };
+  let hue = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  hue = (hue * 60 + 360) % 360;
+  const l = (mx + mn) / 2;
+  return { hue, sat: d / (1 - Math.abs(2 * l - 1)) };
+};
+const HUES = { amber: [20, 45], blue: [205, 235], green: [120, 155], rose: [325, 350], violet: [250, 275] };
+for (const t of P.TEXT_COLORS.slice(1)) {
+  const [lo, hi] = HUES[t.id];
+  const ok = t.pair.every(h => { const c = hueOf(h); return c.hue >= lo && c.hue <= hi && c.sat >= 0.4; });
+  check(`${t.name} looks ${t.name.toLowerCase()} in both modes (hue and saturation)`, ok, true);
+}
+for (const key of ['dark', 'light']) {
+  const ok = P.TEXT_COLORS.slice(1).every(t => {
+    const v = P.textVarsFor(t.id, '', key), card = P.MODE_CARD[key];
+    const tc = P.contrastRatio(v.text, card), dc = P.contrastRatio(v.dim, card), mc = P.contrastRatio(v.muted, card);
+    return dc >= 4.5 && dc <= tc && mc < dc && Math.abs(mc - P.TEXT_TARGETS[key].muted) < 0.2;
+  });
+  check(`${key}: every preset's labels stay at 4.5:1+, under the text, captions under the labels`, ok, true);
+}
 check('Default sets nothing', P.textVarsFor('default', '', 'dark'), null);
 check('an unknown id sets nothing', P.textVarsFor('teal', '', 'dark'), null);
 
-P.appSettings = { ...P.appSettings, text_color: 'warm', text_custom: '' };
+P.appSettings = { ...P.appSettings, text_color: 'amber', text_custom: '' };
 P.applyMode('dark', false);
-check('Warm: text',              P.CT.text,  '#EDE3CF');
-check('Warm: labels mixed 60%',  P.CT.dim,   '#948E83');
-check('Warm: captions mixed 38%', P.CT.muted, '#636059');
-check('chart text follows the labels', sandbox.Chart.defaults.color, '#948E83');
+check('Amber: text', P.CT.text, '#F1D6A4');
+check('Amber: labels at the default label contrast', near(P.contrastRatio(P.CT.dim, P.MODE_CARD.dark), 5.71) || P.contrastRatio(P.CT.dim, P.MODE_CARD.dark) - 5.71 < 0.1, true);
+check('chart text follows the labels', sandbox.Chart.defaults.color, P.CT.dim);
 P.applyMode('light', false);
-check('Warm in Light uses its light half', P.CT.text, '#4A3A22');
-check('...with labels mixed toward the light surface', P.CT.dim, '#827765');
+check('Amber in Light uses its light half', P.CT.text, '#784719');
+check('...with labels at 4.5:1 or more', P.contrastRatio(P.CT.dim, P.MODE_CARD.light) >= 4.5, true);
 check('the start-up fragment carries both modes',
       /^[0-9A-F]{6}(\.[0-9A-F]{6}){2}-[0-9A-F]{6}(\.[0-9A-F]{6}){2}$/.test(P.textTintFragment()), true);
 P.applyMode('dark', false);
@@ -219,16 +250,16 @@ function runPrePaint(hash, systemLight = false) {
   vm.runInNewContext(prePaint, ctx);
   return out;
 }
-P.appSettings = { ...P.appSettings, text_color: 'warm', text_custom: '' };
-const warmTint = P.textTintFragment();
+P.appSettings = { ...P.appSettings, text_color: 'amber', text_custom: '' };
+const amberTint = P.textTintFragment();
 P.appSettings = { ...P.appSettings, text_color: 'default' };
 check('no fragment: Dark, default text', JSON.stringify(runPrePaint('')), JSON.stringify({ attr: null, props: {} }));
 check('#theme=light paints light', runPrePaint('#theme=light').attr, 'light');
 check('#theme=system follows a light system', runPrePaint('#theme=system', true).attr, 'light');
 check('#theme=system stays dark on a dark system', runPrePaint('#theme=system', false).attr, null);
-check('a tint paints the dark half in Dark', runPrePaint('#tint=' + warmTint).props['--text'], '#EDE3CF');
-check('...and the light half in Light', runPrePaint('#theme=light&tint=' + warmTint).props['--text'], '#4A3A22');
-check('...with all three colours', Object.keys(runPrePaint('#tint=' + warmTint).props).length, 3);
+check('a tint paints the dark half in Dark', runPrePaint('#tint=' + amberTint).props['--text'], '#F1D6A4');
+check('...and the light half in Light', runPrePaint('#theme=light&tint=' + amberTint).props['--text'], '#784719');
+check('...with all three colours', Object.keys(runPrePaint('#tint=' + amberTint).props).length, 3);
 check('a malformed tint paints nothing', Object.keys(runPrePaint('#tint=ABC.DEF').props).length, 0);
 
 console.log('\n--- ctAlpha reproduces the old rgba fill exactly ---');

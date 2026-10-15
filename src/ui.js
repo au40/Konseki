@@ -5884,25 +5884,32 @@ if (LIGHT_MQ) {
 }
 
 // ── Text colour ────────────────────────────────────────────────────────────
-// Settings → Appearance. Each choice is a pair, one value per mode (a pale
-// tint in Dark, a deep ink of the same hue in Light), so text stays readable
-// when the mode flips; hence names by hue rather than by shade. Secondary text (--dim, --muted) is mixed
-// from the chosen colour toward the page surface, by the same step the default
-// palette uses. 'default' sets nothing, so ui.css's own values apply exactly.
+// Settings → Appearance. Each choice is a pair of the same hue, one value per
+// mode: a pastel in Dark, a coloured ink in Light. The Light inks trade some
+// contrast for colour you can actually see (7:1 or more on tiles, against the
+// default's 16:1); every pair is checked in tests/verify_ui.js.
+// Secondary text (--dim, --muted) is the chosen colour mixed toward the page
+// surface until it reaches the contrast the default palette's labels and
+// captions have, so labels stay as readable as they are by default.
+// 'default' sets nothing, so ui.css's own values apply exactly.
 const TEXT_COLORS = [
   { id: 'default', name: 'Default', pair: ['#E7E8EB', '#1C1A16'] },
-  { id: 'warm',    name: 'Warm',    pair: ['#EDE3CF', '#4A3A22'] },
-  { id: 'blue',    name: 'Blue',    pair: ['#CFDBF2', '#1E2D4D'] },
-  { id: 'green',   name: 'Green',   pair: ['#D0E3D2', '#1F3B2B'] },
-  { id: 'rose',    name: 'Rose',    pair: ['#F1D2DC', '#4D2333'] },
-  { id: 'violet',  name: 'Violet',  pair: ['#DCD2F4', '#2E2552'] },
+  { id: 'amber',   name: 'Amber',   pair: ['#F1D6A4', '#784719'] },
+  { id: 'blue',    name: 'Blue',    pair: ['#B9CFF9', '#213F83'] },
+  { id: 'green',   name: 'Green',   pair: ['#BAE5C1', '#1F5533'] },
+  { id: 'rose',    name: 'Rose',    pair: ['#F8BCCF', '#812748'] },
+  { id: 'violet',  name: 'Violet',  pair: ['#D2C0FA', '#4C308D'] },
 ];
 // What text sits on, per mode: must match ui.css's --surface and --card
 // (tests/verify_ui.js checks). Text is mixed toward the surface; contrast is
 // judged against the tiles, where most text is.
 const MODE_SURFACE = { dark: '#0E0F11', light: '#EFEDE7' };
 const MODE_CARD    = { dark: '#141518', light: '#FAF9F6' };
-const TEXT_STEPS   = { dark: { dim: 0.60, muted: 0.38 }, light: { dim: 0.66, muted: 0.40 } };
+// Contrast on tiles of the default --dim and --muted (also checked in tests).
+// Labels never go below 4.5:1, and sit a step under the main text when a
+// coloured ink is itself close to that.
+const TEXT_TARGETS = { dark: { dim: 5.71, muted: 2.94 }, light: { dim: 5.66, muted: 2.66 } };
+const LABEL_FLOOR  = 4.5;
 const HEX6 = /^#[0-9a-f]{6}$/i;
 
 function hexMix(a, b, f) {
@@ -5942,8 +5949,25 @@ function textVarsFor(id, customRaw, key) {
   const text = id === 'custom' ? textCustomPair(customRaw)[key]
              : preset ? preset.pair[key === 'dark' ? 0 : 1] : null;
   if (!HEX6.test(text || '')) return null;
-  const s = MODE_SURFACE[key], step = TEXT_STEPS[key];
-  return { text: text.toUpperCase(), dim: hexMix(text, s, step.dim), muted: hexMix(text, s, step.muted) };
+  const card = MODE_CARD[key], tgt = TEXT_TARGETS[key];
+  const textC = contrastRatio(text, card);
+  const dimTarget = Math.max(LABEL_FLOOR, Math.min(tgt.dim, textC * 0.75));
+  return { text: text.toUpperCase(),
+           dim:   towardSurface(text, key, dimTarget),
+           muted: towardSurface(text, key, tgt.muted) };
+}
+
+// The colour mixed toward the page surface just far enough to come down to
+// `target` contrast on tiles. A colour already at or under it is left as is.
+function towardSurface(hex, key, target) {
+  const s = MODE_SURFACE[key], card = MODE_CARD[key];
+  if (contrastRatio(hex, card) <= target) return hex.toUpperCase();
+  let lo = 0, hi = 1;          // share of the colour kept: hi passes, lo doesn't
+  for (let i = 0; i < 24; i++) {
+    const mid = (lo + hi) / 2;
+    if (contrastRatio(hexMix(hex, s, mid), card) >= target) hi = mid; else lo = mid;
+  }
+  return hexMix(hex, s, hi);
 }
 
 const textModeKey = () => document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
