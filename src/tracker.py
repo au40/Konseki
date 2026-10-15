@@ -14,6 +14,7 @@ import time
 import webview
 import sqlite3
 import json
+import re
 import requests
 from datetime import datetime, date
 from pathlib import Path
@@ -69,6 +70,34 @@ from imports import (pull_gsm_now, import_ttsu_zip_data,
                      _shrink_cover_b64)
 from ext_server import ExtServer
 from drain import DrainLoop
+
+
+_TINT_RE = re.compile(r"[0-9A-Fa-f]{6}(\.[0-9A-Fa-f]{6}){2}-[0-9A-Fa-f]{6}(\.[0-9A-Fa-f]{6}){2}")
+
+
+def _start_url(html_path, mode, tint):
+    """ui.html's URL, with what its pre-paint script reads in the fragment:
+    the mode when it isn't Dark, and the text colour's computed values (the
+    text_tint setting, "t.d.m-t.d.m"). A malformed tint is left out, so the
+    page just paints the default colours until init() applies the setting."""
+    parts = []
+    if mode in ("light", "system"):
+        parts.append(f"theme={mode}")
+    if _TINT_RE.fullmatch(tint or ""):
+        parts.append(f"tint={tint}")
+    return f"{html_path}#{'&'.join(parts)}" if parts else str(html_path)
+
+
+def _windows_prefers_light():
+    """Windows' app mode (Settings → Personalization → Colors). False wherever
+    it can't be read, so an unknown setting opens Dark."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as key:
+            return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 1
+    except Exception:
+        return False
 
 
 # ── Tray icon ─────────────────────────────────────────────────────────────────
@@ -183,11 +212,11 @@ class Api:
         # both summed client-side from these rows — skip them, matching the
         # backend figures on every other page.
         chars_excl = get_chars_excluded_titles()
-        cs, _  = get_streak()
+        cs, best = get_streak()
         today_date = get_today()
         # Per-game shave active today, so each row can show a "−Nm" indicator.
         adj = get_manual_time_adjusts_for_date(today_date)
-        return {
+        out = {
             "today": [
                 {"id": r[0], "source": r[1], "title": aliases.get(r[2], r[2]),
                  "raw_title": r[2],
@@ -207,7 +236,14 @@ class Api:
                 "seconds": totals[2], "days": totals[3]
             },
             "cur_streak": cs,
+            "best_streak": best,
+            # The Stats speed card's own per-day basis (attribution, overlay and
+            # exclusions already applied), over the same 7 days as `weekly`. The
+            # client divides chars ÷ time per day; nothing is re-derived here.
+            "speed_basis": {d: [c, s] for d, (c, s)
+                            in get_daily_reading_speed_basis(7).items()},
         }
+        return out
 
     # ── History ───────────────────────────────────────────────────────────────
     def get_history(self):
@@ -1199,7 +1235,15 @@ class Api:
         return {
             "rollover_hour":    int(get_setting("rollover_hour", "0")),
             "gsm_url":          get_setting("gsm_url", imports.GSM_API),
+            # 'dark' | 'light' | 'system'; ui.js reads anything else as dark.
             "theme":            get_setting("theme", "dark"),
+            # Text colour: a ui.js preset id or 'custom', and the custom pair
+            # "#dark,#light". (text_tint, ui.js's computed copy, is only read
+            # at start-up for the start URL.)
+            "text_color":       get_setting("text_color", "default"),
+            "text_custom":      get_setting("text_custom", ""),
+            # Minutes the dashboard ring fills toward; 0 = no target.
+            "daily_target_mins": int(get_setting("daily_target_mins", "0") or 0),
             "ext_port":         _get_port(),
             "ext_token":        _get_or_create_token(),
             "lan_ingest":       lan,
@@ -1334,14 +1378,27 @@ def main():
     html_dir  = Path(__file__).parent
     html_path = html_dir / "ui.html"
 
+    # Open in the saved mode and text colour. ui.js only learns the settings
+    # in init(), after pywebview's API is up, so the page would paint Dark in
+    # the default text colour first and then switch. Both ride in the URL
+    # fragment for the inline script at the top of ui.html to apply before
+    # first paint (pywebview serves local files over its own HTTP server and
+    # keeps a #fragment on the served URL), and the window background matches
+    # ui.css's --surface for the moment before the page paints. Anything but
+    # light/system opens Dark, same as ui.js.
+    mode      = get_setting("theme", "dark")
+    light     = mode == "light" or (mode == "system" and _windows_prefers_light())
+    window_bg = "#EFEDE7" if light else "#0E0F11"
+    start_url = _start_url(html_path, mode, get_setting("text_tint", ""))
+
     win = webview.create_window(
         APP_NAME,
-        str(html_path),
+        start_url,
         js_api=api,
         width=1040,
         height=720,
         min_size=(860, 580),
-        background_color="#1C1C28",
+        background_color=window_bg,
     )
     api._window = win
 

@@ -4,6 +4,24 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Konseki</title>
+<script>
+  // Paint the saved mode and text colour before first paint. tracker.py passes
+  // them as #theme=…&tint=… because it reads the settings before the window
+  // exists; without this the page would paint Dark, in the default text
+  // colour, until init() fetched settings and switched.
+  (function () {
+    var m = /(?:^|[#&])theme=(light|system)(?:&|$)/.exec(location.hash);
+    var light = !!m && (m[1] === 'light' ||
+      !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches));
+    if (light) document.documentElement.setAttribute('data-theme', 'light');
+    // tint = both modes' text, label and caption colours (ui.js textTintFragment).
+    var t = /(?:^|[#&])tint=([0-9A-Fa-f.\-]+)(?:&|$)/.exec(location.hash);
+    var v = t ? (t[1].split('-')[light ? 1 : 0] || '').split('.') : [];
+    if (v.length === 3) ['--text', '--dim', '--muted'].forEach(function (n, i) {
+      document.documentElement.style.setProperty(n, '#' + v[i]);
+    });
+  })();
+</script>
 <script src="assets/chart.umd.min.js"></script>
 <link rel="stylesheet" href="assets/dark.min.css">
 <script src="assets/flatpickr.min.js"></script>
@@ -17,40 +35,42 @@
     <div class="sidebar-logo">
       <div class="name-jp">痕跡</div>
     </div>
+    <!-- Each item is a line icon (.nav-svg); its label (.nav-label) shows as a
+         tooltip beside the rail on hover. -->
     <div class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
-      <span class="nav-icon">◈</span>Dashboard
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/></svg><span class="nav-label">Dashboard</span>
     </div>
     <div class="nav-item" data-page="log" onclick="navigate('log')">
-      <span class="nav-icon">＋</span>Log entry
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 8v8M8 12h8"/></svg><span class="nav-label">Log entry</span>
     </div>
     <div class="nav-item" data-page="history" onclick="navigate('history')">
-      <span class="nav-icon">≡</span>History
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg><span class="nav-label">History</span>
     </div>
     <div class="nav-item" data-page="stats" onclick="navigate('stats')">
-      <span class="nav-icon">◎</span>Stats
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20v-8M12 20V5M19 20v-5"/></svg><span class="nav-label">Stats</span>
     </div>
     <div class="nav-item" data-page="goals" onclick="navigate('goals')">
-      <span class="nav-icon">◉</span>Goals
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r=".8"/></svg><span class="nav-label">Goals</span>
     </div>
     <div class="nav-item" data-page="media" onclick="navigate('media')">
-      <span class="nav-icon">▦</span>Media
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5C4 4.7 4.7 4 5.5 4H11v16H5.5c-.8 0-1.5-.7-1.5-1.5z"/><path d="M20 5.5c0-.8-.7-1.5-1.5-1.5H13v16h5.5c.8 0 1.5-.7 1.5-1.5z"/></svg><span class="nav-label">Media</span>
     </div>
     <div class="nav-item" data-page="catalog" onclick="navigate('catalog')">
-      <span class="nav-icon">▤</span>Catalog
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg><span class="nav-label">Catalog</span>
     </div>
     <div class="nav-item" data-page="settings" onclick="navigate('settings')">
-      <span class="nav-icon">⚙</span>Settings
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span class="nav-label">Settings</span>
     </div>
     <div class="nav-item" data-page="dev" onclick="navigate('dev')">
-      <span class="nav-icon">⌗</span>Dev
+      <svg class="nav-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/></svg><span class="nav-label">Dev</span>
     </div>
     <div class="sidebar-actions">
-      <button class="sidebar-action-btn" id="pull-btn" onclick="doPullGSM()">↻ Pull GSM</button>
+      <button class="sidebar-action-btn" id="pull-btn" onclick="doPullGSM()"><svg class="sab-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 0 0-14.3-4.9L4 8M4 4v4h4M4 13a8 8 0 0 0 14.3 4.9L20 16M20 20v-4h-4"/></svg><span class="sab-label">↻ Pull GSM</span></button>
       <button class="sidebar-action-btn" id="ttsu-btn"
               onclick="doOpenTtsuZip()"
               ondragover="event.preventDefault(); this.classList.add('drag-over')"
               ondragleave="this.classList.remove('drag-over')"
-              ondrop="doDropTtsuZip(event)">⬇ Drag ttsu log zip here</button>
+              ondrop="doDropTtsuZip(event)"><svg class="sab-svg" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v10M8 10l4 4 4-4M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg><span class="sab-label">⬇ Drag ttsu log zip here</span></button>
       <div class="feedback" id="ttsu-feedback" style="margin-top:4px;min-height:14px"></div>
     </div>
     <div class="sidebar-status" id="status">Loading…</div>
@@ -65,131 +85,166 @@
         <h1>Today</h1>
         <div class="right">
           <span class="muted" id="today-date"></span>
+          <button class="btn btn-primary btn-sm" onclick="navigate('log')">＋ Log</button>
         </div>
       </div>
-      <div class="stat-grid">
-        <div class="stat-card"><div class="label">Time today</div>
-          <div class="value" id="d-time" style="color:var(--accent)">—</div></div>
-        <div class="stat-card"><div class="label">Characters</div>
-          <div class="value" id="d-chars" style="color:var(--success)">—</div></div>
-        <div class="stat-card"><div class="label">Chars/hour</div>
-          <div class="value" id="d-lines" style="color:var(--warn)">—</div></div>
-        <div class="stat-card"><div class="label">Streak</div>
-          <div class="value" id="d-days" style="color:var(--purple)">—</div></div>
-      </div>
-      <h2>Today's sessions</h2>
-      <div class="session-list" id="today-sessions"></div>
-      <h2>Last 7 days</h2>
-      <div class="weekly-bars" id="weekly-bars"></div>
-      <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0 8px">
-        <h2 style="margin:0">Activity heatmap</h2>
-        <div style="display:flex;align-items:center;gap:8px">
-          <button class="btn btn-outline btn-sm" onclick="changeDashHeatmapYear(-1)">←</button>
-          <span id="dash-heatmap-year" style="font-size:13px;font-weight:600;color:var(--text);min-width:36px;text-align:center"></span>
-          <button class="btn btn-outline btn-sm" id="dash-heatmap-next" onclick="changeDashHeatmapYear(1)">→</button>
+      <!-- The one-screen tile grid: grid areas are in ui.css (.dash-grid). -->
+      <div class="dash-grid">
+        <section class="dash-tile dash-ring">
+          <div class="dash-tile-head"><h2 id="dash-ring-title">Today</h2><span id="dash-ring-pct"></span></div>
+          <div class="dash-ring-wrap">
+            <svg id="dash-ring-svg" viewBox="0 0 220 220" aria-hidden="true"></svg>
+            <div class="dash-ring-center"><b id="dash-ring-time">—</b><span id="dash-ring-sub"></span></div>
+          </div>
+          <div class="dash-ring-legend" id="dash-ring-legend"></div>
+        </section>
+        <div class="stat-grid">
+          <div class="stat-card dash-chars"><div class="label">Characters</div>
+            <div class="value" id="d-chars" style="color:var(--success)">—</div>
+            <div class="stat-spark" id="d-chars-spark"></div></div>
+          <div class="stat-card dash-speed"><div class="label">Chars/hour</div>
+            <div class="value" id="d-lines" style="color:var(--warn)">—</div>
+            <div class="stat-spark" id="d-speed-spark"></div></div>
+          <div class="stat-card dash-streak"><div class="label">Streak</div>
+            <div class="value" id="d-days" style="color:var(--purple)">—</div>
+            <div class="sub" id="d-best"></div></div>
         </div>
+        <section class="dash-tile dash-sessions">
+          <h2>Today's sessions</h2>
+          <div class="session-list" id="today-sessions"></div>
+        </section>
+        <section class="dash-tile dash-goals">
+          <div class="dash-tile-head"><h2>Today's goals</h2><span class="dash-goals-note">daily share</span></div>
+          <div id="dash-goals"></div>
+        </section>
+        <section class="dash-tile dash-week">
+          <h2>Last 7 days</h2>
+          <div class="weekly-bars" id="weekly-bars"></div>
+        </section>
+        <section class="dash-tile dash-heat">
+          <div class="dash-heat-head">
+            <h2 style="margin:0">Activity heatmap</h2>
+            <div style="display:flex;align-items:center;gap:8px">
+              <button class="btn btn-outline btn-sm" onclick="changeDashHeatmapYear(-1)">←</button>
+              <span id="dash-heatmap-year" style="font-size:13px;font-weight:600;color:var(--text);min-width:36px;text-align:center"></span>
+              <button class="btn btn-outline btn-sm" id="dash-heatmap-next" onclick="changeDashHeatmapYear(1)">→</button>
+            </div>
+          </div>
+          <div class="heatmap-wrap"><div id="heatmap-dash"></div></div>
+        </section>
       </div>
-      <div class="heatmap-wrap"><div id="heatmap-dash"></div></div>
     </div>
 
     <!-- ── Log entry ─────────────────────────────────────────────────────── -->
     <div id="page-log" class="page">
       <div class="page-header"><h1>Log entry</h1></div>
-      <p class="muted" style="margin:6px 0 20px">Manually record an immersion session.</p>
-      <div class="card" style="margin-bottom:16px">
-        <div class="form-group">
-          <label>Activity type</label>
-          <div class="pill-group" id="atype-pills"></div>
-        </div>
-        <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
-          <div class="form-group" style="width:140px;flex-shrink:0">
-            <label>Time (minutes)</label>
-            <input type="number" id="log-minutes" min="1" oninput="updateCharsHint()">
+      <!-- Two ways of logging, side by side, then recent hand-logged entries.
+           Every id the form logic uses is unchanged from the old stacked layout;
+           custom categories moved to Settings (#settings-categories). -->
+      <div class="log-grid">
+        <section class="card log-tile">
+          <div class="log-tile-head"><h2>One session</h2></div>
+          <div class="form-group">
+            <label>Activity</label>
+            <div class="log-acts" id="atype-pills"></div>
           </div>
-          <div class="form-group" id="log-chars-group" style="display:none;width:140px;flex-shrink:0">
-            <label>Characters (optional)</label>
-            <input type="number" id="log-chars" min="0" oninput="updateCharsHint()">
+          <div class="log-row log-row-2">
+            <div class="form-group">
+              <label for="log-minutes">Minutes</label>
+              <input type="number" id="log-minutes" min="1" oninput="updateCharsHint()">
+            </div>
+            <div class="form-group">
+              <label for="log-title">Title (optional)</label>
+              <select id="log-title" onchange="updateLogSummary()"></select>
+              <datalist id="media-titles"></datalist>
+            </div>
           </div>
-          <div class="form-group" id="log-cph-group" style="display:none;width:140px;flex-shrink:0">
-            <label>Chars / hour (optional)</label>
-            <input type="number" id="log-cph" min="0" oninput="updateCharsHint()">
+          <div class="chip-row" id="log-dur-chips">
+            <button type="button" class="pill" data-min="15" onclick="setLogMinutes(15)">15m</button>
+            <button type="button" class="pill" data-min="30" onclick="setLogMinutes(30)">30m</button>
+            <button type="button" class="pill" data-min="45" onclick="setLogMinutes(45)">45m</button>
+            <button type="button" class="pill" data-min="60" onclick="setLogMinutes(60)">1h</button>
+            <button type="button" class="pill" data-min="90" onclick="setLogMinutes(90)">1h 30m</button>
           </div>
-          <div class="form-group" style="flex:1;min-width:200px">
-            <label>Title / media (optional)</label>
-            <select id="log-title"></select>
-            <datalist id="media-titles"></datalist>
+          <div id="log-recent" class="recent-chips" style="display:none"></div>
+          <div class="log-row log-row-3">
+            <div class="form-group" id="log-chars-group" style="display:none">
+              <label for="log-chars">Characters</label>
+              <input type="number" id="log-chars" min="0" oninput="updateCharsHint()">
+            </div>
+            <div class="form-group" id="log-cph-group" style="display:none">
+              <label for="log-cph">or chars per hour</label>
+              <input type="number" id="log-cph" min="0" oninput="updateCharsHint()">
+            </div>
+            <div id="log-chars-hint" class="muted log-hint" style="display:none"></div>
           </div>
-        </div>
-        <div id="log-chars-hint" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
-        <div id="log-recent" class="recent-chips" style="display:none"></div>
-        <div class="form-group" style="max-width:180px">
-          <label>Date</label>
-          <input type="text" id="log-date">
-        </div>
-        <div class="feedback" id="log-feedback"></div>
-        <button class="btn btn-primary" style="margin-top:4px" onclick="doLogSession()">Add entry</button>
-      </div>
+          <div class="form-group">
+            <label for="log-date">Date</label>
+            <div class="chip-row log-date-row">
+              <button type="button" class="pill" data-ago="0" onclick="setLogDate('log-date', 0)">Today</button>
+              <button type="button" class="pill" data-ago="1" onclick="setLogDate('log-date', 1)">Yesterday</button>
+              <input type="text" id="log-date" class="log-date-input">
+            </div>
+          </div>
+          <div class="feedback" id="log-feedback"></div>
+          <div class="log-summary">
+            <p id="log-summary"></p>
+            <div class="log-actions"><button class="btn btn-primary" onclick="doLogSession()">Add entry</button></div>
+          </div>
+        </section>
 
-      <h2 style="display:flex;align-items:center;gap:7px">Total time log<span
-        style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;border:1px solid var(--dim);color:var(--dim);font-size:10px;font-style:italic;font-weight:700;cursor:help"
-        title="Paste your reading app's running total — it logs the difference since your last entry. The totals are kept privately just to compute the next diff; only the difference is logged.">i</span></h2>
-      <div class="card" style="margin-bottom:16px">
-        <div class="form-group">
-          <label>Totals are tracked</label>
-          <div class="pill-group" id="tlog-mode-pills">
-            <button class="pill active" id="tlog-mode-global" onclick="toggleTotalLogMode('global')">Globally</button>
-            <button class="pill" id="tlog-mode-permedia" onclick="toggleTotalLogMode('per_media')">Per media</button>
+        <section class="card log-tile">
+          <div class="log-tile-head">
+            <h2 class="log-tile-title">From a running total<span class="info-tip" tabindex="0"
+              aria-label="How this works"
+              data-tip="Paste your reading app's running total and this logs the difference since your last entry. Totals are only kept to work out the next difference; just the difference is logged."><svg
+              viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.3v4"/><circle class="info-dot" cx="8" cy="4.9" r=".7"/></svg></span></h2>
+            <div class="seg" id="tlog-mode-pills">
+              <button class="seg-btn active" id="tlog-mode-global" onclick="toggleTotalLogMode('global')">Overall</button>
+              <button class="seg-btn" id="tlog-mode-permedia" onclick="toggleTotalLogMode('per_media')">Per media</button>
+            </div>
           </div>
-        </div>
-        <div class="muted" id="tlog-baseline" style="margin:-4px 0 14px;font-size:13px"></div>
-        <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
-          <div class="form-group" style="width:140px;flex-shrink:0">
-            <label>New total time (H:MM:SS)</label>
-            <input type="text" id="tlog-time" oninput="updateTotalLogPreview()">
-          </div>
-          <div class="form-group" style="width:150px;flex-shrink:0">
-            <label>New total chars (optional)</label>
-            <input type="number" id="tlog-chars" min="0" oninput="updateTotalLogPreview()">
-          </div>
-          <div class="form-group" style="width:140px;flex-shrink:0">
-            <label>Chars / hour (optional)</label>
-            <input type="number" id="tlog-cph" min="0" oninput="updateTotalLogPreview()">
-          </div>
-          <div class="form-group" style="flex:1;min-width:200px">
-            <label>Media (optional)</label>
+          <div class="form-group">
+            <label for="tlog-media">Media (optional)</label>
             <select id="tlog-media" onchange="onTotalLogMediaChange()"></select>
           </div>
-        </div>
-        <div id="tlog-recent" class="recent-chips" style="display:none"></div>
-        <div class="form-group" style="max-width:180px">
-          <label>Date</label>
-          <input type="text" id="tlog-date">
-        </div>
-        <div id="tlog-preview" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
-        <div class="feedback" id="tlog-feedback"></div>
-        <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
-          <button class="btn btn-primary" id="tlog-submit" onclick="doTotalLog()">Log difference</button>
-          <button class="btn btn-outline" onclick="doSetTotalBaseline()">Set as baseline</button>
-        </div>
+          <div id="tlog-recent" class="recent-chips" style="display:none"></div>
+          <div class="log-baseline" id="tlog-baseline"></div>
+          <div class="log-row log-row-3">
+            <div class="form-group">
+              <label for="tlog-time">New total time</label>
+              <input type="text" id="tlog-time" placeholder="H:MM:SS" oninput="updateTotalLogPreview()">
+            </div>
+            <div class="form-group">
+              <label for="tlog-chars">New total chars</label>
+              <input type="number" id="tlog-chars" min="0" oninput="updateTotalLogPreview()">
+            </div>
+            <div class="form-group">
+              <label for="tlog-cph">or chars per hour</label>
+              <input type="number" id="tlog-cph" min="0" oninput="updateTotalLogPreview()">
+            </div>
+          </div>
+          <div class="form-group">
+            <label for="tlog-date">Date</label>
+            <div class="chip-row log-date-row">
+              <button type="button" class="pill" data-ago="0" onclick="setLogDate('tlog-date', 0)">Today</button>
+              <button type="button" class="pill" data-ago="1" onclick="setLogDate('tlog-date', 1)">Yesterday</button>
+              <input type="text" id="tlog-date" class="log-date-input">
+            </div>
+          </div>
+          <div class="feedback" id="tlog-feedback"></div>
+          <div class="log-summary">
+            <p id="tlog-preview" class="muted" style="display:none"></p>
+            <div class="log-actions">
+              <button class="btn btn-outline" onclick="doSetTotalBaseline()">Save total without logging</button>
+              <button class="btn btn-primary" id="tlog-submit" onclick="doTotalLog()">Log difference</button>
+            </div>
+          </div>
+        </section>
       </div>
 
-      <h2>Custom Categories</h2>
-      <div class="card">
-        <p class="muted" style="margin-bottom:14px">Add your own activity categories alongside the built-in ones.</p>
-        <div class="pill-group" id="custom-cat-list" style="margin-bottom:14px"></div>
-        <div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end">
-          <div class="form-group" style="margin-bottom:0">
-            <label>Category name</label>
-            <input type="text" id="new-cat-name" maxlength="32">
-          </div>
-          <button class="btn btn-outline" style="height:40px" onclick="doAddCategory()">Add</button>
-        </div>
-        <div style="margin-top:10px">
-          <label class="muted">Color</label>
-          <div class="color-grid" id="cat-color-swatches"></div>
-        </div>
-        <div class="feedback" id="cat-feedback"></div>
-      </div>
+      <h2 class="log-recent-head">Logged by hand<span class="log-link" onclick="navigate('history')">See all in History</span></h2>
+      <div class="session-list" id="log-recent-list"></div>
     </div>
 
     <!-- ── History ────────────────────────────────────────────────────────── -->
@@ -203,7 +258,7 @@
     <div id="page-stats" class="page">
       <div class="stats-ctrl">
         <h1>Stats</h1>
-        <div style="display:flex;align-items:flex-start;gap:10px">
+        <div class="stats-tools">
         <div class="filter-wrap">
           <button id="activity-filter-btn" class="btn btn-outline btn-sm" onclick="toggleActivityFilterPop(event)">
             <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex-shrink:0">
@@ -213,7 +268,7 @@
           </button>
           <div id="activity-filter-pop" class="filter-pop" hidden></div>
         </div>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+        <div class="stats-segs">
           <div class="seg" id="range-seg">
             <button class="seg-btn active" data-range="30d" onclick="setRange('30d')">30d</button>
             <button class="seg-btn"        data-range="90d" onclick="setRange('90d')">90d</button>
@@ -283,7 +338,8 @@
         </div>
       </div>
 
-      <div class="detail-chart-head" style="margin:20px 0 8px">
+      <section class="stats-tile stats-over">
+      <div class="detail-chart-head stats-over-head">
         <h2 style="margin:0">Over time</h2>
         <div class="detail-chart-ctrl">
           <label class="toggle-label" id="split-toggle-label">
@@ -312,25 +368,19 @@
           <div class="brush-handle brush-handle-r" data-side="r"><span></span></div>
         </div>
       </div>
+      </section>
 
-      <div style="margin-top:16px">
+      <!-- Day of week and By activity side by side. The heatmap is on the dashboard. -->
+      <div class="stats-mid">
+      <section class="stats-tile stats-dow">
         <h2>Time by day of week</h2>
         <div class="chart-wrap"><canvas id="chart-dow" height="180"></canvas></div>
-      </div>
+      </section>
 
-      <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0 8px">
-        <h2 style="margin:0">Activity heatmap</h2>
-        <div style="display:flex;align-items:center;gap:8px">
-          <button class="btn btn-outline btn-sm" onclick="changeHeatmapYear(-1)">←</button>
-          <span id="heatmap-year-label" style="font-size:13px;font-weight:600;color:var(--text);min-width:36px;text-align:center"></span>
-          <button class="btn btn-outline btn-sm" id="heatmap-next-btn" onclick="changeHeatmapYear(1)">→</button>
-        </div>
-      </div>
-      <div class="heatmap-wrap"><div id="heatmap-stats"></div></div>
-
-      <div style="margin-top:16px">
+      <section class="stats-tile stats-act">
         <h2>By activity</h2>
         <div class="chart-wrap"><canvas id="chart-donut" height="220"></canvas></div>
+      </section>
       </div>
 
       <!-- ── Lifetime views ────────────────────────────────────────────────
@@ -346,6 +396,8 @@
            PACE rather than composition, and it physically can't respond to the
            range selector (it's a cumulative walk over the whole history), which
            is exactly what this heading is for. -->
+      <div class="stats-life">
+      <section class="stats-tile">
       <div class="detail-chart-head">
         <h3 class="showcase-sub" style="margin:0">How long each block of hours took</h3>
         <div class="seg" id="block-size-seg">
@@ -357,17 +409,25 @@
       <p class="muted showcase-note">Calendar days from one milestone to the next — shorter bars mean a faster
         stretch. The dashed bar is the block you're in now.</p>
       <div class="chart-wrap"><canvas id="chart-hour-blocks" height="200"></canvas></div>
+      </section>
 
+      <section class="stats-tile">
       <h3 class="showcase-sub">What you were reading</h3>
       <div class="chart-wrap"><canvas id="chart-streams" height="220"></canvas></div>
+      </section>
 
+      <section class="stats-tile">
       <h3 class="showcase-sub">Reading speed by title</h3>
       <p class="muted showcase-note">Box shows the middle half of your daily speeds; the line inside is the
         median, whiskers are the slowest and fastest days. Slowest median first.</p>
       <div class="chart-wrap"><canvas id="chart-speed-dist" height="240"></canvas></div>
+      </section>
 
+      <section class="stats-tile">
       <h3 class="showcase-sub">Activity mix over time</h3>
       <div class="chart-wrap"><canvas id="chart-activity-trend" height="200"></canvas></div>
+      </section>
+      </div>
 
       <div style="height:24px"></div>
     </div>
@@ -376,13 +436,13 @@
     <div id="page-goals" class="page">
       <div class="page-header">
         <h1>Goals</h1>
-        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+        <div class="goal-head-ctrl">
           <div class="seg" id="goal-pace-seg">
             <button class="seg-btn active" data-pace="daily"   onclick="setGoalPaceView('daily')">Daily</button>
             <button class="seg-btn"        data-pace="weekly"  onclick="setGoalPaceView('weekly')">Weekly</button>
             <button class="seg-btn"        data-pace="monthly" onclick="setGoalPaceView('monthly')">Monthly</button>
           </div>
-          <div style="display:flex;gap:8px;width:100%">
+          <div class="goal-head-btns">
             <button class="btn btn-sm btn-seg" style="flex:1;justify-content:center" id="completed-btn" onclick="showCompletedGoals()">Completed</button>
             <button class="btn btn-sm btn-seg" style="flex:1;justify-content:center" id="new-goal-btn"   onclick="toggleGoalForm()">New Goal</button>
           </div>
@@ -875,25 +935,46 @@
       <div class="settings-section">
         <div class="card">
           <h3>Appearance</h3>
-          <p class="muted" style="margin-bottom:4px">Color theme for the app.</p>
-          <div class="theme-options">
-            <button class="theme-opt" data-theme="dark" onclick="setTheme('dark')">
-              <div class="theme-swatch">
-                <span class="theme-swatch-dot" style="background:#1C1C28"></span>
-                <span class="theme-swatch-dot" style="background:#5B8CFF"></span>
-                <span class="theme-swatch-dot" style="background:#4ECBA0"></span>
-              </div>
-              Dark
-            </button>
-            <button class="theme-opt" data-theme="mint" onclick="setTheme('mint')">
-              <div class="theme-swatch">
-                <span class="theme-swatch-dot" style="background:#EEF8F5"></span>
-                <span class="theme-swatch-dot" style="background:#2EAA92"></span>
-                <span class="theme-swatch-dot" style="background:#9A82D4"></span>
-              </div>
-              Light
-            </button>
+          <div class="form-group" style="margin:0 0 16px">
+            <label>Mode</label>
+            <div class="seg" role="group" aria-label="Mode" style="width:max-content">
+              <button class="seg-btn mode-opt" data-mode="dark" onclick="setMode('dark')">Dark</button>
+              <button class="seg-btn mode-opt" data-mode="light" onclick="setMode('light')">Light</button>
+              <button class="seg-btn mode-opt" data-mode="system" onclick="setMode('system')">Match Windows</button>
+            </div>
           </div>
+          <div class="form-group" style="margin:0 0 16px">
+            <label>Text colour</label>
+            <div class="text-swatches" id="text-swatches" role="group" aria-label="Text colour"></div>
+            <p class="muted text-color-note" id="text-color-note"></p>
+          </div>
+          <div class="form-group" style="margin:0;max-width:260px">
+            <label for="daily-target">Daily time target (minutes)</label>
+            <input type="number" id="daily-target" min="0" max="1440" placeholder="e.g. 180" onchange="saveDailyTarget()">
+          </div>
+          <p class="muted" style="margin-top:2px">The dashboard ring fills toward this. Leave it empty to show today's activity mix instead.</p>
+        </div>
+      </div>
+
+      <!-- Custom activity categories. Moved here from the Log entry page; the
+           "＋" chip at the end of that page's activity row opens this section. -->
+      <div class="settings-section" id="settings-categories">
+        <div class="card">
+          <h3>Activity categories</h3>
+          <p class="muted" style="margin-bottom:14px">Add your own activity categories alongside the built-in ones.</p>
+          <div class="pill-group" id="custom-cat-list" style="margin-bottom:14px"></div>
+          <div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end">
+            <div class="form-group" style="margin-bottom:0">
+              <label>Category name</label>
+              <input type="text" id="new-cat-name" maxlength="32">
+            </div>
+            <button class="btn btn-outline" style="height:40px" onclick="doAddCategory()">Add</button>
+          </div>
+          <div style="margin-top:10px">
+            <label class="muted">Color</label>
+            <div class="color-grid" id="cat-color-swatches"></div>
+          </div>
+          <div class="feedback" id="cat-feedback"></div>
         </div>
       </div>
 

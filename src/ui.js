@@ -60,7 +60,6 @@ let seriesData    = [];
 let mediaOrderMap = {}; // key -> position; key is "t:<title>" or "s:<id>"
 let currentSeriesId = null;
 let draggedItem   = null; // {type:'title'|'series', id:string|number}
-let heatmapYear     = new Date().getFullYear();
 let dashHeatmapYear = new Date().getFullYear();
 let appSettings   = { rollover_hour: 0, gsm_url: 'http://localhost:7275/api/stats', theme: 'dark' };
 let currentDetailTitle = null;
@@ -102,13 +101,13 @@ const PORTAL_PALETTE = CAT_PALETTE;    // stat-portal per-title colors; 8-cap ke
 // keeps its identity across views, minus the grey — the residual "Other" band is
 // grey, and a real title landing on that shade would read as the leftovers.
 const STREAM_PALETTE = CAT_PALETTE.filter(c => c !== '#6B6B8A');
-let HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
+// Empty day, then the ramp into the accent blue. Read from ui.css's --heat-*
+// by refreshChartTheme(), like the chart colours, so it follows the mode.
+let HEATMAP_COLORS = ['#1A1C20','#222E4A','#2F4580','#5068BE','#9DB2FF'];
 
-// Chart colors, read from the theme's CSS custom properties instead of being
-// hardcoded per chart. The dark values in :root are byte-identical to the hex
-// literals these replaced, so dark renders exactly as before; mint now follows
-// the theme too (its charts used to keep dark grid/tick colors on a light bg).
-// Repopulated by applyTheme() after the data-theme attribute flips.
+// Chart colors, read from the CSS custom properties in ui.css instead of being
+// hardcoded per chart, so charts and the page draw from one palette. Re-read by
+// applyMode() whenever Dark/Light flips.
 let CT = {};
 function refreshChartTheme() {
   const cs = getComputedStyle(document.documentElement);
@@ -119,6 +118,7 @@ function refreshChartTheme() {
     purple:  v('--purple'),  pink:  v('--pink'),  inset:  v('--inset'),
     text:    v('--text'),    muted: v('--muted'),
   };
+  HEATMAP_COLORS = [0, 1, 2, 3, 4].map(i => v('--heat-' + i));
   Chart.defaults.color       = CT.dim;
   Chart.defaults.borderColor = CT.grid;
 }
@@ -329,11 +329,9 @@ async function loadDashboard() {
   const readingSec = readingRows.reduce((a,r) => a + r.seconds, 0);
   const readingChars = readingRows.reduce((a,r) => a + r.chars, 0);
   const cph = (readingSec > 0 && readingChars > 0) ? Math.round(readingChars / (readingSec / 3600)) : 0;
-  document.getElementById('d-time').textContent  = fmtTime(todaySec);
   document.getElementById('d-chars').textContent = fmtChars(todayChars);
   document.getElementById('d-lines').textContent = cph > 0 ? fmtChars(cph) + '/h' : '—';
   document.getElementById('d-days').textContent  = `${d.cur_streak ?? 0}d`;
-  setStatTip('d-time',  tipTime(todaySec));
   setStatTip('d-chars', tipChars(todayChars));
   setStatTip('d-lines', tipSpeed(cph));
 
@@ -377,7 +375,147 @@ async function loadDashboard() {
       <span class="weekly-total-time">${fmtTime(totalSec)}</span>
     </div>`;
 
+  renderDashTiles(d, todaySec);
+  renderDashGoals();   // own fetch; deliberately not awaited
   await refreshDashHeatmap();
+}
+
+// ── Dashboard tiles ────────────────────────────────────────────────────────
+// Nothing here derives a new figure: the ring sums today's session rows (the
+// same rows the Characters and Chars/hour cards sum), the chars line is the weekly series
+// the 7-day bars already draw, the speed line is get_daily_reading_speed_basis
+// (the Stats speed card's own basis, divided the chars ÷ time way), and Today's
+// goals is get_goals read through the goal card's own pacing helpers.
+
+// Ring arcs as fractions of the circle. With a target, the circle is the target
+// (or today's time once that passes it, so the arcs still fit); without one,
+// the circle is today's time and the ring shows only the activity mix.
+function dashRingArcs(acts, todaySec, targetSec) {
+  const whole = targetSec > 0 ? Math.max(targetSec, todaySec) : todaySec;
+  if (!(whole > 0)) return [];
+  let start = 0;
+  return acts.filter(([, secs]) => secs > 0).map(([name, secs]) => {
+    const frac = secs / whole;
+    const arc  = { name, secs, start, frac };
+    start += frac;
+    return arc;
+  });
+}
+
+// Small line chart for a stat tile. null = no data that day: it breaks the line
+// rather than being drawn as zero. Fewer than two points draws nothing.
+function lineSparkSVG(vals, color, w = 96, h = 40) {
+  const pts = vals.map(v => (v == null || !isFinite(v)) ? null : v);
+  const real = pts.filter(v => v != null);
+  if (real.length < 2) return '';
+  const lo = Math.min(...real), hi = Math.max(...real), span = (hi - lo) || 1;
+  const xy = pts.map((v, i) => v == null ? null : [
+    3 + i * (w - 6) / Math.max(1, pts.length - 1),
+    hi === lo ? h / 2 : h - 4 - (v - lo) / span * (h - 10),
+  ]);
+  let line = '', run = [];
+  const flush = () => {
+    if (run.length > 1) line += 'M' + run.map(p => p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' L');
+    run = [];
+  };
+  xy.forEach(p => { if (p) run.push(p); else flush(); });
+  flush();
+  const last = [...xy].reverse().find(p => p);
+  return `<svg viewBox="0 0 ${w} ${h}" aria-hidden="true">` +
+    `<path d="${line}" fill="none" stroke="${color}" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/>` +
+    `<circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3" fill="${color}"/></svg>`;
+}
+
+function renderDashTiles(d, todaySec) {
+  // Ring: today's rows summed per activity.
+  const byAct = {};
+  d.today.forEach(r => {
+    if (r.seconds > 0) byAct[r.activity_type || 'Other'] = (byAct[r.activity_type || 'Other'] || 0) + r.seconds;
+  });
+  const acts   = Object.entries(byAct).sort((a, b) => b[1] - a[1]);
+  const target = (appSettings.daily_target_mins || 0) * 60;
+  const arcs   = dashRingArcs(acts, todaySec, target);
+
+  const size = 220, stroke = 16, r = (size - stroke) / 2, c = size / 2, C = 2 * Math.PI * r;
+  let svg = `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="var(--inset)" stroke-width="${stroke}"/>`;
+  if (arcs.length === 1 && arcs[0].frac >= 0.999) {
+    svg += `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${acolor(arcs[0].name)}" stroke-width="${stroke}"/>`;
+  } else {
+    // Round caps overhang each end by stroke/2, so trim them off the dash and
+    // leave a small gap between neighbouring activities.
+    const gap = 3;
+    arcs.forEach(a => {
+      const len  = a.frac * C;
+      const dash = Math.max(0.01, len - stroke - gap);
+      const off  = a.start * C + stroke / 2 + gap / 2;
+      svg += `<circle cx="${c}" cy="${c}" r="${r}" fill="none" stroke="${acolor(a.name)}" stroke-width="${stroke}"` +
+             ` stroke-linecap="round" stroke-dasharray="${dash.toFixed(2)} ${C.toFixed(2)}"` +
+             ` stroke-dashoffset="${(-off).toFixed(2)}" transform="rotate(-90 ${c} ${c})"/>`;
+    });
+  }
+  document.getElementById('dash-ring-svg').innerHTML = svg;
+  document.getElementById('dash-ring-time').textContent = fmtTime(todaySec);
+  document.getElementById('dash-ring-title').textContent = target > 0 ? 'Daily target' : 'Today';
+  document.getElementById('dash-ring-pct').textContent =
+    target > 0 ? `${Math.round(todaySec / target * 100)}%` : '';
+  document.getElementById('dash-ring-sub').textContent =
+    target <= 0          ? 'Set a daily target in Settings'
+    : todaySec >= target ? `Target reached${todaySec > target ? ` · +${fmtTime(todaySec - target)}` : ''}`
+    :                      `of ${fmtTime(target)} · ${fmtTime(target - todaySec)} to go`;
+  document.getElementById('dash-ring-legend').innerHTML = acts.map(([name, secs]) =>
+    `<div><i style="background:${acolor(name)}"></i>${escHtml(name)}<em>${fmtTime(secs)}</em></div>`).join('');
+
+  // Sparklines over the same 7 days as the bars.
+  const days = d.weekly.map(w => w.date);
+  document.getElementById('d-chars-spark').innerHTML =
+    lineSparkSVG(d.weekly.map(w => w.chars), 'var(--accent)');
+  const basis = d.speed_basis || {};
+  document.getElementById('d-speed-spark').innerHTML = lineSparkSVG(days.map(day => {
+    const [ch, s] = basis[day] || [0, 0];
+    return (ch > 0 && s > 0) ? ch / (s / 3600) : null;
+  }), 'var(--accent)');
+
+  const best = document.getElementById('d-best');
+  best.textContent = d.best_streak ? `Best ${d.best_streak}d` : '';
+}
+
+// Today's goals: each live goal's progress today against its daily share, the
+// same pair the goal card's Daily view shows. Goals still short of today's
+// share come first (in Goals-page order), then the ones already done for today;
+// past DASH_GOAL_ROWS the rest fold into a link to the Goals page.
+const DASH_GOAL_ROWS = 4;
+function todayGoalRows(goals) {
+  const rows = (goals || [])
+    .filter(g => !g.user_finished && goalHasPeriodLine(g))
+    .map(g => {
+      const share = goalDailyShare(g), done = g.today_completed || 0;
+      return { g, share, done, frac: share > 0 ? done / share : 0 };
+    });
+  return [...rows.filter(r => r.frac < 1), ...rows.filter(r => r.frac >= 1)];
+}
+
+async function renderDashGoals() {
+  const el = document.getElementById('dash-goals');
+  if (!el) return;
+  let goals = [];
+  try { goals = (await window.pywebview.api.get_goals()) || []; } catch (e) { goals = []; }
+  const rows = todayGoalRows(goals);
+  if (!rows.length) {
+    const any = goals.some(g => !g.user_finished);
+    el.innerHTML = `<p class="empty-msg">${any ? 'Nothing due today from your goals.' : 'No goals yet.'}
+      <span class="dash-goal-link" onclick="navigate('goals')">Open Goals</span></p>`;
+    return;
+  }
+  const shown = rows.slice(0, DASH_GOAL_ROWS), more = rows.length - shown.length;
+  el.innerHTML = shown.map(r => `
+      <div class="dash-goal-row" onclick="navigate('goals')">
+        <div class="dash-goal-line">
+          <span class="dash-goal-name">${escHtml(r.g.label)}</span>
+          <span class="dash-goal-val">${fmtGoalMetric(r.g, r.done)} <span>/ ${fmtGoalMetric(r.g, r.share)}</span></span>
+        </div>
+        <div class="dash-goal-track"><div class="${r.frac >= 1 ? 'is-done' : ''}" style="width:${Math.min(100, r.frac * 100).toFixed(1)}%"></div></div>
+      </div>`).join('') +
+    (more > 0 ? `<div class="dash-goal-more dash-goal-link" onclick="navigate('goals')">+${more} more on the Goals page</div>` : '');
 }
 
 async function refreshDashHeatmap() {
@@ -388,6 +526,10 @@ async function refreshDashHeatmap() {
   if (nextBtn) nextBtn.disabled  = dashHeatmapYear >= curYear;
   const hmData = await window.pywebview.api.get_heatmap(dashHeatmapYear, null);
   renderHeatmap('heatmap-dash', hmData, null, true, dashHeatmapYear);
+  // The year fits its tile; only a very narrow window still scrolls, and then
+  // it should open on the latest weeks rather than on January.
+  const wrap = document.getElementById('heatmap-dash')?.closest('.heatmap-wrap');
+  if (wrap) wrap.scrollLeft = wrap.scrollWidth;
 }
 
 async function changeDashHeatmapYear(delta) {
@@ -749,10 +891,13 @@ function renderHeatmap(containerId, data, maxDays, showLabels, yearMode) {
 // ── GSM pull ────────────────────────────────────────────────────────────────
 async function doPullGSM() {
   const btn = document.getElementById('pull-btn');
-  btn.disabled = true; btn.textContent = 'Pulling…';
+  // Write the label span, not the button: the button also holds the rail
+  // icon, which textContent on the button would wipe. 'busy' spins that icon.
+  const label = btn.querySelector('.sab-label') || btn;
+  btn.disabled = true; label.textContent = 'Pulling…'; btn.classList.add('busy');
   const url = document.getElementById('gsm-url')?.value || null;
   const r   = await window.pywebview.api.pull_gsm(url);
-  btn.disabled = false; btn.textContent = '↻ Pull GSM now';
+  btn.disabled = false; label.textContent = '↻ Pull GSM now'; btn.classList.remove('busy');
   if (r.ok) {
     const parts = [`${fmtChars(r.chars)} chars`];
     if (r.speed > 0 && r.chars > 0)  parts.push(`${fmtChars(Math.round(r.speed))}/hr`);
@@ -772,35 +917,103 @@ async function buildLogPage() {
     ...customCats.map(c => [c.name, c.color])
   ]);
 
+  // Activity chips: the colour is a dot, so a selected chip stays neutral
+  // whatever the category colour. "＋" opens category management in Settings.
   const pills = document.getElementById('atype-pills');
   pills.innerHTML = '';
   allTypes.forEach(t => {
     const b = document.createElement('button');
-    b.className = 'pill' + (t === selectedAtype ? ' active' : '');
-    b.textContent = t;
-    if (t === selectedAtype) {
-      const col = allColors[t] || 'var(--accent)';
-      b.style.background = col; b.style.borderColor = col; b.style.color = '#fff';
-    }
+    b.type = 'button';
+    b.className = 'act-chip' + (t === selectedAtype ? ' active' : '');
+    b.innerHTML = `<i class="dot" style="background:${allColors[t] || 'var(--accent)'}"></i>${escHtml(t)}`;
     b.onclick = () => {
       selectedAtype = t;
-      pills.querySelectorAll('.pill').forEach(p => {
-        p.classList.remove('active');
-        p.style.background = ''; p.style.borderColor = ''; p.style.color = '';
-      });
-      b.classList.add('active');
-      const col = allColors[t] || 'var(--accent)';
-      b.style.background = col; b.style.borderColor = col; b.style.color = '#fff';
+      pills.querySelectorAll('.act-chip').forEach(p => p.classList.toggle('active', p === b));
       toggleReadingFields(t === 'Reading');
     };
     pills.appendChild(b);
   });
+  const add = document.createElement('button');
+  add.type = 'button';
+  add.className = 'act-chip add';
+  add.textContent = '＋';
+  add.title = 'Add or remove categories in Settings';
+  add.onclick = openCategorySettings;
+  pills.appendChild(add);
 
   toggleReadingFields(selectedAtype === 'Reading');
   await populateMediaTitles();
   await initTotalLog();
   renderCustomCatList(customCats);
   buildColorSwatches();
+  syncDateChips('tlog-date');
+  updateLogSummary();
+  renderLogRecent();   // own fetch; not awaited
+}
+
+function openCategorySettings() {
+  navigate('settings');
+  requestAnimationFrame(() =>
+    document.getElementById('settings-categories')?.scrollIntoView({ block: 'start' }));
+}
+
+// Quick-duration chips fill the minutes field.
+function setLogMinutes(m) {
+  document.getElementById('log-minutes').value = m;
+  updateCharsHint();
+}
+
+// Today / Yesterday chips beside a date field. "Today" is the logical day
+// (today(), rollover-aware), the same default the field has always had.
+function setLogDate(inputId, daysAgo) {
+  const d = daysAgo === 1 ? isoPrevDay(today()) : today();
+  const fp = document.getElementById(inputId)?._flatpickr;
+  if (fp) fp.setDate(d, false);
+  else document.getElementById(inputId).value = d;
+  syncDateChips(inputId);
+  if (inputId === 'log-date') updateLogSummary();
+}
+
+function syncDateChips(inputId) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const v = input.value, t = today(), y = isoPrevDay(t);
+  input.closest('.log-date-row')?.querySelectorAll('[data-ago]').forEach(b =>
+    b.classList.toggle('active', (b.dataset.ago === '0' && v === t) || (b.dataset.ago === '1' && v === y)));
+}
+
+// Plain-language line beside "Add entry" saying what will be logged. Characters
+// stay in the hint next to their fields, which already words them.
+function updateLogSummary() {
+  const out = document.getElementById('log-summary');
+  if (!out) return;
+  const mins  = Number(document.getElementById('log-minutes').value);
+  const sel   = document.getElementById('log-title');
+  const title = sel && sel.value ? sel.options[sel.selectedIndex].textContent : '';
+  const dv    = document.getElementById('log-date').value;
+  const when  = dv === today() ? 'today' : dv === isoPrevDay(today()) ? 'yesterday' : (dv ? `on ${dv}` : '');
+  document.querySelectorAll('#log-dur-chips [data-min]').forEach(b =>
+    b.classList.toggle('active', Number(b.dataset.min) === mins));
+  syncDateChips('log-date');
+  out.innerHTML = mins > 0
+    ? `Adds <b>${fmtTime(mins * 60)}</b> of <b>${escHtml(selectedAtype)}</b>${title ? ` to <b>${escHtml(title)}</b>` : ''}${when ? ` ${when}` : ''}`
+    : 'Enter the minutes, or pick a quick duration.';
+}
+
+// Recent hand-logged entries, from the same feed as History. Rows reuse
+// makeSessionRow, so editing and deleting work exactly as they do there.
+async function renderLogRecent() {
+  const list = document.getElementById('log-recent-list');
+  if (!list) return;
+  let rows = [];
+  try { rows = (await window.pywebview.api.get_history()) || []; } catch (e) { rows = []; }
+  const manual = rows.filter(s => s.source === 'manual' || s.source === 'manual_media').slice(0, 6);
+  list.innerHTML = '';
+  if (!manual.length) {
+    list.innerHTML = '<p class="empty-msg">Nothing logged by hand recently.</p>';
+    return;
+  }
+  manual.forEach(s => list.appendChild(makeSessionRow(s)));
 }
 
 // Reading-only fields (chars, chars/hour, extrapolation hint) toggle together.
@@ -815,6 +1028,7 @@ function toggleReadingFields(isReading) {
 // Live preview of how the chars/time/cph fields resolve. Direct chars always wins;
 // chars/hour is only used to extrapolate when the Characters field is left blank.
 function updateCharsHint() {
+  updateLogSummary();
   const hint = document.getElementById('log-chars-hint');
   if (!hint) return;
   if (selectedAtype !== 'Reading') { hint.style.display = 'none'; return; }
@@ -1002,6 +1216,7 @@ async function doLogSession() {
     document.getElementById('log-date')._flatpickr?.setDate(today(), false);
     updateCharsHint();
     populateMediaTitles();
+    renderLogRecent();
     statsCache = {};
     setStatus('Session logged');
   } else {
@@ -1465,14 +1680,14 @@ async function refreshTotalLogBaseline() {
 
   const line = document.getElementById('tlog-baseline');
   const scope = tlogMode === 'per_media'
-    ? (tlogKey() ? `for “${tlogKey()}”` : '(pick a media)')
+    ? (tlogKey() ? ` for “${tlogKey()}”` : ' (pick a media)')
     : '';
   if (tlogHasBaseline) {
     const charsPart = tlogBaseChars > 0 ? ` · ${fmtChars(tlogBaseChars)} chars` : '';
-    line.textContent = `Last recorded total ${scope}: ${secsToHMS(tlogBaseSecs)}${charsPart}`;
+    line.textContent = `Last recorded total${scope}: ${secsToHMS(tlogBaseSecs)}${charsPart}`;
   } else {
-    line.textContent = `No baseline yet ${scope} — starting from 0:00:00, so your first entry logs its full total. `
-                     + `Press “Set as baseline” instead if you already have hours you don't want logged.`;
+    line.textContent = `No total saved yet${scope}. Your first entry logs its full total; `
+                     + `press “Save total without logging” first if you already have hours you don't want logged.`;
   }
 
   // Only per-media mode with no media picked still gates the button — a missing
@@ -1529,11 +1744,11 @@ async function doSetTotalBaseline() {
     fb.className = 'feedback err'; fb.textContent = 'Enter a total time as H:MM:SS.'; return;
   }
   if (tlogMode === 'per_media' && !tlogKey()) {
-    fb.className = 'feedback err'; fb.textContent = 'Pick a media to set its baseline.'; return;
+    fb.className = 'feedback err'; fb.textContent = 'Pick a media to save its total.'; return;
   }
   const r = await window.pywebview.api.save_total_log_baseline(tlogKey(), newSecs, charsRaw ? Number(charsRaw) : 0);
   if (r.ok) {
-    fb.className = 'feedback ok'; fb.textContent = '✓ Baseline set. Your next entry will log the difference.';
+    fb.className = 'feedback ok'; fb.textContent = '✓ Total saved. Your next entry logs the difference from it.';
     await refreshTotalLogBaseline();
   } else {
     fb.className = 'feedback err'; fb.textContent = r.error || 'Something went wrong.';
@@ -1568,9 +1783,11 @@ async function doTotalLog() {
     document.getElementById('tlog-chars').value = '';
     document.getElementById('tlog-cph').value   = '';
     document.getElementById('tlog-date')._flatpickr?.setDate(today(), false);
+    syncDateChips('tlog-date');
     await refreshTotalLogBaseline();
     await populateMediaTitles();
     await renderRecentLogChips('total');
+    renderLogRecent();
     statsCache = {};
     setStatus('Session logged');
     if (currentPage === 'dashboard') await loadDashboard();
@@ -2050,8 +2267,6 @@ function bucketByDayOfWeek(daily) {
 
 // ── Stats ──────────────────────────────────────────────────────────────────
 async function loadStats(range_val) {
-  await refreshStatsHeatmap();
-
   // 'Custom' isn't a backend range — re-render the live brush over its base
   // preset, fetching that base first if the cache was cleared (e.g. new ingest).
   if (range_val === 'Custom') {
@@ -2170,22 +2385,6 @@ function splitTooltip(labels, has, foot) {
     title:  c => labels[c.length ? c[0].dataIndex : hovered] ?? '',
     footer: c => (c.length ? foot(c) : undefined),
   };
-}
-
-async function refreshStatsHeatmap() {
-  const curYear = new Date().getFullYear();
-  const label   = document.getElementById('heatmap-year-label');
-  const nextBtn = document.getElementById('heatmap-next-btn');
-  if (label)   label.textContent = heatmapYear;
-  if (nextBtn) nextBtn.disabled  = heatmapYear >= curYear;
-  const hmData = await window.pywebview.api.get_heatmap(heatmapYear);
-  renderHeatmap('heatmap-stats', hmData, null, true, heatmapYear);
-}
-
-async function changeHeatmapYear(delta) {
-  const curYear = new Date().getFullYear();
-  heatmapYear   = Math.min(curYear, Math.max(2000, heatmapYear + delta));
-  await refreshStatsHeatmap();
 }
 
 function renderStats(d) {
@@ -3712,36 +3911,57 @@ function hideCompletedGoals() {
   loadGoals();
 }
 
+// ── Goal pacing shared by the goal card and the dashboard ─────────────────
+// The card's Daily view and the dashboard's Today's goals tile both read these,
+// so the two can't disagree about what a goal asks of today.
+
+// A goal gets a period line (and a daily share) only while it's live: not
+// complete, not overdue, with days and an amount still left.
+function goalHasPeriodLine(g) {
+  return !g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0;
+}
+
+// Today's share of a goal. Today's progress is added back onto what's left so
+// the target holds steady through the day while only the fill moves; days_left
+// (db.py) excludes today, and today is still a reading day, so the denominator
+// adds it back (days remaining incl. today).
+function goalDailyShare(g) {
+  const remPs      = g.remaining + (g.today_completed || 0);
+  const daysLeftPs = g.days_left + 1;
+  return daysLeftPs > 0 ? remPs / daysLeftPs : 0;
+}
+
+function fmtGoalMetric(g, v) {
+  if (!v && v !== 0) return '—';
+  if (g.metric === 'time_seconds') return fmtTime(v);
+  if (g.metric === 'chars_read')   return fmtChars(Math.round(v));
+  return String(Math.round(v));
+}
+
 function makeGoalCard(g) {
   const el = document.createElement('div');
-  el.className = 'goal-card';
+  // State class: ui.css recolours the bar/% (coloured inline below) per state.
+  el.className = 'goal-card' + (g.is_complete ? ' is-complete' : g.is_overdue ? ' is-overdue' : '');
 
-  const isTime  = g.metric === 'time_seconds';
-  const isChars = g.metric === 'chars_read';
   const perUnit = g.chunk_period === 'daily' ? '/day' : g.chunk_period === 'weekly' ? '/week' : g.chunk_period === 'monthly' ? '/month' : '';
 
-  function fmtMetric(v) {
-    if (!v && v !== 0) return '—';
-    if (isTime)  return fmtTime(v);
-    if (isChars) return fmtChars(Math.round(v));
-    return String(Math.round(v));
-  }
+  const fmtMetric = v => fmtGoalMetric(g, v);
 
   const pct = g.pct;
   const fillColor = g.is_complete ? CT.success : '#FF6B6B';
 
   let statusBadge;
   if (g.is_complete) {
-    statusBadge = `<span class="badge" style="color:#4ECBA0;background:#0d2b1e">✓ Complete</span>`;
+    statusBadge = `<span class="badge badge-complete">✓ Complete</span>`;
   } else if (g.is_overdue) {
-    statusBadge = `<span class="badge" style="color:#FF6B6B;background:#2b0d0d">Overdue</span>`;
+    statusBadge = `<span class="badge badge-overdue">Overdue</span>`;
   } else {
-    const urgency = g.days_left <= 3 ? '#FF6B6B' : g.days_left <= 7 ? '#FF9F5B' : 'var(--dim)';
+    const urgency = g.days_left <= 3 ? 'var(--danger)' : g.days_left <= 7 ? 'var(--warn)' : 'var(--dim)';
     statusBadge = `<span class="badge" style="color:${urgency}">${g.days_left}d left</span>`;
   }
 
   let chunkHtml = '';
-  if (!g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0) {
+  if (goalHasPeriodLine(g)) {
     let chunkNeeded, originalChunk, periodDone, periodLabel, periodUnit;
     let barTarget, tickCount, expectedTickIdx, periodChars = 0;
     const [_y, _m, _d] = today().split('-').map(Number);
@@ -3756,11 +3976,7 @@ function makeGoalCard(g) {
     // index growth cancels the days_left decrease), so the bar target holds
     // steady while only the fill moves.
     if (goalPaceView === 'daily') {
-      const remPs   = g.remaining + (g.today_completed || 0);
-      // days_left (db.py) is exclusive of today; today is still a reading day,
-      // so the pacing denominator must add it back (days remaining incl. today).
-      const daysLeftPs = g.days_left + 1;
-      chunkNeeded   = daysLeftPs > 0 ? remPs / daysLeftPs : 0;
+      chunkNeeded   = goalDailyShare(g);
       originalChunk = g.target / Math.max(1, g.total_days);
       periodDone    = g.today_completed || 0;
       periodChars   = g.chars_today || 0;
@@ -3809,7 +4025,7 @@ function makeGoalCard(g) {
     const behind   = chunkNeeded > originalChunk * 1.05;
     const ahead    = chunkNeeded < originalChunk * 0.95;
     const icon     = behind ? '⚠' : ahead ? '↑' : '→';
-    const color    = behind ? '#FF9F5B' : ahead ? CT.success : 'var(--dim)';
+    const color    = behind ? 'var(--warn)' : ahead ? CT.success : 'var(--dim)';
     const periodPct = barTarget > 0 ? Math.min(100, periodDone / barTarget * 100) : 0;
     const barColor  = periodPct >= 100 ? CT.success : CT.accent;
     const tickStyle = tickCount > 1 ? `--tick-step:${(100/tickCount).toFixed(4)}%` : '';
@@ -3824,14 +4040,14 @@ function makeGoalCard(g) {
       <div class="daily-bar-row">
         <span class="daily-bar-label">${periodLabel} ${fmtMetric(periodDone)} / ${fmtMetric(barTarget)}</span>
         <div class="daily-bar-track">
-          <div class="daily-bar-fill" style="width:${periodPct}%;background:${barColor}"></div>
+          <div class="daily-bar-fill${periodPct >= 100 ? ' is-done' : ''}" style="width:${periodPct}%;background:${barColor}"></div>
           ${ticksHtml}
           ${expectedTickHtml}
         </div>
       </div>
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${periodRange}${g.track_chars ? ` · <span class="goal-chars-companion">${fmtChars(Math.round(periodChars))} chars ${periodLabel === 'Today' ? 'today' : 'this ' + (periodUnit === '/week' ? 'week' : 'month')}</span>` : ''}</div>`;
   } else if (g.is_overdue) {
-    chunkHtml = `<div class="goal-chunk" style="color:#FF6B6B">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
+    chunkHtml = `<div class="goal-chunk" style="color:var(--danger)">Missed deadline — ${fmtMetric(g.remaining)} still remaining</div>`;
   }
 
   // The projected finish used to be a chip on the card, next to a button that
@@ -3847,7 +4063,7 @@ function makeGoalCard(g) {
     : '';
 
   const finishBtn = g.is_complete && !g.user_finished
-    ? `<button class="btn btn-xs btn-outline" style="border-color:#4ECBA0;color:#4ECBA0" onclick="doFinishGoal(${g.id})">Mark finished</button>`
+    ? `<button class="btn btn-xs btn-outline" style="border-color:var(--success);color:var(--success)" onclick="doFinishGoal(${g.id})">Mark finished</button>`
     : '';
 
   const burnupOpen = goalBurnupOpen.has(g.id);
@@ -4031,7 +4247,7 @@ async function renderGoalBurnup(id) {
     else if (n >= 0)    { slackEl.textContent = `${n} day${n === 1 ? '' : 's'} of slack`;
                           slackEl.style.color = CT.success; }
     else                { slackEl.textContent = `${-n} day${n === -1 ? '' : 's'} behind`;
-                          slackEl.style.color = '#FF9F5B'; }
+                          slackEl.style.color = CT.warn; }
   }
 
   const isTime  = g.metric === 'time_seconds';
@@ -4055,7 +4271,7 @@ async function renderGoalBurnup(id) {
         borderWidth: 1.5, borderDash: [5, 4], pointRadius: 0, pointHoverRadius: 4,
         fill: false, tension: 0, spanGaps: false },
       ...(s.projected ? [{ label: 'At current pace', data: s.projected,
-        borderColor: late ? '#FF9F5B' : CT.success,
+        borderColor: late ? CT.warn : CT.success,
         borderWidth: 2, borderDash: [3, 3], pointRadius: 0, pointHoverRadius: 4,
         fill: false, tension: 0, spanGaps: false }] : []),
       { label: 'Target', data: s.scope, borderColor: ctAlpha(CT.dim, 0.5),
@@ -4465,7 +4681,7 @@ function cardLayerHTML(member) {
   return `
     <div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;
                 background:rgba(91,140,255,0.12);border:1px solid rgba(91,140,255,0.2)">
-      <span style="font-size:36px;font-weight:900;color:rgba(255,255,255,0.2);font-family:serif">${initial}</span>
+      <span class="media-series-initial" style="font-size:36px;font-weight:900;font-family:serif">${initial}</span>
     </div>`;
 }
 
@@ -5594,7 +5810,7 @@ function startEditTitle() {
   const el = document.getElementById('detail-title');
   el.innerHTML =
     `<input id="title-edit-input" type="text" value="${escHtml(_titleEditPrev)}"
-            style="font-size:18px;font-weight:700;color:var(--text);background:#141422;
+            style="font-size:18px;font-weight:700;color:var(--text);background:var(--input-bg);
                    border:1px solid var(--accent);border-radius:8px;padding:4px 10px;
                    outline:none;flex:1;min-width:0"
             onkeydown="handleTitleEditKey(event)">` +
@@ -5626,33 +5842,218 @@ async function commitTitleEdit(newDisplay) {
   }
 }
 
-// ── Theme ──────────────────────────────────────────────────────────────────
-function applyTheme(theme) {
-  if (theme === 'mint') {
-    document.documentElement.setAttribute('data-theme', 'mint');
-    HEATMAP_COLORS = ['#E8F5F0','#A8DDD2','#62C4B4','#2EAA92','#1A7060'];
-    refreshChartTheme();
-    // Mint's chart text/grid were hand-tuned softer than its --dim/--grid;
-    // keep those exact values rather than letting the vars win.
-    Chart.defaults.color       = '#8AADA9';
-    Chart.defaults.borderColor = '#C2E4DC';
-    CT.dim  = '#8AADA9';
-    CT.grid = '#C2E4DC';
-  } else {
-    document.documentElement.removeAttribute('data-theme');
-    HEATMAP_COLORS = ['#1E1E30','#1a3b4a','#1e6b52','#26a06e','#4ECBA0'];
-    refreshChartTheme();
-  }
-  // Update active-page charts to reflect new theme colors
-  loadPage(currentPage);
+// ── Mode ───────────────────────────────────────────────────────────────────
+// 'dark' | 'light' | 'system' (follows Windows), saved as the `theme` setting.
+// Anything else, such as a theme name from an older version, reads as dark.
+const LIGHT_MQ = (typeof window !== 'undefined' && window.matchMedia)
+  ? window.matchMedia('(prefers-color-scheme: light)') : null;
+function normMode(mode) { return mode === 'light' || mode === 'system' ? mode : 'dark'; }
+function modeIsLight(mode) {
+  mode = normMode(mode);
+  return mode === 'light' || (mode === 'system' && !!(LIGHT_MQ && LIGHT_MQ.matches));
 }
 
-function setTheme(theme) {
-  appSettings = { ...appSettings, theme };
-  window.pywebview.api.save_settings({ theme });
-  applyTheme(theme);
-  document.querySelectorAll('.theme-opt').forEach(el =>
-    el.classList.toggle('selected', el.dataset.theme === theme));
+// Paints the mode and re-reads the chart and heatmap colours. rerender redraws
+// the open page so its charts pick them up; init() passes false because it
+// loads the dashboard straight afterwards.
+function applyMode(mode, rerender = true) {
+  if (modeIsLight(mode)) document.documentElement.setAttribute('data-theme', 'light');
+  else                   document.documentElement.removeAttribute('data-theme');
+  applyTextColor();
+  refreshChartTheme();
+  document.querySelectorAll('.mode-opt').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === normMode(mode)));
+  if (rerender) loadPage(currentPage);
+}
+
+// Paints at once, then redraws only after the save lands: Settings re-reads
+// every setting when it redraws, and would otherwise read back the old mode.
+async function setMode(mode) {
+  appSettings = { ...appSettings, theme: mode };
+  applyMode(mode, false);
+  await window.pywebview.api.save_settings({ theme: mode });
+  loadPage(currentPage);
+  setStatus('Settings saved');
+}
+
+// Match Windows: follow the system setting while the app is open.
+if (LIGHT_MQ) {
+  const onSystemChange = () => { if (normMode(appSettings.theme) === 'system') applyMode('system'); };
+  if (LIGHT_MQ.addEventListener) LIGHT_MQ.addEventListener('change', onSystemChange);
+  else if (LIGHT_MQ.addListener) LIGHT_MQ.addListener(onSystemChange);
+}
+
+// ── Text colour ────────────────────────────────────────────────────────────
+// Settings → Appearance. Each choice is a pair, one value per mode (a pale
+// tint in Dark, a deep ink of the same hue in Light), so text stays readable
+// when the mode flips; hence names by hue rather than by shade. Secondary text (--dim, --muted) is mixed
+// from the chosen colour toward the page surface, by the same step the default
+// palette uses. 'default' sets nothing, so ui.css's own values apply exactly.
+const TEXT_COLORS = [
+  { id: 'default', name: 'Default', pair: ['#E7E8EB', '#1C1A16'] },
+  { id: 'warm',    name: 'Warm',    pair: ['#EDE3CF', '#4A3A22'] },
+  { id: 'blue',    name: 'Blue',    pair: ['#CFDBF2', '#1E2D4D'] },
+  { id: 'green',   name: 'Green',   pair: ['#D0E3D2', '#1F3B2B'] },
+  { id: 'rose',    name: 'Rose',    pair: ['#F1D2DC', '#4D2333'] },
+  { id: 'violet',  name: 'Violet',  pair: ['#DCD2F4', '#2E2552'] },
+];
+// What text sits on, per mode: must match ui.css's --surface and --card
+// (tests/verify_ui.js checks). Text is mixed toward the surface; contrast is
+// judged against the tiles, where most text is.
+const MODE_SURFACE = { dark: '#0E0F11', light: '#EFEDE7' };
+const MODE_CARD    = { dark: '#141518', light: '#FAF9F6' };
+const TEXT_STEPS   = { dark: { dim: 0.60, muted: 0.38 }, light: { dim: 0.66, muted: 0.40 } };
+const HEX6 = /^#[0-9a-f]{6}$/i;
+
+function hexMix(a, b, f) {
+  const x = parseInt(a.slice(1), 16), y = parseInt(b.slice(1), 16);
+  return '#' + [16, 8, 0].map(sh => {
+    const c = Math.round(((x >> sh) & 255) * f + ((y >> sh) & 255) * (1 - f));
+    return c.toString(16).padStart(2, '0');
+  }).join('').toUpperCase();
+}
+
+// WCAG contrast ratio between two hex colours (1–21).
+function contrastRatio(a, b) {
+  const lum = h => {
+    const n = parseInt(h.slice(1), 16);
+    const [r, g, bl] = [16, 8, 0].map(sh => {
+      const c = ((n >> sh) & 255) / 255;
+      return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl;
+  };
+  const la = lum(a), lb = lum(b);
+  return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05);
+}
+
+// The custom pair, saved as "#dark,#light". A missing or broken half takes the
+// default's value for that mode.
+function textCustomPair(raw) {
+  const [d, l] = String(raw || '').split(',');
+  const def = TEXT_COLORS[0].pair;
+  return { dark: HEX6.test(d || '') ? d.toUpperCase() : def[0], light: HEX6.test(l || '') ? l.toUpperCase() : def[1] };
+}
+
+// The three text colours for one mode ('dark' | 'light'), or null for the default.
+function textVarsFor(id, customRaw, key) {
+  if (!id || id === 'default') return null;
+  const preset = TEXT_COLORS.find(t => t.id === id);
+  const text = id === 'custom' ? textCustomPair(customRaw)[key]
+             : preset ? preset.pair[key === 'dark' ? 0 : 1] : null;
+  if (!HEX6.test(text || '')) return null;
+  const s = MODE_SURFACE[key], step = TEXT_STEPS[key];
+  return { text: text.toUpperCase(), dim: hexMix(text, s, step.dim), muted: hexMix(text, s, step.muted) };
+}
+
+const textModeKey = () => document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+
+// Sets (or clears) the text colours on <html>, where they outrank ui.css's.
+// Callers re-read the chart colours afterwards (applyMode does).
+function applyTextColor() {
+  const v = textVarsFor(appSettings.text_color, appSettings.text_custom, textModeKey());
+  const st = document.documentElement.style;
+  ['text', 'dim', 'muted'].forEach(n => v ? st.setProperty('--' + n, v[n]) : st.removeProperty('--' + n));
+}
+
+// Both modes' colours, for the pre-paint script in ui.html: "t.d.m-t.d.m"
+// (dark, then light; hex without #), or '' for the default. tracker.py passes
+// it in the start URL so the first frame is already in the chosen colour.
+function textTintFragment() {
+  const enc = key => { const v = textVarsFor(appSettings.text_color, appSettings.text_custom, key);
+                       return v && [v.text, v.dim, v.muted].map(h => h.slice(1)).join('.'); };
+  const d = enc('dark'), l = enc('light');
+  return d && l ? `${d}-${l}` : '';
+}
+
+// The swatch row: each choice drawn in its colour for the current mode.
+function renderTextSwatches() {
+  const row = document.getElementById('text-swatches');
+  if (!row) return;
+  const key = textModeKey(), idx = key === 'dark' ? 0 : 1;
+  const sel = TEXT_COLORS.some(t => t.id === appSettings.text_color) || appSettings.text_color === 'custom'
+    ? appSettings.text_color : 'default';
+  row.innerHTML = TEXT_COLORS.map(t =>
+    `<button type="button" class="text-swatch${sel === t.id ? ' active' : ''}" data-id="${t.id}"
+       title="${t.name}" aria-label="${t.name}" aria-pressed="${sel === t.id}" onclick="setTextColor('${t.id}')">
+       <i style="background:${t.pair[idx]}"></i></button>`).join('') +
+    `<span class="text-swatch custom${sel === 'custom' ? ' active' : ''}" data-id="custom" title="Custom colour">
+       <i></i><input type="color" id="text-custom-input" aria-label="Custom text colour"
+         value="${textCustomPair(appSettings.text_custom)[key].toLowerCase()}"
+         oninput="previewCustomText(this.value)" onchange="setTextColor('custom')"></span>`;
+  updateTextNote();
+}
+
+function updateTextNote() {
+  const note = document.getElementById('text-color-note');
+  if (!note) return;
+  const id = appSettings.text_color;
+  if (id !== 'custom') {
+    const t = TEXT_COLORS.find(x => x.id === id) || TEXT_COLORS[0];
+    note.textContent = `${t.name}. Labels and captions follow it.`;
+    return;
+  }
+  const key = textModeKey(), text = textCustomPair(appSettings.text_custom)[key];
+  const c = contrastRatio(text, MODE_CARD[key]);
+  const modeName = key === 'dark' ? 'Dark' : 'Light';
+  note.innerHTML = `Custom, set separately for Dark and Light; this is ${modeName}'s. ` +
+    (c >= 4.5 ? `Contrast ${c.toFixed(1)} : 1.`
+              : `<span class="text-color-warn">Contrast ${c.toFixed(1)} : 1, hard to read. Try a ${key === 'dark' ? 'lighter' : 'darker'} colour.</span>`);
+}
+
+// Live preview while the colour picker is open: no save and no redraw of the
+// swatch row, which would close the picker. Its change event saves.
+function previewCustomText(value) {
+  if (!HEX6.test(value)) return;
+  const pair = textCustomPair(appSettings.text_custom || seedCustomPair());
+  pair[textModeKey()] = value.toUpperCase();
+  appSettings = { ...appSettings, text_color: 'custom', text_custom: `${pair.dark},${pair.light}` };
+  applyTextColor();
+  document.querySelectorAll('.text-swatch').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === 'custom');
+    if (el.tagName === 'BUTTON') el.setAttribute('aria-pressed', 'false');
+  });
+  updateTextNote();
+}
+
+// A first custom colour starts from the current choice, so the other mode's
+// half is something sensible rather than the default.
+function seedCustomPair() {
+  const t = TEXT_COLORS.find(x => x.id === appSettings.text_color) || TEXT_COLORS[0];
+  return `${t.pair[0]},${t.pair[1]}`;
+}
+
+// Saves before redrawing for the same reason as setMode().
+async function setTextColor(id) {
+  appSettings = { ...appSettings, text_color: id };
+  applyTextColor();
+  refreshChartTheme();
+  renderTextSwatches();
+  await window.pywebview.api.save_settings({
+    text_color: id, text_custom: appSettings.text_custom || '', text_tint: textTintFragment() });
+  loadPage(currentPage);
+  setStatus('Settings saved');
+}
+
+// ── Dashboard target ───────────────────────────────────────────────────────
+function saveDailyTarget() {
+  const raw  = document.getElementById('daily-target').value;
+  const mins = Math.max(0, Math.min(1440, parseInt(raw) || 0));
+  appSettings = { ...appSettings, daily_target_mins: mins };
+  window.pywebview.api.save_settings({ daily_target_mins: mins });
+  setStatus('Settings saved');
+}
+
+// The rail floats the status line and the ttsu result as short notices (see
+// ui.css). Re-adding .flash on every text change replays their fade.
+function watchNoticeFlash(id) {
+  const el = document.getElementById(id);
+  if (!el || typeof MutationObserver === 'undefined') return;
+  new MutationObserver(() => {
+    el.classList.remove('flash');
+    void el.offsetWidth;            // restart the animation
+    el.classList.add('flash');
+  }).observe(el, { childList: true, characterData: true, subtree: true });
 }
 
 // ── Catalog ────────────────────────────────────────────────────────────────
@@ -5961,9 +6362,14 @@ async function loadSettings() {
   const ttsuTimeBox = document.getElementById('ttsu-history-include-time');
   if (gsmTimeBox)  gsmTimeBox.checked  = !!s.gsm_history_include_time;
   if (ttsuTimeBox) ttsuTimeBox.checked = !!s.ttsu_history_include_time;
-  const theme = s.theme || 'dark';
-  document.querySelectorAll('.theme-opt').forEach(el =>
-    el.classList.toggle('selected', el.dataset.theme === theme));
+  document.querySelectorAll('.mode-opt').forEach(b =>
+    b.classList.toggle('active', b.dataset.mode === normMode(s.theme)));
+  renderTextSwatches();
+  const targetEl = document.getElementById('daily-target');
+  if (targetEl) targetEl.value = s.daily_target_mins > 0 ? s.daily_target_mins : '';
+  // Activity categories (moved here from the Log entry page).
+  try { renderCustomCatList(await window.pywebview.api.get_categories()); } catch (e) { /* list is optional */ }
+  buildColorSwatches();
 }
 
 // ── First-time setup wizard ────────────────────────────────────────────────
@@ -6622,7 +7028,9 @@ function onDataChanged() {
 // ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
   appSettings = await window.pywebview.api.get_all_settings();
-  applyTheme(appSettings.theme || 'dark');
+  applyMode(appSettings.theme, false);
+  watchNoticeFlash('status');
+  watchNoticeFlash('ttsu-feedback');
   const urlInput = document.getElementById('gsm-url');
   if (urlInput && appSettings.gsm_url) urlInput.value = appSettings.gsm_url;
 
@@ -6630,11 +7038,13 @@ async function init() {
     dateFormat:    'Y-m-d',
     defaultDate:   today(),
     disableMobile: true,
+    onChange:      () => updateLogSummary(),   // also re-marks Today / Yesterday
   });
   flatpickr('#tlog-date', {
     dateFormat:    'Y-m-d',
     defaultDate:   today(),
     disableMobile: true,
+    onChange:      () => syncDateChips('tlog-date'),
   });
   flatpickr('#edit-log-date', {
     dateFormat:    'Y-m-d',

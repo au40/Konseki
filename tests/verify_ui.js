@@ -2,8 +2,7 @@
 // 1. Evals the module with stubbed browser globals (catches top-level throws
 //    that `node --check` misses -- those blank every page).
 // 2. Feeds refreshChartTheme() the REAL :root values parsed out of ui.css, then
-//    asserts CT resolves to the exact hex literals the chart configs used to
-//    hardcode. That proves the dark theme renders byte-identically.
+//    asserts CT resolves to them, so charts draw from the page's own palette.
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -25,8 +24,7 @@ function parseBlock(css, selector) {
   return vars;
 }
 const rootVars = parseBlock(uiCss, ':root');
-const mintVars = { ...rootVars, ...parseBlock(uiCss, '[data-theme="mint"]') };
-
+const lightVars = { ...rootVars, ...parseBlock(uiCss, '[data-theme="light"]') };
 let activeVars = rootVars;
 
 // --- minimal browser stubs ---------------------------------------------------
@@ -45,10 +43,14 @@ const fakeEl = new Proxy({}, {
   set() { return true; },
 });
 
+// Inline custom properties on <html> (the text colour) outrank the stylesheet.
+const inlineVars = {};
 const documentElement = {
   _theme: null,
-  setAttribute(n, v) { if (n === 'data-theme') { this._theme = v; activeVars = mintVars; } },
+  getAttribute(n) { return n === 'data-theme' ? this._theme : null; },
+  setAttribute(n, v) { if (n === 'data-theme') { this._theme = v; activeVars = v === 'light' ? lightVars : rootVars; } },
   removeAttribute(n) { if (n === 'data-theme') { this._theme = null; activeVars = rootVars; } },
+  style: { setProperty(n, v) { inlineVars[n] = v; }, removeProperty(n) { delete inlineVars[n]; } },
 };
 
 const sandbox = {
@@ -62,7 +64,7 @@ const sandbox = {
     addEventListener: noop,
     body: fakeEl,
   },
-  getComputedStyle: () => ({ getPropertyValue: n => activeVars[n] || '' }),
+  getComputedStyle: () => ({ getPropertyValue: n => inlineVars[n] || activeVars[n] || '' }),
   window: {},
   Chart: function () { return fakeEl; },
   flatpickr: () => fakeEl,
@@ -102,11 +104,16 @@ const PROBE = `
   set charts(v)  { charts = v; },
   reserveLegendRoom, positionDailyBrush,
   get BRUSH_FOLLOW() { return BRUSH_FOLLOW; },
-  applyTheme, ctAlpha, paletteIndex, portalColorFor, setChartEmpty, heatmapColor,
+  ctAlpha, paletteIndex, portalColorFor, setChartEmpty, heatmapColor,
   detailSeries, twRolling, splitBarDatasets, bucketHasMember, splitTooltip, speedSegmentColors,
   memberLegendLabels,
   bucketDaily, statsMetricAvail, statsCumSeries, sparkHTML, goalBurnupSeries, dateFromISO,
   hourBlockBars,
+  dashRingArcs, lineSparkSVG, applyMode, normMode, modeIsLight,
+  TEXT_COLORS, MODE_SURFACE, MODE_CARD, textVarsFor, applyTextColor, textTintFragment,
+  hexMix, contrastRatio, textCustomPair,
+  get appSettings() { return appSettings; }, set appSettings(v) { appSettings = v; },
+  goalHasPeriodLine, goalDailyShare, fmtGoalMetric, todayGoalRows,
 };`;
 
 try {
@@ -120,51 +127,178 @@ try {
 }
 
 const P = sandbox.__probe;
-// applyTheme() ends by rebuilding the active page; that needs a real DOM, so let
-// it fail after the color work it is under test for has already happened.
-const setTheme = t => { try { P.applyTheme(t); } catch (e) { /* loadPage needs DOM */ } };
 
-console.log('--- dark theme must be byte-identical to the old hardcoded hex ---');
+console.log('--- charts read the :root palette ---');
 const CT = P.CT;
-check('CT.grid    (was #2E2E48)', CT.grid,    '#2E2E48');
-check('CT.dim     (was #9090A8)', CT.dim,     '#9090A8');
-check('CT.accent  (was #5B8CFF)', CT.accent,  '#5B8CFF');
-check('CT.success (was #4ECBA0)', CT.success, '#4ECBA0');
-check('CT.card    (was #24243A)', CT.card,    '#24243A');
-check('Chart.defaults.color       (was #9090A8)', sandbox.Chart.defaults.color,       '#9090A8');
-check('Chart.defaults.borderColor (was #2E2E48)', sandbox.Chart.defaults.borderColor, '#2E2E48');
+check('CT.grid',    CT.grid,    '#24262B');
+check('CT.dim',     CT.dim,     '#8C9099');
+check('CT.accent',  CT.accent,  '#8EA6FF');
+check('CT.success', CT.success, '#6FCFAE');
+check('CT.card',    CT.card,    '#141518');
+check('Chart.defaults.color follows --dim',        sandbox.Chart.defaults.color,       '#8C9099');
+check('Chart.defaults.borderColor follows --grid', sandbox.Chart.defaults.borderColor, '#24262B');
+check('heatmap ramp',
+      JSON.stringify(P.HEATMAP_COLORS),
+      JSON.stringify(['#1A1C20', '#222E4A', '#2F4580', '#5068BE', '#9DB2FF']));
+
+console.log('\n--- Light mode: charts and heatmap follow it, and Dark comes back exactly ---');
+P.applyMode('light', false);
+check('CT.accent follows light',  P.CT.accent, '#4361D8');
+check('CT.card follows light',    P.CT.card,   '#FAF9F6');
+check('CT.grid follows light',    P.CT.grid,   '#E0DCD3');
+check('chart text follows light', sandbox.Chart.defaults.color, '#68635A');
+check('light heatmap ramp',
+      JSON.stringify(P.HEATMAP_COLORS),
+      JSON.stringify(['#E7E3DA', '#D3D8F2', '#A6B3EC', '#6F86E0', '#3F5BD2']));
+P.applyMode('dark', false);
+check('CT.accent back to dark', P.CT.accent, '#8EA6FF');
+check('CT.card back to dark',   P.CT.card,   '#141518');
+check('dark heatmap ramp back',
+      JSON.stringify(P.HEATMAP_COLORS),
+      JSON.stringify(['#1A1C20', '#222E4A', '#2F4580', '#5068BE', '#9DB2FF']));
+check('a theme name from an older version reads as dark', P.normMode('mint'), 'dark');
+check('so does a missing setting',                        P.normMode(undefined), 'dark');
+check('Match Windows without a system answer is dark',    P.modeIsLight('system'), false);
+check('Light is light',                                   P.modeIsLight('light'), true);
+
+console.log('\n--- text colour: pairs per mode, labels mixed from it, default untouched ---');
+const lightCss = parseBlock(uiCss, '[data-theme="light"]');
+check('MODE_SURFACE.dark matches ui.css',  P.MODE_SURFACE.dark,  rootVars['--surface']);
+check('MODE_SURFACE.light matches ui.css', P.MODE_SURFACE.light, lightCss['--surface']);
+check('MODE_CARD.dark matches ui.css',     P.MODE_CARD.dark,     rootVars['--card']);
+check('MODE_CARD.light matches ui.css',    P.MODE_CARD.light,    lightCss['--card']);
+check('Default is the stylesheet\'s own dark text',  P.TEXT_COLORS[0].pair[0], rootVars['--text']);
+check('Default is the stylesheet\'s own light text', P.TEXT_COLORS[0].pair[1], lightCss['--text']);
+check('every preset reads easily on tiles in both modes (7:1+)',
+      P.TEXT_COLORS.every(t => P.contrastRatio(t.pair[0], P.MODE_CARD.dark) >= 7 &&
+                               P.contrastRatio(t.pair[1], P.MODE_CARD.light) >= 7), true);
+check('contrast of white on black', Math.round(P.contrastRatio('#FFFFFF', '#000000')), 21);
+check('Default sets nothing', P.textVarsFor('default', '', 'dark'), null);
+check('an unknown id sets nothing', P.textVarsFor('teal', '', 'dark'), null);
+
+P.appSettings = { ...P.appSettings, text_color: 'warm', text_custom: '' };
+P.applyMode('dark', false);
+check('Warm: text',              P.CT.text,  '#EDE3CF');
+check('Warm: labels mixed 60%',  P.CT.dim,   '#948E83');
+check('Warm: captions mixed 38%', P.CT.muted, '#636059');
+check('chart text follows the labels', sandbox.Chart.defaults.color, '#948E83');
+P.applyMode('light', false);
+check('Warm in Light uses its light half', P.CT.text, '#4A3A22');
+check('...with labels mixed toward the light surface', P.CT.dim, '#827765');
+check('the start-up fragment carries both modes',
+      /^[0-9A-F]{6}(\.[0-9A-F]{6}){2}-[0-9A-F]{6}(\.[0-9A-F]{6}){2}$/.test(P.textTintFragment()), true);
+P.applyMode('dark', false);
+
+P.appSettings = { ...P.appSettings, text_color: 'custom', text_custom: '#ffcc99,#332211' };
+P.applyMode('dark', false);
+check('Custom: dark half', P.CT.text, '#FFCC99');
+P.applyMode('light', false);
+check('Custom: light half', P.CT.text, '#332211');
+P.applyMode('dark', false);
+check('a broken custom half falls back to the default', P.textCustomPair('nope,#332211').dark, '#E7E8EB');
+
+P.appSettings = { ...P.appSettings, text_color: 'default', text_custom: '' };
+P.applyMode('dark', false);
+check('back to Default clears the override', P.CT.text, '#E7E8EB');
+check('...and the stylesheet\'s labels return', P.CT.dim, '#8C9099');
+check('Default needs no start-up fragment', P.textTintFragment(), '');
+
+console.log('\n--- the pre-paint script in ui.html reads what tracker.py passes ---');
+const uiHtml = fs.readFileSync(path.join(SRC, 'ui.html'), 'utf8');
+const prePaint = (uiHtml.match(/<script>([\s\S]*?)<\/script>/) || [])[1] || '';
+check('ui.html opens with the pre-paint script', /theme=\(light\|system\)/.test(prePaint), true);
+function runPrePaint(hash, systemLight = false) {
+  const out = { attr: null, props: {} };
+  const ctx = {
+    location: { hash },
+    window: { matchMedia: () => ({ matches: systemLight }) },
+    document: { documentElement: {
+      setAttribute: (n, v) => { if (n === 'data-theme') out.attr = v; },
+      style: { setProperty: (n, v) => { out.props[n] = v; } } } },
+  };
+  vm.runInNewContext(prePaint, ctx);
+  return out;
+}
+P.appSettings = { ...P.appSettings, text_color: 'warm', text_custom: '' };
+const warmTint = P.textTintFragment();
+P.appSettings = { ...P.appSettings, text_color: 'default' };
+check('no fragment: Dark, default text', JSON.stringify(runPrePaint('')), JSON.stringify({ attr: null, props: {} }));
+check('#theme=light paints light', runPrePaint('#theme=light').attr, 'light');
+check('#theme=system follows a light system', runPrePaint('#theme=system', true).attr, 'light');
+check('#theme=system stays dark on a dark system', runPrePaint('#theme=system', false).attr, null);
+check('a tint paints the dark half in Dark', runPrePaint('#tint=' + warmTint).props['--text'], '#EDE3CF');
+check('...and the light half in Light', runPrePaint('#theme=light&tint=' + warmTint).props['--text'], '#4A3A22');
+check('...with all three colours', Object.keys(runPrePaint('#tint=' + warmTint).props).length, 3);
+check('a malformed tint paints nothing', Object.keys(runPrePaint('#tint=ABC.DEF').props).length, 0);
 
 console.log('\n--- ctAlpha reproduces the old rgba fill exactly ---');
 check("ctAlpha('#4ECBA0', 0.08)", P.ctAlpha('#4ECBA0', 0.08), 'rgba(78,203,160,0.08)');
 
-console.log('\n--- mint keeps its hand-tuned chart text/grid ---');
-setTheme('mint');
-check('CT.dim  pinned',         P.CT.dim,    '#8AADA9');
-check('CT.grid pinned',         P.CT.grid,   '#C2E4DC');
-check('CT.accent follows mint', P.CT.accent, '#2EAA92');
+console.log('\n--- dashboard ring arcs ---');
+const sumFrac = arcs => Math.round(arcs.reduce((a, x) => a + x.frac, 0) * 1e6) / 1e6;
+const acts3 = [['Reading', 118 * 60], ['Listening', 41 * 60], ['Vocabulary', 18 * 60]];
+const under = P.dashRingArcs(acts3, 177 * 60, 180 * 60);
+check('under target: arcs fill today / target of the circle', sumFrac(under), Math.round(177 / 180 * 1e6) / 1e6);
+check('arcs start where the previous one ends', under[1].start, under[0].frac);
+check('first arc starts at the top', under[0].start, 0);
+// todaySec is always the sum of the same rows the activities come from.
+const acts200 = [['Reading', 140 * 60], ['Listening', 42 * 60], ['Vocabulary', 18 * 60]];
+check('over target: the circle is today, so arcs still fit', sumFrac(P.dashRingArcs(acts200, 200 * 60, 180 * 60)), 1);
+check('no target: the ring is the activity mix', sumFrac(P.dashRingArcs(acts3, 177 * 60, 0)), 1);
+check('no time today draws no arcs', P.dashRingArcs([], 0, 180 * 60).length, 0);
+check('a zero-second activity gets no arc',
+      P.dashRingArcs([['Reading', 600], ['Listening', 0]], 600, 0).length, 1);
 
-console.log('\n--- switching back to dark restores exact dark values ---');
-setTheme('dark');
-check('CT.grid   restored', P.CT.grid,   '#2E2E48');
-check('CT.dim    restored', P.CT.dim,    '#9090A8');
-check('CT.accent restored', P.CT.accent, '#5B8CFF');
-check('HEATMAP_COLORS dark ramp intact',
-      JSON.stringify(P.HEATMAP_COLORS),
-      JSON.stringify(['#1E1E30', '#1a3b4a', '#1e6b52', '#26a06e', '#4ECBA0']));
+console.log('\n--- goal daily share (shared by the goal card and Today\'s goals) ---');
+// 500h goal, 87.7h left, 2h 57m done today, 78 days left after today.
+const g500 = { label: '500 hours this year', metric: 'time_seconds', is_complete: false, is_overdue: false,
+               days_left: 78, remaining: 87.7 * 3600, today_completed: 177 * 60 };
+check('share adds today back and spreads over the days left incl. today',
+      Math.round(P.goalDailyShare(g500)), Math.round((87.7 * 3600 + 177 * 60) / 79));
+check('share holds steady through the day: more reading today, same target',
+      Math.round(P.goalDailyShare({ ...g500, remaining: g500.remaining - 600, today_completed: g500.today_completed + 600 })),
+      Math.round(P.goalDailyShare(g500)));
+check('a live goal gets a period line', P.goalHasPeriodLine(g500), true);
+check('a complete goal does not',       P.goalHasPeriodLine({ ...g500, is_complete: true }), false);
+check('an overdue goal does not',       P.goalHasPeriodLine({ ...g500, is_overdue: true }), false);
+check('nor one on its deadline day',    P.goalHasPeriodLine({ ...g500, days_left: 0 }), false);
+check('nor one with nothing left',      P.goalHasPeriodLine({ ...g500, remaining: 0 }), false);
+check('time goals format as time',  P.fmtGoalMetric(g500, 4128), '1h 8m');
+check('chars goals format as chars', P.fmtGoalMetric({ metric: 'chars_read' }, 5255), '5.3k');
+
+const gChars  = { ...g500, label: '1M chars', metric: 'chars_read', remaining: 387600, today_completed: 27550 };
+const gListen = { ...g500, label: 'Listening', remaining: 55.5 * 3600, today_completed: 41 * 60 };
+const rowsT = P.todayGoalRows([g500, gChars, gListen,
+  { ...g500, label: 'Finished', user_finished: true },
+  { ...g500, label: 'Overdue', is_overdue: true }]);
+check('Today\'s goals keeps only live, unfinished goals', rowsT.length, 3);
+check('goals still short of today\'s share come first', rowsT[0].g.label, 'Listening');
+check('the rest keep their Goals-page order', rowsT.slice(1).map(r => r.g.label).join(','), '500 hours this year,1M chars');
+check('the tile\'s share is the card\'s share', rowsT[1].share, P.goalDailyShare(g500));
+check('no goals is an empty tile, not a crash', P.todayGoalRows(undefined).length, 0);
+
+console.log('\n--- stat tile sparkline ---');
+check('fewer than two points draws nothing', P.lineSparkSVG([null, 5, null], '#fff'), '');
+const gapped = P.lineSparkSVG([1, 2, null, 3, 4], '#fff');
+check('a missing day breaks the line into two runs', (gapped.match(/M/g) || []).length, 2);
+const flat = P.lineSparkSVG([7, 7, 7], '#fff', 96, 40);
+check('a flat series sits mid-height', /cy="20\.0"/.test(flat), true);
+const trailing = P.lineSparkSVG([1, 2, 3, null], '#fff', 96, 40);
+check('the endpoint dot marks the last real day, not a missing one', /cx="63\.0"/.test(trailing), true);
 
 console.log('\n--- heatmap continuous ramp ---');
 const hc = h => P.heatmapColor(h * 3600);
-check('no reading is the categorical empty shade', hc(0), '#1E1E30');
-check('any reading floors at the first ramp stop', P.heatmapColor(1), 'rgb(26,59,74)');
-check('an exact anchor hits that stop',             hc(1),   'rgb(30,107,82)');
-check('the cap hits the top stop',                  hc(3),   'rgb(78,203,160)');
+check('no reading is the categorical empty shade', hc(0), '#1A1C20');
+check('any reading floors at the first ramp stop', P.heatmapColor(1), 'rgb(34,46,74)');
+check('an exact anchor hits that stop',             hc(1),   'rgb(47,69,128)');
+check('the cap hits the top stop',                  hc(3),   'rgb(157,178,255)');
 check('past the cap clamps, it does not wrap',      hc(9),   hc(3));
-check('a negative/garbage value is treated as empty', P.heatmapColor(-5), '#1E1E30');
+check('a negative/garbage value is treated as empty', P.heatmapColor(-5), '#1A1C20');
 // The point of the change: values inside one old bucket must differ.
 const inBucket = new Set([hc(1.1), hc(1.4), hc(1.7), hc(1.9)]);
 check('four values inside the old 1–2h bucket are four colors', inBucket.size, 4);
-// halfway between #1e6b52 (30,107,82) and #26a06e (38,160,110)
-check('a midpoint is between its anchors', hc(1.5), 'rgb(34,134,96)');
+// halfway between #2F4580 (47,69,128) and #5068BE (80,104,190)
+check('a midpoint is between its anchors', hc(1.5), 'rgb(64,87,159)');
 check('the ramp is monotonic in green',
       [0.5, 1, 1.5, 2, 2.5, 3].map(h => +hc(h).match(/,(\d+),/)[1])
         .every((g, i, a) => i === 0 || g > a[i - 1]), true);
@@ -312,7 +446,7 @@ check('unread members are excluded from the key',
 // Chart.js v4 draws legend text with `ctx.fillStyle = item.fontColor` and no
 // fallback -- an item without it renders BLACK no matter what labels.color says.
 const legendLabels = P.memberLegendLabels(handoffMembers);
-check('legend items carry an explicit fontColor', legendLabels[0].fontColor, '#9090A8');
+check('legend items carry an explicit fontColor', legendLabels[0].fontColor, '#8C9099');
 check('every legend item has one', legendLabels.every(l => !!l.fontColor), true);
 check('legend swatch uses the member color', legendLabels[0].fillStyle, '#A00000');
 check('legend text is the member label', legendLabels[1].text, 'Part Two');
