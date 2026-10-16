@@ -664,6 +664,63 @@ figure that is per-title does not. Getting it wrong is quiet: it only shows up
 once a title is actually excluded, so it survives spot-checks. `time_excluded` is
 not a substitute — that suppresses time and leaves chars, this does the reverse.
 
+# Media status — In progress / On hold / Completed / Dropped
+
+Display-only, title-keyed, never touches `sessions` — same family as
+`media_completions` and `media_chars_excluded`. No stat figure reads it; the
+only consumers are the media grid (filter chips, card edge line), the detail
+pane's status pill, and the Shelf (In progress only).
+
+**Three storages, one status at a time:**
+
+- **In progress is the absence of any row.** That is what makes every title
+  from every import path start In progress with nothing written — don't add a
+  write to an importer to "set" it.
+- **Completed IS `media_completions`.** Not a copy: the completion bar's 100%
+  pin and the catalog's manga volume count (`_completed_titles` in
+  [catalog.py](src/catalog.py)) both read that table, so Completed must keep
+  living there.
+- **On hold / Dropped live in `media_status`.** `db_set_media_status`
+  ([db.py](src/db.py)) clears the other table on every write; leaving Completed
+  un-pins the bar exactly as the old "Mark incomplete" did.
+
+**On hold resumes on read, Dropped never does.** Setting either snapshots the
+title's raw `SUM(chars_read)` / `SUM(time_seconds)`; `_derive_media_status`
+reports In progress once the title has grown past it. Chars are the signal when
+the title tracks any — a GSM row's time can creep up from a tail/AFK flush after
+you stop, chars only grow with real lines. Chars-less media (manga, paper books)
+falls back to time. Compare against **raw** sums, never the overlaid
+`get_media_stats` time, or a manual shave reads as (un)resumed reading. Resuming
+is derived, not written, so no import path needs to know statuses exist.
+
+**Statuses are for reading media only.** `hasMediaStatus` in [ui.js](src/ui.js):
+Reading activity, mangawari, or any chars. Anime/listening show under All and
+never get a pill — the user's call, not an oversight.
+
+**The card's edge line is its only status marker: colour is status, length is
+progress.** No badges, glyphs or cover filters — those were tried and dropped.
+Completed is always full; without a known length (manga, books with no total
+entered) In progress draws no line at all and On hold / Dropped draw full-width
+so their colour still shows. `get_media_stats` carries `length` (user total wins
+over GSM's, same precedence as the detail bar and the Shelf) for this.
+
+**A series has no status of its own.** `seriesStatusOf` ([ui.js](src/ui.js))
+reads it off the volumes, most active first: any In progress → In progress,
+else any On hold → On hold, else all Completed → Completed, else Dropped.
+Volumes without a status don't vote. Don't add a series status column — it
+would drift from the per-volume completion the catalog counts. Consequences:
+
+- The series pill writes the **volumes**, via `db_set_series_status`
+  ([db.py](src/db.py)), in one transaction. Completed marks them all; any other
+  pick spares volumes already Completed, so dropping a series never erases what
+  was finished.
+- Under a status filter the grid **unpacks** series into their matching volumes.
+  The chip counts are per volume, and this is what keeps cards and counts in
+  agreement. Under All they stay stacked, with the edge line drawn from the
+  derived status and the same progress basis as the series page's bar.
+- Accepted gap: between volumes, a series whose known volumes are all done reads
+  Completed until the next volume is dragged in.
+
 # Anki review time — `source='anki'`, and the two rules it adds
 
 The Anki addon (`anki/konseki_anki/`) reads Anki's `revlog` — a complete

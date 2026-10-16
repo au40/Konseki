@@ -762,20 +762,63 @@ select:focus { border-color: var(--accent); }
   opacity: 0.3; cursor: default;
 }
 
-/* Completed-media checkmark badge (top-right corner of the card) */
-.media-card-complete {
-  position: absolute; top: 6px; right: 6px; z-index: 1;
-  width: 20px; height: 20px; border-radius: 50%;
-  background: var(--success); color: rgba(0,0,0,0.75);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 12px; font-weight: 800; line-height: 1;
-  box-shadow: 0 1px 5px rgb(0 0 0 / calc(0.45 * var(--shadow-k)));
-  pointer-events: none;
-}
+/* ── Media status ─────────────────────────────────────────────────────────
+   Grid filter, the card's bottom-edge line (length = progress, colour =
+   status, see mediaCardLineHTML), and the detail pane's status pill. */
+.media-status-bar { display: flex; margin: 6px 0 14px; }
+.seg-count { margin-left: 6px; opacity: .6; font-variant-numeric: tabular-nums; }
 
-/* Chars-excluded badge — sits under the completed checkmark when both are on,
-   so neither hides the other. Muted rather than alarming: it is a deliberate
-   user choice about a title, not a problem with it. */
+/* Full-card clip layer so the 3px line follows the card's rounded corners;
+   the card itself can't clip (its reorder arrows hang below it). */
+.media-card-line {
+  position: absolute; inset: 0; z-index: 1;
+  border-radius: var(--radius); overflow: hidden; pointer-events: none;
+}
+.media-card-line::before,
+.media-card-line > i { content: ''; position: absolute; left: 0; bottom: 0; height: 3px; }
+.media-card-line::before { right: 0; background: rgba(255,255,255,0.12); }
+
+/* Series: above the stack's footer (z 4). */
+.series-stack .media-card-line { z-index: 5; }
+
+.status-in_progress { --st: var(--accent); }
+.status-on_hold     { --st: var(--warn); }
+.status-completed   { --st: var(--success); }
+.status-dropped     { --st: var(--dim); }
+.status-wrap { position: relative; display: inline-block; vertical-align: top; }
+.status-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 10px; margin-right: 5px; margin-bottom: 5px; border-radius: 20px;
+  font-family: inherit; font-size: 11px; line-height: inherit; cursor: pointer;
+  background: color-mix(in srgb, var(--st) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--st) 45%, transparent);
+  color: var(--st);
+}
+/* In progress is the default, so it reads like a genre badge, not a flag. */
+.status-pill.status-in_progress { background: var(--inset); border-color: var(--grid); color: var(--text); }
+.status-pill:hover { border-color: var(--st); }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--st); flex-shrink: 0; }
+.series-member-mini-title .status-dot { display: inline-block; margin-right: 6px; vertical-align: 1px; }
+.status-caret { font-size: 9px; opacity: .7; }
+.status-menu {
+  position: absolute; top: calc(100% + 2px); left: 0; z-index: 30;
+  min-width: 160px; padding: 6px;
+  display: flex; flex-direction: column; gap: 1px;
+  background: var(--card); border: 1px solid var(--grid); border-radius: 10px;
+  box-shadow: 0 8px 24px rgb(0 0 0 / calc(.45 * var(--shadow-k)));
+}
+.status-menu[hidden] { display: none; }
+.status-opt {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 6px 8px; border: none; border-radius: 7px; background: none;
+  font-family: inherit; font-size: 13px; color: var(--text); text-align: left; cursor: pointer;
+}
+.status-opt:hover { background: var(--input-bg); }
+.status-opt.current { color: var(--st); }
+.status-check { margin-left: auto; font-size: 11px; }
+
+/* Chars-excluded badge (top-left). Muted rather than alarming: it is a
+   deliberate user choice about a title, not a problem with it. */
 .media-card-nochars {
   position: absolute; top: 6px; left: 6px; z-index: 1;
   padding: 1px 6px; border-radius: 9px;

@@ -301,7 +301,12 @@ async function loadPage(page) {
   else if (page === 'history')   await loadHistory();
   else if (page === 'stats')     await loadStats(currentRange);
   else if (page === 'goals')     await loadGoals();
-  else if (page === 'media')     await loadMedia();
+  else if (page === 'media')     {
+    // Opening the page starts on All. Done here rather than in loadMedia so a
+    // background refresh or adding a title doesn't throw the filter away.
+    mediaStatusFilter = 'all';
+    await loadMedia();
+  }
   else if (page === 'catalog')   await loadCatalog();
   else if (page === 'settings')  await loadSettings();
   else if (page === 'dev')       await loadDevPage();
@@ -4469,6 +4474,84 @@ function showMediaView(name) {
 const GRID_HIDDEN_SOURCES = new Set(['manual', 'youtube', 'anki']);
 const isGridHidden = (m) => GRID_HIDDEN_SOURCES.has(m.source);
 
+// Media status. In progress is the default — nothing is saved for it, so every
+// title starts there whatever imported it. Completed is the media_completions
+// flag; On hold and Dropped are set from the detail pane's status pill. The
+// backend resolves auto-resume (new reading lifts On hold back to In progress),
+// so `m.status` is already the effective value.
+const MEDIA_STATUS_ORDER = ['in_progress', 'on_hold', 'completed', 'dropped'];
+const MEDIA_STATUS_LABEL = {
+  in_progress: 'In progress', on_hold: 'On hold', completed: 'Completed', dropped: 'Dropped',
+};
+let mediaStatusFilter = 'all';
+
+// Reading media carries a status; anime/listening and the like don't, and show
+// under All only. Manga is Reading too, but checked by source so a volume keeps
+// its status even with no chars.
+function hasMediaStatus(m) {
+  return m.source === 'mangawari' || m.activity_type === 'Reading' || (m.total_chars || 0) > 0;
+}
+function mediaStatusOf(m) { return hasMediaStatus(m) ? (m.status || 'in_progress') : null; }
+
+// A series has no status of its own — it's read off its volumes, most active
+// first: any In progress → In progress; else any On hold → On hold; else all
+// Completed → Completed; else (the rest were dropped) → Dropped. Volumes with no
+// status (anime/listening) don't vote, so a series of only those has none.
+// Known gap, accepted: between volumes, a series whose known volumes are all
+// done reads Completed until the next one is dragged in.
+function seriesStatusOf(members) {
+  const st = members.map(mediaStatusOf).filter(Boolean);
+  if (!st.length) return null;
+  if (st.includes('in_progress')) return 'in_progress';
+  if (st.includes('on_hold'))     return 'on_hold';
+  if (st.every(s => s === 'completed')) return 'completed';
+  return 'dropped';
+}
+
+// A title's progress through its known length, or null when there's none to
+// draw against. `length` is get_media_stats' field; detail payloads carry the
+// two halves of it instead.
+function mediaLengthOf(m) {
+  if (m.length != null) return m.length || 0;
+  return m.user_char_count > 0 ? m.user_char_count : (m.game_char_count || 0);
+}
+function mediaProgressPct(m) {
+  const len = mediaLengthOf(m);
+  return len > 0 && m.total_chars > 0 ? Math.min(100, m.total_chars / len * 100) : null;
+}
+
+// Series progress, same basis as the series page's bar (renderSeriesProgress):
+// chars read over the summed length of the volumes that have one, a Completed
+// volume counting as fully read.
+function seriesProgressPct(members) {
+  let L = 0, R = 0;
+  members.forEach(m => {
+    const len = mediaLengthOf(m);
+    if (len <= 0) return;
+    L += len;
+    R += m.status === 'completed' ? len : Math.min(m.total_chars || 0, len);
+  });
+  return L > 0 && R > 0 ? R / L * 100 : null;
+}
+
+function renderMediaStatusSeg(titles) {
+  const seg = document.getElementById('media-status-seg');
+  if (!seg) return;
+  const counts = { all: titles.length };
+  MEDIA_STATUS_ORDER.forEach(s => { counts[s] = 0; });
+  titles.forEach(m => { const s = mediaStatusOf(m); if (s) counts[s]++; });
+  seg.innerHTML = [['all', 'All'], ...MEDIA_STATUS_ORDER.map(s => [s, MEDIA_STATUS_LABEL[s]])]
+    .map(([k, label]) =>
+      `<button class="seg-btn${k === mediaStatusFilter ? ' active' : ''}" onclick="setMediaStatusFilter('${k}')">` +
+      `${label}<span class="seg-count">${counts[k]}</span></button>`)
+    .join('');
+}
+
+function setMediaStatusFilter(k) {
+  mediaStatusFilter = k;
+  renderMediaGrid();
+}
+
 async function loadMedia() {
   destroyChart('detail');
   destroyPortalCharts();
@@ -4493,16 +4576,29 @@ function renderMediaGrid() {
   // Titles that belong to a series — hidden as standalone cards
   const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
   const filtered = mediaAllData.filter(m => !isGridHidden(m));
-  const ungrouped = filtered.filter(m => !inSeries.has(m.title));
+  renderMediaStatusSeg(filtered);
+
+  // Status filter. Under All, series stay stacked; under a status, they unpack
+  // and their matching volumes show as cards of their own — the chip counts are
+  // per volume, so this is what makes the cards add up to the count, and a
+  // half-finished series no longer shows the same stack under two filters.
+  const want    = mediaStatusFilter;
+  const matches = m => want === 'all' || mediaStatusOf(m) === want;
+  const byTitle = new Map(filtered.map(m => [m.title, m]));
+  const series  = want === 'all' ? seriesData : [];
+  const ungrouped = filtered.filter(m => (want !== 'all' || !inSeries.has(m.title)) && matches(m));
 
   grid.innerHTML = '';
-  if (!ungrouped.length && !seriesData.length) {
-    grid.innerHTML = '<p class="empty-msg">No media found.</p>'; return;
+  if (!ungrouped.length && !series.length) {
+    grid.innerHTML = want === 'all'
+      ? '<p class="empty-msg">No media found.</p>'
+      : `<p class="empty-msg">Nothing ${MEDIA_STATUS_LABEL[want].toLowerCase()}.</p>`;
+    return;
   }
 
   // Natural order: series first, then ungrouped titles by total_secs DESC.
   const natural = [
-    ...seriesData.map(s => ({ key: `s:${s.id}`, kind: 'series', data: s })),
+    ...series.map(s => ({ key: `s:${s.id}`, kind: 'series', data: s })),
     ...ungrouped.map(m => ({ key: `t:${m.title}`, kind: 'title',  data: m })),
   ];
 
@@ -4520,9 +4616,12 @@ function renderMediaGrid() {
     const canLeft  = idx > 0;
     const canRight = idx < ordered.length - 1;
     const el = item.kind === 'series'
-      ? makeSeriesCard(item.data)
+      ? makeSeriesCard(item.data, byTitle)
       : makeMediaCard(item.data);
-    el.appendChild(makeReorderControls(item.key, canLeft, canRight));
+    // Reordering only under All: shiftMediaCard swaps neighbours in the FULL
+    // order, so in a filtered view the swap could land on a hidden card and
+    // look like the button did nothing.
+    if (want === 'all') el.appendChild(makeReorderControls(item.key, canLeft, canRight));
     grid.appendChild(el);
   });
 }
@@ -4600,6 +4699,7 @@ function makeMediaCard(m) {
   const initial = (m.title || '?')[0].toUpperCase();
   const isBook  = m.activity_type === 'Reading' || m.source === 'ttsureader';
   const hasImg  = !!m.image;
+  const status  = mediaStatusOf(m);
 
   const el = document.createElement('div');
   el.className = 'media-card';
@@ -4654,9 +4754,6 @@ function makeMediaCard(m) {
         <div class="media-placeholder-initial">${initial}</div>
       </div>`;
   }
-  if (m.completed) {
-    innerHTML += `<div class="media-card-complete" title="Completed">✓</div>`;
-  }
   if (m.chars_excluded) {
     innerHTML += `<div class="media-card-nochars" title="Characters here are excluded from your totals and reading speed">NO CHARS</div>`;
   }
@@ -4668,9 +4765,26 @@ function makeMediaCard(m) {
         <span class="media-card-source">${srcLabel(m.source)}</span>
       </div>
     </div>`;
+  if (status) innerHTML += cardLineHTML(status, mediaProgressPct(m), color);
 
   el.innerHTML = innerHTML;
   return el;
+}
+
+// The line along a card's bottom edge is the card's only status marker: its
+// COLOUR is the status, its LENGTH is progress. Completed is always full,
+// matching how completion pins the detail bar at 100%. With no known length
+// (manga, books with no total entered) there is no progress to draw: In
+// progress then shows no line — it's the default and needs no marker — and On
+// hold / Dropped draw full-width so their colour still shows. Series cards use
+// the same line with the series' status and progress.
+function cardLineHTML(status, pct, color) {
+  if (status === 'completed' || (pct == null && status !== 'in_progress')) pct = 100;
+  if (pct == null) return '';
+  const fill = {
+    in_progress: color, completed: 'var(--success)', on_hold: 'var(--warn)', dropped: 'var(--dim)',
+  }[status];
+  return `<div class="media-card-line"><i style="width:${pct}%;background:${fill}"></i></div>`;
 }
 
 function cardLayerHTML(member) {
@@ -4685,14 +4799,18 @@ function cardLayerHTML(member) {
     </div>`;
 }
 
-function makeSeriesCard(s) {
-  const el = document.createElement('div');
-  el.className = 'series-stack';
-  el.dataset.seriesId = s.id;
-
+function makeSeriesCard(s, byTitle = new Map()) {
   const members = s.members;
   const front  = members[0];
   const mid    = members[1];
+  // Status and progress come from the volumes' grid data; a volume missing
+  // from it (hidden source) simply doesn't count.
+  const vols   = members.map(x => byTitle.get(x.title)).filter(Boolean);
+  const status = seriesStatusOf(vols);
+
+  const el = document.createElement('div');
+  el.className = 'series-stack';
+  el.dataset.seriesId = s.id;
 
   // Grid icon stacks at most two covers (front + one peek), even for longer
   // series; the badge still shows the true member count.
@@ -4711,6 +4829,10 @@ function makeSeriesCard(s) {
         <span class="media-card-source">Series</span>
       </div>
     </div>`;
+  if (status) {
+    const color = acolor((vols.find(hasMediaStatus) || {}).activity_type);
+    html += cardLineHTML(status, seriesProgressPct(vols), color);
+  }
 
   el.innerHTML = html;
   el.onclick = () => openSeriesDetail(s.id);
@@ -4802,7 +4924,7 @@ function renderSeriesProgress(s, detailByTitle, daily = []) {
   const spd = recentSpeed(daily, 7);
   etaEl.classList.toggle('completed', remaining <= 0);
   if (remaining <= 0) {
-    etaEl.textContent = 'Completed ✓'; etaEl.title = '';
+    etaEl.textContent = 'Completed'; etaEl.title = '';
   } else if (spd > 0) {
     etaEl.textContent = `Est. hours to complete: ${(remaining / spd).toFixed(1)}h`;
     etaEl.title = `${fmtChars(remaining)} chars left at ${fmtChars(Math.round(spd))} chars/h (7-day avg)`;
@@ -4866,14 +4988,19 @@ function renderSeriesDetail(s, memberDetails = []) {
   if (members.length > 1) coverHtml += `<div class="series-badge">${members.length}</div>`;
   coverEl.innerHTML = coverHtml;
 
-  // Badge
-  const label = members.length === 1 ? 'entry' : 'entries';
-  document.getElementById('series-detail-badge').innerHTML =
-    `<span class="genre-badge">Series · ${members.length} ${label}</span>`;
-
   // Build a title→detail map for per-member meta lines
   const detailByTitle = {};
   memberDetails.forEach(d => { if (d && d.title) detailByTitle[d.title] = d; });
+
+  // Badge, plus the series status pill — the series' status is read off its
+  // volumes (seriesStatusOf), and a pick rewrites them (onSeriesStatusPick).
+  const label = members.length === 1 ? 'entry' : 'entries';
+  const badgeEl = document.getElementById('series-detail-badge');
+  badgeEl.innerHTML = `<span class="genre-badge">Series · ${members.length} ${label}</span>`;
+  const seriesStatus = seriesStatusOf(memberDetails);
+  if (seriesStatus) {
+    badgeEl.appendChild(makeStatusPill(seriesStatus, st => onSeriesStatusPick(s, memberDetails, st)));
+  }
 
   // Inline member list
   const membersEl = document.getElementById('series-detail-members');
@@ -4888,11 +5015,14 @@ function renderSeriesDetail(s, memberDetails = []) {
     const md = detailByTitle[m.title];
     const meta = md ? fmtMediaMemberMeta(md) : '';
     const metaHtml = meta ? `<span class="series-member-meta">${escHtml(meta)}</span>` : '';
+    const st = md ? mediaStatusOf(md) : null;
+    const dotHtml = st
+      ? `<i class="status-dot status-${st}" title="${MEDIA_STATUS_LABEL[st]}"></i>` : '';
 
     row.innerHTML = `
       <div class="series-member-mini-thumb">${thumb}</div>
       <div class="series-member-main">
-        <span class="series-member-mini-title">${escHtml(m.display_title || m.title)}</span>
+        <span class="series-member-mini-title">${dotHtml}${escHtml(m.display_title || m.title)}</span>
         ${metaHtml}
       </div>
       <button class="btn btn-xs btn-danger series-remove-btn" title="Remove from series">✕</button>`;
@@ -5139,6 +5269,9 @@ function renderMediaDetail(d) {
   } else {
     genresEl.innerHTML = `<span class="genre-badge" style="color:${color};border-color:${color}44">${d.activity_type}</span>`;
   }
+  if (hasMediaStatus(d)) {
+    genresEl.appendChild(makeStatusPill(d.status || 'in_progress', s => onMediaStatusPick(d, s)));
+  }
 
   // Completion progress bar: chars read / total length. The denominator is
   // GSM's game length or, for media GSM has no length for (books, manual
@@ -5185,7 +5318,7 @@ function renderMediaDetail(d) {
     const spd       = recentSpeed(d.daily, 7);
     etaEl.classList.toggle('completed', completed);
     if (completed) {
-      etaEl.textContent = 'Completed ✓';
+      etaEl.textContent = 'Completed';
       etaEl.title = d.completed_at ? `Marked complete on ${d.completed_at.slice(0, 10)}` : '';
     } else if (remaining <= 0) {
       etaEl.textContent = 'Complete';
@@ -5237,34 +5370,12 @@ function renderMediaDetail(d) {
     progEl.style.display = 'none';
   }
 
-  // Top-right action (back-nav row): "Complete <noun>" toggle when a bar
-  // exists, or "Add progress bar" (enter a total char count) when it doesn't.
-  // Completing asks for confirmation (it repins the bar); un-completing is
-  // the one-click undo of that same display flag. Chars-less media (anime,
-  // listening) gets neither — a chars-denominated bar is meaningless there.
+  // Top-right action (back-nav row): "Add progress bar" (enter a total char
+  // count) when the title has chars but no bar yet. Completing — and the other
+  // statuses — moved to the status pill beside the genre badges.
   const compBtn = document.getElementById('detail-complete-btn');
   const noun = mediaNoun(d);
-  // Chars-less but still finishable. Manga reports no character count at all,
-  // so both bar-gated branches below would hide the control and leave no way
-  // to say "I finished this volume" — which is the one thing that matters for
-  // it, because the catalog counts FINISHED volumes toward 7-per-book. Checked
-  // first so the semantics stay volume-shaped even if a char count was set by
-  // hand (the progress bar above renders off gcc independently either way).
-  if (d.source === 'mangawari') {
-    compBtn.style.display = 'inline-flex';
-    compBtn.textContent = completed ? '↺ Mark unfinished' : `✓ Finish ${noun}`;
-    compBtn.title = completed
-      ? `Clear the finished mark — this ${noun} stops counting toward your book total`
-      : `Mark this ${noun} finished — it counts toward your book total (7 volumes = 1 book)`;
-    compBtn.onclick = () => onCompleteMediaToggle(d, !completed);
-  } else if (gcc > 0) {
-    compBtn.style.display = 'inline-flex';
-    compBtn.textContent = completed ? '↺ Mark incomplete' : `✓ Complete ${noun}`;
-    compBtn.title = completed
-      ? `Clear the completed mark and go back to the ${noun}'s full length`
-      : `Mark this ${noun} finished: the bar fills to 100%`;
-    compBtn.onclick = () => onCompleteMediaToggle(d, !completed);
-  } else if (d.total_chars > 0) {
+  if (gcc <= 0 && d.total_chars > 0) {
     compBtn.style.display = 'inline-flex';
     compBtn.textContent = '+ Add progress bar';
     compBtn.title = `Enter the ${noun}'s total character count to track completion`;
@@ -7244,8 +7355,85 @@ function renderMilestonesList(el, milestones, gcc) {
   });
 }
 
-async function onCompleteMediaToggle(d, complete) {
-  if (complete) {
+// Status pill (title and series pages): shows the current status, opens a
+// picker of all four, hands the pick to `onPick`. Built per render, so the
+// listeners always close over the current payload.
+let _statusMenuCloser = null;
+
+function closeStatusMenu() {
+  document.querySelectorAll('.status-menu').forEach(m => { m.hidden = true; });
+  if (_statusMenuCloser) {
+    document.removeEventListener('click', _statusMenuCloser);
+    _statusMenuCloser = null;
+  }
+}
+
+function makeStatusPill(cur, onPick) {
+  const wrap = document.createElement('span');
+  wrap.className = 'status-wrap';
+  // "Completed…" carries an ellipsis because it asks for confirmation first.
+  wrap.innerHTML = `
+    <button type="button" class="status-pill status-${cur}" title="Change status">
+      <i class="status-dot"></i>${MEDIA_STATUS_LABEL[cur]}<span class="status-caret">▾</span>
+    </button>
+    <div class="status-menu" hidden>${MEDIA_STATUS_ORDER.map(s => `
+      <button type="button" class="status-opt status-${s}${s === cur ? ' current' : ''}" data-status="${s}">
+        <i class="status-dot"></i><span>${MEDIA_STATUS_LABEL[s]}${s === 'completed' && s !== cur ? '…' : ''}</span>
+        ${s === cur ? '<span class="status-check">✓</span>' : ''}
+      </button>`).join('')}
+    </div>`;
+  const menu = wrap.querySelector('.status-menu');
+  wrap.querySelector('.status-pill').onclick = e => {
+    e.stopPropagation();
+    const wasOpen = !menu.hidden;
+    closeStatusMenu();
+    if (wasOpen) return;
+    menu.hidden = false;
+    _statusMenuCloser = ev => { if (!wrap.contains(ev.target)) closeStatusMenu(); };
+    document.addEventListener('click', _statusMenuCloser);
+  };
+  menu.querySelectorAll('.status-opt').forEach(b => {
+    b.onclick = e => {
+      e.stopPropagation();
+      closeStatusMenu();
+      onPick(b.dataset.status);
+    };
+  });
+  return wrap;
+}
+
+// Series pill: a pick rewrites the volumes (db_set_series_status) — Completed
+// marks them all, anything else spares the ones already Completed. Re-picking
+// the current status is allowed, since it can still change volumes (In progress
+// on a series with one paused volume clears that pause); a pick that would
+// change nothing is skipped.
+async function onSeriesStatusPick(s, vols, status) {
+  const target = v => (status !== 'completed' && v.status === 'completed') ? 'completed' : status;
+  const moving = vols.filter(v => hasMediaStatus(v) && (v.status || 'in_progress') !== target(v));
+  if (!moving.length) return;
+  if (status === 'completed') {
+    const n = moving.length;
+    const what = vols.some(v => v.source === 'mangawari')
+      ? `${n === 1 ? 'It' : 'They'}’ll count toward your book total — 7 volumes make one book.`
+      : `${n === 1 ? 'Its progress bar' : 'Their progress bars'} will fill to 100%.`;
+    const ok = await showConfirm(
+      `Mark ${n === 1 ? 'the last unfinished entry' : `all ${n} unfinished entries`} in "${s.name}" as complete? ${what}`,
+      'Complete', CT.success);
+    if (!ok) return;
+  }
+  const r = await window.pywebview.api.set_series_status(s.id, status);
+  if (!r || !r.ok) { alert((r && r.error) || 'Failed to update status'); return; }
+  // Several volumes moved at once, so refetch rather than patch the cache.
+  mediaAllData = await window.pywebview.api.get_media();
+  await openSeriesDetail(s.id);
+}
+
+// Completing asks for confirmation (it repins the bar, and for manga moves the
+// catalog's book count); every other move, including back out of Completed, is
+// one click — the same undo the old "Mark incomplete" button gave.
+async function onMediaStatusPick(d, status) {
+  if (status === (d.status || 'in_progress')) return;
+  if (status === 'completed') {
     const disp = d.display_title || d.title;
     // Chars-less media has no progress bar and no milestone percentages to
     // repin, so the standard message would describe things that don't exist.
@@ -7253,22 +7441,23 @@ async function onCompleteMediaToggle(d, complete) {
     const msg = d.source === 'mangawari'
       ? `Mark this volume ("${disp}") as finished? It will count toward your book total — 7 volumes make one book.`
       : `Mark this ${mediaNoun(d)} ("${disp}") as complete? The progress bar will fill to 100% and milestone percentages will be recalculated against the chars you actually read.`;
-    const ok = await showConfirm(msg, complete && d.source === 'mangawari' ? 'Finish' : 'Complete', CT.success);
+    const ok = await showConfirm(msg, d.source === 'mangawari' ? 'Finish' : 'Complete', CT.success);
     if (!ok) return;
   }
-  const r = await window.pywebview.api.set_media_complete(d.title, complete);
-  if (!r || !r.ok) { alert((r && r.error) || 'Failed to update completion'); return; }
-  // Keep the cached grid data (and its ✓ badge) in sync without a full reload.
+  const r = await window.pywebview.api.set_media_status(d.title, status);
+  if (!r || !r.ok) { alert((r && r.error) || 'Failed to update status'); return; }
+  // Keep the cached grid data (its edge line and filter counts) in sync without
+  // a full reload.
   if (Array.isArray(mediaAllData)) {
     const m = mediaAllData.find(x => x.title === d.title);
-    if (m) m.completed = complete;
+    if (m) { m.status = status; m.completed = status === 'completed'; }
     renderMediaGrid();
   }
   await refreshCurrentMediaDetail();
 }
 
 // Excluding asks for confirmation (it moves every global char figure); including
-// again is the one-click undo, same shape as the completion toggle above.
+// again is the one-click undo, same shape as leaving Completed above.
 async function onCharsExcludedToggle(d, excluded) {
   if (excluded) {
     const disp = d.display_title || d.title;

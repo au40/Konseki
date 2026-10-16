@@ -1191,6 +1191,22 @@ class Api:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    def set_media_status(self, title, status):
+        """Set a title's status: in_progress | on_hold | completed | dropped.
+        Display-only, like set_media_complete (Completed IS that flag)."""
+        try:
+            return db.db_set_media_status(title, str(status))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def set_series_status(self, series_id, status):
+        """Apply a status to every volume of a series (Completed volumes are
+        spared unless the pick is Completed). A series has no status of its own."""
+        try:
+            return db.db_set_series_status(int(series_id), str(status))
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     def set_media_chars_excluded(self, title, excluded):
         """Withhold a title's characters from global figures (or restore them).
 

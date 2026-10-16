@@ -389,6 +389,23 @@ def init_db():
         )
     """)
 
+    # The other two media statuses, On hold and Dropped. In progress is the
+    # ABSENCE of any status row, so every title from every import path starts
+    # there with nothing written; Completed stays in media_completions above,
+    # which the catalog and the completion bar already read. The setter keeps a
+    # title in at most one of the two tables. chars/secs_at_set snapshot the
+    # title's raw totals so new reading can resume an on-hold title on read —
+    # see the "Media status" section of CLAUDE.md.
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS media_status (
+            title        TEXT PRIMARY KEY,
+            status       TEXT NOT NULL CHECK (status IN ('on_hold', 'dropped')),
+            set_at       TEXT NOT NULL,
+            chars_at_set INTEGER NOT NULL DEFAULT 0,
+            secs_at_set  REAL    NOT NULL DEFAULT 0
+        )
+    """)
+
     # Media whose character counts the user has declared unrepresentative
     # ("Don't count chars"): presence of a row = excluded. Same title-keyed,
     # display-only pattern as media_completions above — it survives GSM
@@ -2242,9 +2259,10 @@ def get_media_shelf():
     flight' view for the media page.
 
     A title qualifies when it has a known length (user-entered wins over GSM's,
-    same precedence as the detail completion bar), has been read at all, and
-    isn't marked complete. ETA divides remaining chars by the title's own trailing
-    speed, derived from totals."""
+    same precedence as the detail completion bar), has been read at all, and its
+    status is In progress — Completed, On hold and Dropped all stay off it. ETA
+    divides remaining chars by the title's own trailing speed, derived from
+    totals."""
     stats = {m["title"]: m for m in get_media_stats()}
     daily = _title_daily(90)
 
@@ -2254,7 +2272,7 @@ def get_media_shelf():
 
     out = []
     for title, m in stats.items():
-        if m["completed"]:
+        if m["status"] != "in_progress":
             continue
         length = user_cc.get(title) or game_cc.get(title) or 0
         if length <= 0 or m["total_chars"] <= 0:
@@ -2305,18 +2323,27 @@ def get_media_stats():
             MIN(s.session_date)              AS first_date,
             COALESCE(MAX(b.image_data), MAX(g.image_data)) AS image_data,
             MAX(mc.completed_at)             AS completed_at,
-            MAX(xc.excluded_at)              AS chars_excluded_at
+            MAX(xc.excluded_at)              AS chars_excluded_at,
+            MAX(ms.status)                   AS status,
+            MAX(ms.chars_at_set)             AS chars_at_set,
+            MAX(ms.secs_at_set)              AS secs_at_set
         FROM sessions s
         LEFT JOIN gsm_games   g ON s.title = g.game_name
         LEFT JOIN book_covers b ON s.title = b.title
         LEFT JOIN media_completions mc ON s.title = mc.title
         LEFT JOIN media_chars_excluded xc ON s.title = xc.title
+        LEFT JOIN media_status ms ON s.title = ms.title
         WHERE s.title IS NOT NULL AND s.title != ''
         GROUP BY s.title
         ORDER BY total_secs DESC
     """)
     aliases = _get_aliases()
     man = get_manual_secs_by_title()   # true reduction; attribution nets to zero per title
+    # Same length precedence as the detail bar and the shelf: the user's
+    # entered total wins over GSM's. 0 = unknown (no progress to draw).
+    user_cc = {t: c for t, c in _q("SELECT title, char_count FROM media_char_counts")}
+    game_cc = {t: c for t, c in _q(
+        "SELECT game_name, char_count FROM gsm_games WHERE char_count > 0")}
     return [
         {
             "title":         r[0],
@@ -2333,6 +2360,11 @@ def get_media_stats():
             # total_chars stays the title's real figure — the exclusion only
             # withholds it from global totals, never from the title's own card.
             "chars_excluded": bool(r[10]),
+            # Raw r[3]/r[4] on purpose: the snapshot was taken on raw sums, and
+            # a manual shave must not read as (un)resumed reading.
+            "status":        _derive_media_status(
+                bool(r[9]), (r[11], r[12], r[13]) if r[11] else None, r[4], r[3]),
+            "length":        user_cc.get(r[0]) or game_cc.get(r[0]) or 0,
         }
         for r in rows
     ]
@@ -3186,18 +3218,128 @@ def db_set_media_complete(title, complete):
     """Mark a media entry finished, or clear the mark. Display-only flag: the
     completion bar pins at 100% (its denominator becomes the chars actually
     read, so milestone percentages re-derive against the finished total). No
-    session data is touched, so toggling is always safe to undo."""
-    con = sqlite3.connect(DB_PATH)
+    session data is touched, so toggling is always safe to undo.
+
+    Completing goes through db_set_media_status so it also clears an On hold /
+    Dropped mark — a title holds one status at a time."""
     if complete:
+        db_set_media_status(title, "completed")
+    else:
+        con = sqlite3.connect(DB_PATH)
+        con.execute("DELETE FROM media_completions WHERE title=?", (title,))
+        con.commit()
+        con.close()
+    return {"ok": True, "completed": bool(complete)}
+
+
+# ── Media status ──────────────────────────────────────────────────────────────
+MEDIA_STATUSES = ("in_progress", "on_hold", "completed", "dropped")
+
+# Statuses that new reading lifts back to in_progress. Dropped is deliberately
+# absent: a stray GSM line on a dropped game shouldn't un-drop it.
+_AUTO_RESUME_STATUSES = {"on_hold"}
+
+
+def _derive_media_status(completed, status_row, raw_chars, raw_secs):
+    """One title's effective status. `status_row` is (status, chars_at_set,
+    secs_at_set) from media_status, or None; raw_* are the title's un-overlaid
+    session sums, the same basis the snapshot was taken on.
+
+    Resuming is decided here, on read, so no import path needs to know statuses
+    exist. Chars are the signal when the title tracks any: they only grow with
+    real reading, whereas a GSM row's time can creep up from a tail/AFK flush
+    after you stop. Chars-less media (manga, paper books) fall back to time."""
+    if completed:
+        return "completed"
+    if not status_row:
+        return "in_progress"
+    status, chars_at, secs_at = status_row
+    if status in _AUTO_RESUME_STATUSES:
+        if (raw_chars or 0) > 0 or (chars_at or 0) > 0:
+            resumed = (raw_chars or 0) > (chars_at or 0)
+        else:
+            resumed = (raw_secs or 0) > (secs_at or 0) + 1
+        if resumed:
+            return "in_progress"
+    return status
+
+
+def db_get_media_status(title):
+    completed = _q1("SELECT 1 FROM media_completions WHERE title=?", title)
+    row = _q1("SELECT status, chars_at_set, secs_at_set FROM media_status WHERE title=?", title)
+    raw = _q1("SELECT COALESCE(SUM(chars_read),0), COALESCE(SUM(time_seconds),0) "
+              "FROM sessions WHERE title=?", title)
+    return _derive_media_status(bool(completed), row, raw[0], raw[1])
+
+
+def db_set_media_status(title, status):
+    """Set a title's status — one at a time. Completed writes media_completions
+    and clears media_status; On hold / Dropped do the reverse, so leaving
+    Completed un-pins the bar exactly as "Mark incomplete" did; In progress
+    clears both. Display-only like the completion flag: no session data is
+    touched."""
+    if status not in MEDIA_STATUSES:
+        return {"ok": False, "error": f"Unknown status: {status}"}
+    con = sqlite3.connect(DB_PATH)
+    try:
+        _write_media_status(con, title, status, datetime.now().isoformat())
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "status": status}
+
+
+def _write_media_status(con, title, status, now):
+    con.execute("DELETE FROM media_status WHERE title=?", (title,))
+    if status == "completed":
+        # OR IGNORE keeps the original completed_at if it was already done.
         con.execute(
-            "INSERT OR REPLACE INTO media_completions (title, completed_at) VALUES (?, ?)",
-            (title, datetime.now().isoformat()),
+            "INSERT OR IGNORE INTO media_completions (title, completed_at) VALUES (?, ?)",
+            (title, now),
         )
     else:
         con.execute("DELETE FROM media_completions WHERE title=?", (title,))
-    con.commit()
-    con.close()
-    return {"ok": True, "completed": bool(complete)}
+    if status in ("on_hold", "dropped"):
+        chars, secs = con.execute(
+            "SELECT COALESCE(SUM(chars_read),0), COALESCE(SUM(time_seconds),0) "
+            "FROM sessions WHERE title=?", (title,)).fetchone()
+        con.execute(
+            "INSERT INTO media_status (title, status, set_at, chars_at_set, secs_at_set) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (title, status, now, int(chars), float(secs)),
+        )
+
+
+def db_set_series_status(series_id, status):
+    """Apply a status to a whole series by writing its volumes. A series has no
+    status of its own — the UI reads one off its volumes — so this is the only
+    shape a series-level pick can take.
+
+    Completed marks every volume. Anything else spares the volumes already
+    Completed: dropping or pausing a series must not erase what was actually
+    finished, and In progress only clears the On hold / Dropped marks. One
+    transaction, so a series never ends up half-applied."""
+    if status not in MEDIA_STATUSES:
+        return {"ok": False, "error": f"Unknown status: {status}"}
+    con = sqlite3.connect(DB_PATH)
+    try:
+        titles = [r[0] for r in con.execute(
+            "SELECT title FROM series_members WHERE series_id=?", (series_id,))]
+        if not titles:
+            return {"ok": False, "error": "Series not found"}
+        ph = ",".join("?" * len(titles))
+        done = {r[0] for r in con.execute(
+            f"SELECT title FROM media_completions WHERE title IN ({ph})", titles)}
+        now = datetime.now().isoformat()
+        changed = 0
+        for t in titles:
+            if status == "completed" or t not in done:
+                _write_media_status(con, t, status, now)
+                changed += 1
+        con.commit()
+    finally:
+        con.close()
+    return {"ok": True, "status": status, "changed": changed}
 
 
 def db_set_media_char_count(title, char_count):
@@ -3390,6 +3532,7 @@ def _compute_title_core(title):
         "user_char_count": int(user_cc[0]) if user_cc else 0,
         "completed":     bool(completion),
         "completed_at":  completion[0] if completion else "",
+        "status":        db_get_media_status(title),
         "chars_excluded": bool(chars_excl),
     }
 
