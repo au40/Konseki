@@ -257,6 +257,46 @@ async function pressLog(ctx) {
           Object.keys(ctx.store).filter(k => k.startsWith('timer')), []);
   }
 
+  console.log('\n--- the palette matches the tracker\'s, in both modes ---');
+  {
+    // The popup copies src/ui.css's tokens rather than loading the file (the
+    // extension ships on its own), so nothing else notices when the app's
+    // palette moves and the popup is left on the old one. Every token the
+    // popup defines that ui.css also defines must resolve to the same value in
+    // Dark and in Light; popup-only tokens are skipped.
+    const strip = css => css.replace(/\/\*[\s\S]*?\*\//g, '');
+    const vars = body => {
+      const out = {};
+      for (const m of body.matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
+        out[m[1]] = m[2].trim().replace(/\s+/g, ' ').toLowerCase();
+      }
+      return out;
+    };
+    const block = (css, re, what) => {
+      const m = css.match(re);
+      if (!m) { check(`found ${what}`, false, true); return {}; }
+      return vars(m[1]);
+    };
+    const uiCss = strip(fs.readFileSync(
+      path.join(process.env.UI_SRC || path.resolve(__dirname, '..', 'src'), 'ui.css'), 'utf8'));
+    const popupCss = strip(fs.readFileSync(path.join(SRC, 'popup.html'), 'utf8'));
+
+    const appDark    = block(uiCss, /:root\s*\{([^}]*)\}/, 'ui.css :root');
+    const appLight   = { ...appDark, ...block(uiCss, /\[data-theme="light"\]\s*\{([^}]*)\}/,
+                                              'ui.css [data-theme="light"]') };
+    const popDark    = block(popupCss, /:root\s*\{([^}]*)\}/, 'popup :root');
+    const popLight   = { ...popDark, ...block(popupCss,
+      /@media\s*\(prefers-color-scheme:\s*light\)\s*\{\s*:root\s*\{([^}]*)\}/,
+      'popup light-mode :root') };
+
+    const names = Object.keys(popDark).filter(n => n in appDark);
+    check('the popup shares at least the core tokens', names.length >= 12, true);
+    for (const [mode, pop, app] of [['dark', popDark, appDark], ['light', popLight, appLight]]) {
+      const off = names.filter(n => pop[n] !== app[n]).map(n => `${n} ${pop[n]} ≠ ${app[n]}`);
+      check(`${mode}: every shared token matches ui.css`, off, []);
+    }
+  }
+
   console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 })();

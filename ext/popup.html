@@ -3,57 +3,100 @@
 <head>
   <meta charset="UTF-8">
   <style>
-    /* Design tokens lifted verbatim from the tracker's src/ui.css, so the popup
-       reads as the same application rather than a utility that talks to it.
-       Keep them in sync by name — if a token changes there, change it here. */
+    /* Design tokens copied from the tracker's src/ui.css — Dark from its :root,
+       Light from its [data-theme="light"] block — so the popup reads as the same
+       application rather than a utility that talks to it. tests/verify_popup.js
+       compares them by name and fails when the app's palette moves, so a retune
+       there has to be copied here. */
     :root {
-      --accent:    #5B8CFF;
-      --surface:   #1C1C28;
-      --card:      #24243A;
-      --muted:     #6B6B8A;
-      --success:   #4ECBA0;
-      --text:      #E8E8F0;
-      --dim:       #9090A8;
-      --warn:      #FF9F5B;
-      --danger:    #FF6B6B;   /* hardcoded in the tracker; named here */
-      --grid:      #2E2E48;
-      --hover:     #2E2E50;
-      --input-bg:  #141422;
-      --inset:     #1E1E30;
-      --radius:    12px;
+      --accent:    #8EA6FF;
+      --surface:   #0E0F11;
+      --card:      #141518;
+      --muted:     #5D616A;
+      --success:   #6FCFAE;
+      --text:      #E7E8EB;
+      --dim:       #8C9099;
+      --warn:      #E9A86F;
+      --danger:    #FF6B6B;
+      --grid:      #24262B;
+      --hover:     #1A1C20;
+      --input-bg:  #0B0C0E;
+      --inset:     #1E2024;
+      --seg-on:    #26282E;
+      --radius:    14px;
+      --font:         "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Yu Gothic UI", "Meiryo UI", system-ui, sans-serif;
+      --font-display: "Segoe UI Variable Display", "Segoe UI Variable", "Segoe UI", "Yu Gothic UI", system-ui, sans-serif;
+      /* Popup-only: the ink on a solid green or red fill. Dark mode's fills are
+         light, so the ink goes dark, as it does on the app's accent fills. */
+      --on-fill:   #0E0F11;
+      color-scheme: dark;
+    }
+
+    /* The popup has no mode setting and can't see the tracker's, so it does
+       what the app's "Match Windows" option does and follows the system. In
+       Firefox that arrives through Settings → General → Website appearance,
+       which follows the system unless it's been set to Light or Dark. */
+    @media (prefers-color-scheme: light) {
+      :root {
+        --accent:    #4361D8;
+        --surface:   #EFEDE7;
+        --card:      #FAF9F6;
+        --muted:     #A09A8E;
+        --success:   #1D9670;
+        --text:      #1C1A16;
+        --dim:       #68635A;
+        --warn:      #B5661C;
+        --danger:    #C93C42;
+        --grid:      #E0DCD3;
+        --hover:     #E8E5DE;
+        --input-bg:  #FFFFFF;
+        --inset:     #E9E6DF;
+        --seg-on:    #FFFFFF;
+        /* Light mode's green and red are mid-tones; white clears 4.5:1 on
+           both where the page colour doesn't. */
+        --on-fill:   #FFFFFF;
+        color-scheme: light;
+      }
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-    body {
-      width: 300px;
-      padding: 14px;
+    /* The scrollbar settings go on html: the popup scrolls once the folds are
+       open, and the viewport only takes them from the root element. */
+    html {
       background: var(--surface);
-      color: var(--text);
-      font-family: 'Segoe UI', system-ui, sans-serif;
-      font-size: 13px;
       scrollbar-width: thin;
       scrollbar-color: var(--grid) transparent;
     }
+    body {
+      width: 300px;
+      padding: 12px;
+      background: var(--surface);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 13px;
+    }
 
     /* ── Wordmark ─────────────────────────────────────────────────────────── */
-    /* The tracker's sidebar leads with 痕跡 in the accent; the popup is too
-       short to spend a block on it, so it sits inline with the latin name. */
+    /* The app's rail sets 痕跡 in the text colour, widely tracked; the popup
+       lays it on its side next to the latin name. */
     .pop-header {
-      display: flex; align-items: baseline; gap: 8px;
-      padding: 0 2px 12px;
+      display: flex; align-items: center; gap: 8px;
+      padding: 2px 4px 12px;
     }
     .logo-jp {
-      font-size: 20px; font-weight: 700; color: var(--accent);
-      letter-spacing: 2px; line-height: 1;
+      font-size: 17px; font-weight: 600; color: var(--text);
+      letter-spacing: .2em; line-height: 1;
     }
     .logo-name {
-      font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: 0.04em;
+      font-size: 12px; font-weight: 500; color: var(--dim); letter-spacing: .02em;
     }
 
     /* ── Cards ────────────────────────────────────────────────────────────── */
+    /* The app's tiles: a card surface with a hairline edge. */
     .card {
-      background: var(--card); border-radius: var(--radius);
+      background: var(--card); border: 1px solid var(--grid);
+      border-radius: var(--radius);
       padding: 12px 14px; margin-bottom: 10px;
     }
     /* :last-child, not :last-of-type — the settings card is a <details> and the
@@ -61,34 +104,39 @@
        the YouTube card and collapse it against the one below. */
     body > .card:last-child { margin-bottom: 0; }
     .card-head {
-      display: flex; align-items: baseline; justify-content: space-between;
-      gap: 8px; margin-bottom: 8px;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; margin-bottom: 10px;
     }
-    /* Section headings. The popup holds two independent trackers — the manual
-       stopwatch and the passive YouTube one — and without a name on each, the
-       YouTube total read as a stray note under the Start button. */
+    /* Section headings, in the app's tile-heading type. The popup holds two
+       independent trackers — the manual stopwatch and the passive YouTube one —
+       and without a name on each, the YouTube total read as a stray note under
+       the Start button. */
     .card-title {
       font-size: 11px; font-weight: 600; color: var(--dim);
-      text-transform: uppercase; letter-spacing: 0.04em;
+      text-transform: uppercase; letter-spacing: .08em;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
-    .card-note { font-size: 10px; color: var(--muted); flex: none; }
+    /* Same as the app's .badge. */
+    .card-note {
+      flex: none; padding: 2px 8px; border-radius: 20px;
+      background: var(--inset); color: var(--dim);
+      font-size: 10px; font-weight: 600;
+    }
 
     /* ── Stopwatch ────────────────────────────────────────────────────────── */
-    /* No monospace here — the tracker sets every big number (.stat-card .value,
-       .catalog-hero-num) in the body font at 700/800 and lets tabular-nums stop
-       the digits from shuffling as they tick. Same treatment, same result. */
+    /* The app's big figures: display face, medium weight, tracked in, with
+       tabular-nums so the digits don't shuffle as they tick. */
     #timer-display {
-      font-variant-numeric: tabular-nums;
-      font-size: 36px; font-weight: 700; line-height: 1.1;
+      font-family: var(--font-display); font-variant-numeric: tabular-nums;
+      font-size: 38px; font-weight: 500; letter-spacing: -.03em; line-height: 1.1;
       text-align: center; color: var(--text);
-      letter-spacing: 0.5px; margin: 2px 0 12px; user-select: none;
+      margin: 2px 0 14px; user-select: none;
     }
     #timer-display.running { color: var(--success); }
     #timer-display.paused  { color: var(--warn); }
 
     /* ── Forms ────────────────────────────────────────────────────────────── */
-    .form-group { margin-bottom: 10px; }
+    .form-group { margin-bottom: 12px; }
     .form-group:last-child { margin-bottom: 0; }
     label {
       display: block; font-size: 12px; color: var(--dim); margin-bottom: 6px;
@@ -96,7 +144,7 @@
     input[type=text], input[type=number] {
       background: var(--input-bg); border: 1px solid var(--grid); border-radius: 8px;
       color: var(--text); font-family: inherit; font-size: 13px;
-      padding: 8px 10px; outline: none; width: 100%;
+      padding: 8px 11px; outline: none; width: 100%;
       transition: border-color 0.15s;
     }
     input:focus { border-color: var(--accent); }
@@ -104,52 +152,69 @@
     select {
       background: var(--input-bg); border: 1px solid var(--grid); border-radius: 8px;
       color: var(--text); font-family: inherit; font-size: 13px;
-      padding: 8px 10px; outline: none; cursor: pointer; width: 100%;
+      padding: 8px 11px; outline: none; cursor: pointer; width: 100%;
       transition: border-color 0.15s; appearance: none;
       background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%236B6B8A' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
-      background-repeat: no-repeat; background-position: right 10px center;
-      padding-right: 32px;
+      background-repeat: no-repeat; background-position: right 11px center;
+      padding-right: 34px;
     }
     select:focus { border-color: var(--accent); }
     select:disabled { opacity: 0.6; cursor: not-allowed; }
 
     /* ── Buttons ──────────────────────────────────────────────────────────── */
+    /* The app's primary button: an ink fill (the text colour) rather than a
+       blue one. The transparent border keeps it the same height as the outlined
+       buttons it sits beside. */
     button {
       display: inline-flex; align-items: center; justify-content: center; gap: 6px;
-      padding: 8px 14px; border-radius: 8px; border: none; cursor: pointer;
-      background: var(--accent); color: #fff;
+      padding: 8px 14px; border-radius: 8px; border: 1px solid transparent; cursor: pointer;
+      background: var(--text); color: var(--surface);
       font-size: 13px; font-weight: 600; font-family: inherit;
       transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s;
     }
     button:hover    { opacity: 0.88; }
     button:active   { opacity: 0.72; }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--accent); outline-offset: 2px;
+    }
     .btn-row { display: flex; gap: 8px; margin-top: 10px; }
     .btn-row button { flex: 1; }
 
     /* start-stop-btn's class is REPLACED wholesale by popup.js ("" when idle,
        "stop-btn" once a session is live), so its resting look has to hang off
-       the id — a bare class would be wiped along with the state. */
-    #start-stop-btn           { background: var(--accent); color: #fff; }
-    #start-stop-btn.stop-btn  { background: var(--success); color: #10261F; }
-
-    .pause-btn {
-      background: transparent; border: 1px solid var(--accent); color: var(--accent);
+       the id — a bare class would be wiped along with the state. Log is green
+       to match the running clock above it. */
+    #start-stop-btn           { background: var(--text); color: var(--surface); }
+    #start-stop-btn.stop-btn  { background: var(--success); color: var(--on-fill); }
+    @media (prefers-color-scheme: light) {
+      /* Light's green is a mid-tone; deepened a step, it holds white text. */
+      #start-stop-btn.stop-btn { background: color-mix(in srgb, var(--success) 80%, #000); }
     }
-    .pause-btn:hover { background: rgba(91, 140, 255, 0.12); opacity: 1; }
+
+    /* The app's outline button: a hairline, not a coloured ring. */
+    .pause-btn {
+      background: transparent; border-color: var(--grid); color: var(--text);
+    }
+    .pause-btn:hover { border-color: var(--dim); opacity: 1; }
 
     .discard-btn {
-      background: transparent; border: 1px solid var(--danger); color: var(--danger);
+      background: transparent; color: var(--danger);
+      border-color: color-mix(in srgb, var(--danger) 45%, transparent);
       padding: 6px 12px; font-size: 12px;
     }
-    .discard-btn:hover { background: rgba(255, 107, 107, 0.1); opacity: 1; }
-    .discard-btn.confirm { background: var(--danger); border-color: var(--danger); color: #fff; }
+    .discard-btn:hover {
+      background: color-mix(in srgb, var(--danger) 12%, transparent);
+      border-color: var(--danger); opacity: 1;
+    }
+    .discard-btn.confirm { background: var(--danger); border-color: var(--danger); color: var(--on-fill); }
     .discard-btn.confirm:hover { background: var(--danger); opacity: 0.88; }
 
     /* ── Segment control ──────────────────────────────────────────────────── */
+    /* The app's: "selected" is a lighter surface, not a solid blue fill. */
     .seg {
-      display: flex; background: var(--input-bg); border-radius: 8px;
-      padding: 3px; gap: 2px;
+      display: flex; background: var(--input-bg); border: 1px solid var(--grid);
+      border-radius: 8px; padding: 3px; gap: 2px;
     }
     .seg-btn {
       flex: 1; padding: 5px 8px; border-radius: 6px; border: none; cursor: pointer;
@@ -158,8 +223,16 @@
       transition: background 0.15s, color 0.15s;
     }
     .seg-btn:hover:not(.active):not(:disabled) { color: var(--text); opacity: 1; }
-    .seg-btn.active   { background: var(--accent); color: #fff; }
+    .seg-btn.active   { background: var(--seg-on); color: var(--text); }
     .seg-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    /* The mode locks while a session runs; the one it's running in stays
+       readable so you can still see which it is. */
+    .seg-btn.active:disabled { opacity: 0.75; }
+    @media (prefers-color-scheme: light) {
+      /* As in the app: a grey track with a raised white segment. */
+      .seg { background: var(--inset); }
+      .seg-btn.active { box-shadow: 0 1px 2px rgb(0 0 0 / .10), 0 0 0 1px var(--grid); }
+    }
 
     /* ── Feedback lines ───────────────────────────────────────────────────── */
     #status, #timer-status {
@@ -177,102 +250,111 @@
       text-decoration: underline; text-underline-offset: 2px;
     }
 
-    .hint { margin-top: 8px; font-size: 11px; color: var(--muted); line-height: 1.5; }
-    p.sub { margin-bottom: 12px; font-size: 11px; color: var(--muted); line-height: 1.5; }
+    /* Explanations use --dim, as the app's notes do: --muted is for things
+       that don't need reading, and these do. */
+    .hint { margin-top: 8px; font-size: 11px; color: var(--dim); line-height: 1.5; }
+    p.sub { margin-bottom: 12px; font-size: 11.5px; color: var(--dim); line-height: 1.5; }
 
     /* ── YouTube row ──────────────────────────────────────────────────────── */
     #yt-row {
       display: flex; align-items: center; justify-content: space-between; gap: 10px;
-      background: var(--inset); border-radius: 8px; padding: 8px 10px;
+      background: var(--inset); border-radius: 10px; padding: 9px 12px;
     }
     #yt-state {
-      display: flex; align-items: center; gap: 7px; min-width: 0;
+      display: flex; align-items: center; gap: 8px; min-width: 0;
       font-size: 12px; color: var(--dim);
     }
     #yt-state-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #yt-dot {
-      width: 8px; height: 8px; border-radius: 50%;
+      width: 7px; height: 7px; border-radius: 50%;
       background: var(--muted); flex: none; transition: background 0.15s, box-shadow 0.15s;
     }
-    #yt-row.live #yt-dot   { background: var(--success); box-shadow: 0 0 0 3px rgba(78, 203, 160, 0.16); }
+    #yt-row.live #yt-dot   {
+      background: var(--success);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--success) 18%, transparent);
+    }
     #yt-row.live #yt-state { color: var(--success); }
     #yt-today {
-      font-variant-numeric: tabular-nums;
-      font-size: 15px; font-weight: 700; color: var(--accent); flex: none;
+      font-family: var(--font-display); font-variant-numeric: tabular-nums;
+      font-size: 16px; font-weight: 500; letter-spacing: -.01em;
+      color: var(--text); flex: none;
     }
+
+    /* ── Disclosure chevron ───────────────────────────────────────────────── */
+    /* Drawn as a line, like the app's icons, in whatever colour the summary is. */
+    details > summary {
+      list-style: none; cursor: pointer;
+      display: flex; align-items: center; gap: 8px;
+    }
+    details > summary::-webkit-details-marker { display: none; }
+    details > summary::before {
+      content: ""; flex: none; width: 5px; height: 5px; margin: 0 1px 0 2px;
+      border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor;
+      transform: rotate(-45deg); transition: transform 0.15s;
+    }
+    /* Pointing down, the corner sits low; the nudge re-centres it on the text. */
+    details[open] > summary::before { transform: translateY(-1px) rotate(45deg); }
 
     /* ── Collapsible settings ─────────────────────────────────────────────── */
     details.card > summary {
-      list-style: none; cursor: pointer;
-      display: flex; align-items: center; gap: 6px;
       font-size: 11px; font-weight: 600; color: var(--dim);
-      text-transform: uppercase; letter-spacing: 0.04em;
+      text-transform: uppercase; letter-spacing: .08em;
     }
     details.card > summary:hover { color: var(--text); }
-    details.card > summary::-webkit-details-marker { display: none; }
-    details.card > summary::before {
-      content: "▸"; font-size: 10px; color: var(--muted); transition: transform 0.15s;
-    }
-    details.card[open] > summary::before { transform: rotate(90deg); }
     details.card[open] > summary { margin-bottom: 12px; }
 
     /* ── YouTube breakdown + channel rules ────────────────────────────────── */
     /* Nested inside the YouTube card rather than being cards of their own: they
        explain the number directly above them, and separating them from it would
        lose that. Same disclosure affordance as the settings card. */
-    details.sub-fold { margin-top: 8px; }
-    details.sub-fold > summary {
-      list-style: none; cursor: pointer;
-      display: flex; align-items: center; gap: 6px;
-      font-size: 11px; color: var(--muted);
-    }
-    details.sub-fold > summary:hover { color: var(--dim); }
-    details.sub-fold > summary::-webkit-details-marker { display: none; }
-    details.sub-fold > summary::before {
-      content: "▸"; font-size: 10px; transition: transform 0.15s;
-    }
-    details.sub-fold[open] > summary::before { transform: rotate(90deg); }
-    details.sub-fold[open] > summary { margin-bottom: 8px; }
+    details.sub-fold { margin-top: 10px; }
+    details.sub-fold > summary { font-size: 12px; color: var(--dim); }
+    details.sub-fold > summary:hover { color: var(--text); }
+    details.sub-fold[open] > summary { margin-bottom: 4px; }
 
+    /* The app's session lists: rows divided by hairlines. */
     .yt-item {
       display: flex; align-items: center; gap: 8px;
-      padding: 6px 0; border-top: 1px solid var(--grid);
+      padding: 7px 0; border-top: 1px solid var(--grid);
     }
     .yt-item:first-child { border-top: none; }
     .yt-item-main  { min-width: 0; flex: 1; }
     .yt-item-title {
-      font-size: 12px; color: var(--text);
+      font-size: 12.5px; color: var(--text);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .yt-item-sub {
-      font-size: 10px; color: var(--muted); margin-top: 2px;
+      font-size: 11px; color: var(--dim); margin-top: 2px;
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
     .yt-item-secs {
-      font-size: 12px; font-weight: 600; color: var(--dim); flex: none;
+      font-size: 12px; font-weight: 600; color: var(--text); flex: none;
       font-variant-numeric: tabular-nums;
     }
     /* Icon-sized, and the destructive one is only red on hover: a list of
        permanently red buttons reads as a list of errors. */
     .yt-act {
       flex: none; border: none; cursor: pointer; border-radius: 6px;
-      background: transparent; color: var(--muted);
-      font-family: inherit; font-size: 12px; line-height: 1;
-      padding: 4px 6px; transition: background 0.15s, color 0.15s;
+      background: transparent; color: var(--dim);
+      font-family: inherit; font-size: 12px; font-weight: 500; line-height: 1;
+      padding: 5px 6px; transition: background 0.15s, color 0.15s;
     }
-    .yt-act:hover  { background: var(--hover); color: var(--text); }
+    .yt-act:hover  { background: var(--inset); color: var(--text); opacity: 1; }
     .yt-act.danger:hover { color: var(--danger); }
     .yt-act:disabled { opacity: 0.4; cursor: default; background: transparent; }
-    .yt-empty { font-size: 11px; color: var(--muted); padding: 2px 0; }
+    .yt-empty { font-size: 11.5px; color: var(--dim); padding: 4px 0; }
     .yt-day-head {
-      font-size: 10px; color: var(--muted); text-transform: uppercase;
-      letter-spacing: 0.04em; padding: 8px 0 2px;
+      font-size: 10px; font-weight: 600; color: var(--dim); text-transform: uppercase;
+      letter-spacing: .08em; padding: 10px 0 3px;
     }
+    /* The app's .badge, and its warn tint for a rule you set. */
     .yt-tag {
-      font-size: 10px; padding: 1px 5px; border-radius: 4px; flex: none;
-      background: var(--input-bg); color: var(--muted);
+      font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 20px; flex: none;
+      background: var(--inset); color: var(--dim);
     }
-    .yt-tag.off { color: var(--warn); }
+    .yt-tag.off {
+      color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent);
+    }
   </style>
 </head>
 <body>

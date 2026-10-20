@@ -777,6 +777,16 @@ select:focus { border-color: var(--accent); }
 .media-card-line::before,
 .media-card-line > i { content: ''; position: absolute; left: 0; bottom: 0; height: 3px; }
 .media-card-line::before { right: 0; background: rgba(255,255,255,0.12); }
+/* Progress spans only the part of the line you can see. The corner clip hides
+   it until its top edge clears the curve, so --p (0–1, from cardLineHTML)
+   starts --line-in from the left and stops that far short of the right edge.
+   --line-in is where the top edge clears (r − √(r² − (r − h)²) = 5.34px for
+   r = --radius 14px, h = 3px) plus 2px, so the smallest progress shows as a
+   speck and the last sliver short of done still reads as a gap (0 and 100%
+   arrive as plain widths, so done is still edge to edge). CSS can't
+   take the root of a length, so update it if the radius or height changes. */
+.media-card-line { --line-in: 7.34px; }
+.media-card-line > i { width: calc(var(--line-in) + (100% - 2 * var(--line-in)) * var(--p, 0)); }
 
 /* Series: above the stack's footer (z 4). */
 .series-stack .media-card-line { z-index: 5; }

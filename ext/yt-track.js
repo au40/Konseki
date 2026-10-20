@@ -163,6 +163,70 @@ function metaFromResponse(r) {
   return { title, channelId, channel };
 }
 
+// ── Music ────────────────────────────────────────────────────────────────────
+// A Japanese song is Japanese audio and still isn't listening practice — the
+// same split as a translation channel. So this is NOT part of the language
+// verdict, which stays honest about what the audio is; it's a separate rung that
+// decides the video doesn't count. Two tiers, because the signals differ in how
+// far they can be trusted:
+//
+//   sure  — YouTube itself says this is a song: an auto-generated
+//           "<Artist> - Topic" channel (album tracks), or a label-side music
+//           video type. Off automatically; "count anyway" on the chip still wins.
+//   maybe — the UPLOADER filed it under Music. That's most songs, but some
+//           singers file their talk streams there too, so it asks rather than
+//           deciding. Ambiguity gets surfaced, same as everywhere else here.
+//
+// An absent field is "no music signal", never an error: if YouTube stops
+// sending one, that tier simply stops firing and the language ladder carries on
+// exactly as before. Read from the same validated response as everything else,
+// for the same reason metaFromResponse is.
+
+const TOPIC_CHANNEL = / - Topic$/;
+
+const SURE_MUSIC_TYPES = new Map([
+  ["MUSIC_VIDEO_TYPE_ATV",                   "album track"],   // audio over cover art
+  ["MUSIC_VIDEO_TYPE_OMV",                   "music video"],
+  ["MUSIC_VIDEO_TYPE_OFFICIAL_SOURCE_MUSIC", "official audio"],
+]);
+// Deliberately not in the map above:
+//   _UGC             — a fan upload YouTube Music indexes as a song. Usually a
+//                      cover, but the label is loose, so it only asks.
+//   _PODCAST_EPISODE — a Japanese podcast is exactly what this tracker is for.
+const MAYBE_MUSIC_TYPES = new Map([["MUSIC_VIDEO_TYPE_UGC", "fan upload"]]);
+
+// The category name may follow the UI language; both spellings cost nothing.
+const MUSIC_CATEGORIES = new Set(["Music", "音楽"]);
+
+// Raw fields, shared with probe() so the debug log shows exactly what the
+// decision below was made from.
+function musicFields(r) {
+  let author = "", type = "", category = "", hasMicroformat = false;
+  try {
+    const vd = r && r.videoDetails;
+    if (vd) {
+      author = String(vd.author || "");
+      type   = String(vd.musicVideoType || "");
+    }
+  } catch {}
+  try {
+    const mf = r && r.microformat && r.microformat.playerMicroformatRenderer;
+    hasMicroformat = !!mf;
+    if (mf) category = String(mf.category || "");
+  } catch {}
+  return { author, type, category, hasMicroformat };
+}
+
+// → { level: "sure" | "maybe", why } or null.
+function musicFromResponse(r) {
+  const f = musicFields(r);
+  if (TOPIC_CHANNEL.test(f.author))     return { level: "sure",  why: "Topic channel" };
+  if (SURE_MUSIC_TYPES.has(f.type))     return { level: "sure",  why: SURE_MUSIC_TYPES.get(f.type) };
+  if (MAYBE_MUSIC_TYPES.has(f.type))    return { level: "maybe", why: MAYBE_MUSIC_TYPES.get(f.type) };
+  if (MUSIC_CATEGORIES.has(f.category)) return { level: "maybe", why: "Music category" };
+  return null;
+}
+
 // ── Channel verdict cache ────────────────────────────────────────────────────
 // Most immersion is repeat channels, so this becomes the hot path quickly and
 // rescues videos whose ASR is disabled (music, some channels).
@@ -283,9 +347,15 @@ async function rememberChannelName(channelId, name) {
 }
 
 // ── Classification ───────────────────────────────────────────────────────────
-// Ladder: ASR verdict → channel cache → kana in title → ask.
+// Ladder: channel rule → music → ASR verdict → channel cache → kana in title → ask.
 // `verdict` is "ja" | "other" | "unknown"; "unknown" is what surfaces the
 // yes/no prompt rather than guessing.
+//
+// Two layers, kept apart on purpose. languageVerdict answers "is this audio
+// Japanese?" and nothing else; classifyNow wraps it with the rules that decide
+// whether Japanese audio COUNTS — your channel rule, and music. Those can't live
+// inside the language answer, because the cases they exist for are the ones
+// where that answer is a correct `ja`.
 
 function classifyNow(expectedId) {
   // THE navigation guard. Everything downstream is read off ONE player response
@@ -300,19 +370,50 @@ function classifyNow(expectedId) {
     };
   }
 
-  const tracks  = tracksFromResponse(resp);
-  const asrLang = asrLanguage(tracks);
-  const meta    = metaFromResponse(resp);
-  const dubLang = selectedAudioLang();
+  const meta = metaFromResponse(resp);
 
-  // Rung 0, above everything including ASR: your rule for this channel. This is
-  // the ONLY rung that can overrule a correct `ja` verdict, which is exactly
-  // what a translation channel needs — Japanese audio, English subtitles, not
-  // listening practice. Deliberately not `cacheable`: there is nothing to learn
-  // here, the answer is already stored.
+  // Rung 0, above everything including ASR: your rule for this channel. It can
+  // overrule a correct `ja` verdict, which is exactly what a translation channel
+  // needs — Japanese audio, English subtitles, not listening practice.
+  // Deliberately not `cacheable`: there is nothing to learn here, the answer is
+  // already stored.
   if (meta.channelId && channelCache[meta.channelId] === NEVER) {
     return { verdict: "other", reason: "channel off", meta, settled: true, blocked: true };
   }
+
+  // Rung 1: YouTube itself says this is a song. Above ASR for the same reason
+  // rung 0 is — a Japanese song's ASR verdict is a correct `ja`. Not cacheable:
+  // a song says nothing about what the rest of the channel sounds like.
+  const music = musicFromResponse(resp);
+  if (music && music.level === "sure") {
+    return { verdict: "other", reason: `music: ${music.why}`, meta, settled: true, music: "sure" };
+  }
+
+  const lang = languageVerdict(resp, meta);
+  if (!music) return lang;
+
+  // Only the uploader says Music, so ask. Two rules ride with it:
+  //  - Nothing a song teaches goes in the channel cache. An `other` learned from
+  //    one English cover would stop that channel's uncaptioned Japanese talk
+  //    streams from counting, and a `ja` from a song isn't evidence about them
+  //    either.
+  //  - There's no question unless the video would otherwise have counted, or
+  //    been asked about. "Not Japanese" already answers it.
+  lang.cacheable = false;
+  if (lang.verdict === "other") return lang;
+  return Object.assign(lang, {
+    verdict: "unknown",
+    reason:  `music? ${music.why} · ${lang.reason}`,
+    music:   "maybe",
+  });
+}
+
+// The language layer: dubbing → ASR → channel cache → kana → ask. Says nothing
+// about whether the video counts; see classifyNow.
+function languageVerdict(resp, meta) {
+  const tracks  = tracksFromResponse(resp);
+  const asrLang = asrLanguage(tracks);
+  const dubLang = selectedAudioLang();
 
   if (dubLang && dubLang !== "ja" && asrLang === "ja") {
     return { verdict: "other", reason: `dubbed (${dubLang})`, meta, settled: true };
@@ -362,6 +463,7 @@ const state = {
   title:      "",
   channel:    "",
   blocked:    false,   // this channel carries a "never" rule
+  music:      null,    // "sure" (off) | "maybe" (asking) | null — see Music above
   verdict:    "unknown",
   reason:     "",
   override:   null,     // true = count anyway, false = never count, null = auto
@@ -447,7 +549,8 @@ function tickAccrual() {
     ? { ok: false, why: "manual timer" }
     : tracking()
       ? accrualGate(video)
-      : { ok: false, why: state.verdict === "unknown" ? "unsure" : "not Japanese" };
+      : { ok: false, why: state.music === "sure" ? "music"
+                        : state.verdict === "unknown" ? "unsure" : "not Japanese" };
   state.gateWhy = gate.why;
 
   // Sampled before any early return — see mediaAdvanced.
@@ -703,12 +806,18 @@ function buildChip() {
 
 // Click cycles auto → count anyway → never count → auto, and remembers the
 // channel. Ambiguity gets surfaced rather than threshold-tuned.
+//
+// Except on a song: a click there is about THIS song. Written to the channel it
+// would decide every other video from it — "off" on one cover and a singer's
+// uncaptioned talk streams stop counting.
 function cycleOverride() {
   if (state.override === null)       state.override = true;
   else if (state.override === true)  state.override = false;
   else                               state.override = null;
 
-  if (state.override !== null) rememberChannel(state.channelId, state.override, state.channel);
+  if (state.override !== null && !state.music) {
+    rememberChannel(state.channelId, state.override, state.channel);
+  }
   console.log(LOG, "override →", state.override);
   render();
 }
@@ -771,7 +880,9 @@ function render() {
   }
 
   if (state.verdict === "unknown" && state.override === null) {
-    el.textContent   = "? Japanese — click to count";
+    el.textContent   = state.music === "maybe"
+      ? "? music — click to count"
+      : "? Japanese — click to count";
     el.style.opacity = "0.7";
     return;
   }
@@ -780,10 +891,11 @@ function render() {
     // A blocked channel gets its OWN wording. "not Japanese" would be a lie
     // about the audio — the whole point of the rule is that the audio is
     // Japanese and it still shouldn't count — and a chip that misreports its
-    // reason is how you stop believing the chip.
-    el.textContent   = state.blocked && state.override === null
-      ? "— channel off"
-      : state.override === false ? "— off (click to re-enable)" : "— not Japanese";
+    // reason is how you stop believing the chip. A song is the same case.
+    el.textContent   = state.override === false ? "— off (click to re-enable)"
+      : state.blocked             ? "— channel off"
+      : state.music === "sure"    ? "— music"
+      : "— not Japanese";
     el.style.opacity = "0.55";
     return;
   }
@@ -882,8 +994,21 @@ function probe(expectedId) {
     out.trackCount = tracks.length;
     out.langs = tracks.map(t => (t.kind === "asr" || t.vssId.startsWith("a.") ? "asr:" : "") + t.languageCode).join(",");
     out.asr = asrLanguage(tracks);
+    // The music signals, raw. `hasMicroformat` is there to tell "the category
+    // isn't Music" apart from "this response carries no category at all" — the
+    // player API may serve a slimmer response after an in-page navigation.
+    const m = musicFields(r);
+    out.author         = m.author;
+    out.musicType      = m.type;
+    out.category       = m.category;
+    out.hasMicroformat = m.hasMicroformat;
+    const mv = musicFromResponse(r);
+    out.music = mv ? `${mv.level}: ${mv.why}` : null;
   } catch (e) { out.trackErr = String(e); }
   try { out.audio = selectedAudioLang(); } catch {}
+  // Not used by the ladder — logged to see whether autoplay Mixes (list=RD…)
+  // are worth a rung of their own.
+  try { out.list = new URL(location.href).searchParams.get("list"); } catch {}
   return out;
 }
 
@@ -905,6 +1030,7 @@ function scheduleClassify(attempt = 0) {
   state.verdict = res.verdict;
   state.reason  = res.reason;
   state.blocked = !!res.blocked;
+  state.music   = res.music || null;
 
   if (res.settled) {
     state.checking = false;
@@ -912,6 +1038,10 @@ function scheduleClassify(attempt = 0) {
       rememberChannel(res.meta.channelId, res.verdict === "ja", res.meta.channel);
     }
     console.log(LOG, "classified", forId, res.verdict, "—", res.reason);
+    // Again at settle, not just attempt 0: after an in-page navigation the first
+    // probe usually runs before the player has caught up, so its fields are
+    // empty — this is the one that shows what the verdict was read from.
+    if (DEBUG) console.log(LOG, "probe", probe(forId));
     if (tracking() && !state.announceUntil) state.announceUntil = Date.now() + ANNOUNCE_MS;
     render();
     return;
@@ -952,6 +1082,7 @@ function onNavigate() {
   state.title         = "";
   state.channel       = "";
   state.blocked       = false;
+  state.music         = null;
   state.verdict       = "unknown";
   state.reason        = "";
   state.override      = null;

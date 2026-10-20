@@ -247,6 +247,21 @@ values are observations the tracker may revise; `"never"` is the user's rule, so
 verdict) **must refuse to overwrite it**. Without that guard the next video from
 a blocked channel silently unblocks it.
 
+Songs get the same treatment for the same reason — a Japanese song's ASR verdict
+is a correct `ja`, so the rule has to sit above it. `classifyNow` in
+[yt-track.js](ext/yt-track.js) now wraps a pure language layer
+(`languageVerdict`) with the counts-or-not rules, and music is the second of
+those, in two tiers: YouTube's own label (`" - Topic"` auto-channels, or a
+`musicVideoType` of album track / official video) turns the video off; the
+uploader's "Music" category, or a fan-upload type, only **asks** on the chip.
+`MUSIC_VIDEO_TYPE_PODCAST_EPISODE` is deliberately not music. **Nothing a song
+teaches reaches the channel cache** — neither the automatic write-back
+(`cacheable` is forced false) nor a chip click — because an `other` learned from
+one English cover would stop that channel's uncaptioned Japanese talk streams
+counting. Whether `musicVideoType` and the microformat category actually arrive
+on youtube.com after an in-page navigation is unverified; the `ytDebug` probe
+logs both raw, and an absent field just means that tier never fires.
+
 ### The inbox distributes settings, it doesn't hold them
 
 The desktop is the sole source of anything a capturing device needs to know, and

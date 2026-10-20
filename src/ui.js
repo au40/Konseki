@@ -4778,13 +4778,23 @@ function makeMediaCard(m) {
 // progress then shows no line — it's the default and needs no marker — and On
 // hold / Dropped draw full-width so their colour still shows. Series cards use
 // the same line with the series' status and progress.
+//
+// Length runs over the visible part of the line, not the full width: the
+// rounded corners hide its first and last few px, so a few percent at either
+// end used to read as empty or as finished. The .media-card-line rule turns
+// --p into a width that starts just past where the line's top edge comes into
+// view.
 function cardLineHTML(status, pct, color) {
   if (status === 'completed' || (pct == null && status !== 'in_progress')) pct = 100;
   if (pct == null) return '';
   const fill = {
     in_progress: color, completed: 'var(--success)', on_hold: 'var(--warn)', dropped: 'var(--dim)',
   }[status];
-  return `<div class="media-card-line"><i style="width:${pct}%;background:${fill}"></i></div>`;
+  // The ends are plain widths: the inset leaves a visible speck either side,
+  // which done would show as an unfilled sliver and 0 as a filled one.
+  const p = Math.min(Math.max(pct, 0), 100) / 100;
+  const len = p >= 1 ? 'width:100%' : p <= 0 ? 'width:0' : `--p:${+p.toFixed(4)}`;
+  return `<div class="media-card-line"><i style="${len};background:${fill}"></i></div>`;
 }
 
 function cardLayerHTML(member) {

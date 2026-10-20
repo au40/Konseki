@@ -21,6 +21,8 @@ const scenario = {
   title:       '',
   channelId:   '',
   author:      '',
+  musicType:   '',         // videoDetails.musicVideoType
+  category:    '',         // microformat.playerMicroformatRenderer.category
   audioTrack:  null,
   noPlayerApi: false,      // force the window.ytInitialPlayerResponse fallback
   globalResp:  null,       // window.ytInitialPlayerResponse
@@ -34,7 +36,9 @@ function playerResp() {
       title:     scenario.title,
       channelId: scenario.channelId,
       author:    scenario.author,
+      musicVideoType: scenario.musicType || undefined,
     },
+    microformat: { playerMicroformatRenderer: { category: scenario.category } },
     captions: { playerCaptionsTracklistRenderer: { captionTracks: scenario.tracklist } },
   };
 }
@@ -116,6 +120,7 @@ const man = (lang) => ({ languageCode: lang, vssId: '.' + lang, kind: '' });
 
 const BASE = {
   videoId: 'vid001', tracklist: [], title: '', channelId: '', author: '',
+  musicType: '', category: '',
   audioTrack: null, noPlayerApi: false, globalResp: null,
 };
 
@@ -190,6 +195,69 @@ rememberChannel('UCtrans', true, 'Translation Channel');
 assert.strictEqual(vm.runInContext("channelCache['UCtrans']", ctx), 'never',
   'the ASR write-back must not overwrite a "never" rule');
 console.log('  ok  the ASR write-back cannot unblock a channel');
+
+// --- 3c. music -- Japanese audio that still doesn't count ---------------------
+// Same shape as "never": the language verdict stays honest (a Japanese song's
+// ASR really is `ja`) and a separate rung decides it doesn't count. "sure" is
+// YouTube's own label and turns the video off; "maybe" is the uploader's category
+// and only asks.
+check('Topic channel beats ASR ja',
+  { tracklist: [asr('ja')], author: 'YOASOBI - Topic' },          'other',   /music: Topic channel/);
+check('official music video beats ASR ja',
+  { tracklist: [asr('ja')], musicType: 'MUSIC_VIDEO_TYPE_OMV' },  'other',   /music: music video/);
+check('album track, no ASR',
+  { musicType: 'MUSIC_VIDEO_TYPE_ATV' },                          'other',   /music: album track/);
+check('"Topic" elsewhere in the name is not a Topic channel',
+  { tracklist: [asr('ja')], author: 'Topic Talk Radio' },         'ja',      /ASR ja/);
+
+// A Japanese podcast is exactly what the tracker is for -- YouTube Music labels
+// those too, and the label must not read as "music".
+check('podcast episode type is not music',
+  { tracklist: [asr('ja')], musicType: 'MUSIC_VIDEO_TYPE_PODCAST_EPISODE' }, 'ja', /ASR ja/);
+
+check('fan upload asks',
+  { tracklist: [asr('ja')], musicType: 'MUSIC_VIDEO_TYPE_UGC' },  'unknown', /music\? fan upload/);
+check('Music category asks instead of counting',
+  { tracklist: [asr('ja')], category: 'Music' },                  'unknown', /music\? Music category · ASR ja/);
+check('Japanese-UI category spelling asks too',
+  { tracklist: [asr('ja')], category: '音楽' },                    'unknown', /music\?/);
+check('Music category, remembered ja channel, asks',
+  { title: 'no captions', channelId: 'UCtest', category: 'Music' }, 'unknown', /music\?.*remembered/);
+// Nothing to ask about: it wasn't going to count anyway.
+check('Music category, English ASR, is just not Japanese',
+  { tracklist: [asr('en')], category: 'Music' },                  'other',   /^ASR en$/);
+check('other categories change nothing',
+  { tracklist: [asr('ja')], category: 'Entertainment' },          'ja',      /ASR ja/);
+// The rule still outranks the label: a blocked channel says "channel off".
+check('never beats music',
+  { tracklist: [asr('ja')], channelId: 'UCtrans', author: 'X - Topic' }, 'other', /channel off/);
+
+{
+  const run = (setup) => { Object.assign(scenario, BASE, setup); return classifyNow(); };
+
+  const sure = run({ tracklist: [asr('ja')], author: 'YOASOBI - Topic', channelId: 'UCtopic' });
+  assert.strictEqual(sure.music, 'sure', 'a sure verdict must be flagged for the chip');
+  assert.strictEqual(sure.settled, true);
+  assert.ok(!sure.cacheable, 'a song must not teach the channel cache');
+
+  // THE silent-failure mode for the maybe tier: the ASR rung marks its verdict
+  // cacheable, and a song riding through it would write that channel's verdict.
+  // An `other` from one English cover stops its Japanese talk streams counting.
+  for (const asrLang of ['ja', 'en']) {
+    const maybe = run({ tracklist: [asr(asrLang)], category: 'Music', channelId: 'UCsinger' });
+    assert.ok(!maybe.cacheable, `a Music-category video (ASR ${asrLang}) must not teach the channel cache`);
+  }
+  const asking = run({ tracklist: [asr('ja')], category: 'Music' });
+  assert.strictEqual(asking.music, 'maybe');
+  assert.strictEqual(asking.settled, true, 'an answered question stops polling');
+
+  // No ASR keeps the language layer's early-stop polling exactly as it was.
+  const noAsr = run({ category: 'Music' });
+  assert.strictEqual(noAsr.music, 'maybe');
+  assert.strictEqual(noAsr.settled, false);
+  assert.strictEqual(noAsr.validated, true);
+  console.log('  ok  music verdicts are flagged and never written back to the channel');
+}
 
 // --- 4. the SPA navigation contract -------------------------------------------
 // REGRESSION, broken twice. First cut read getOption('captions','tracklist'),
@@ -288,6 +356,24 @@ Object.assign(scenario, BASE, { tracklist: [asr('ja')] });
 assert.doesNotThrow(() => probe('vid001'), 'probe() threw');
 assert.strictEqual(probe('vid001').asr, 'ja', 'probe should report the ASR language');
 console.log('  ok  probe reports without throwing');
+
+// The probe is how the music signals get checked against real pages, so it has
+// to show the raw fields -- including whether a category was sent at all.
+Object.assign(scenario, BASE, { tracklist: [asr('ja')], author: 'A - Topic', category: 'Music' });
+let pr = probe('vid001');
+assert.strictEqual(pr.author, 'A - Topic');
+assert.strictEqual(pr.category, 'Music');
+assert.strictEqual(pr.hasMicroformat, true);
+assert.strictEqual(pr.music, 'sure: Topic channel');
+scenario.href = 'https://www.youtube.com/watch?v=vid001&list=RDabc';
+assert.strictEqual(probe('vid001').list, 'RDabc', 'probe should report the playlist id');
+scenario.href = 'https://www.youtube.com/watch?v=vid001';
+Object.assign(scenario, BASE, { noPlayerApi: true,
+  globalResp: { videoDetails: { videoId: 'vid001' } } });
+pr = probe('vid001');
+assert.strictEqual(pr.hasMicroformat, false, 'a response with no microformat must say so');
+assert.strictEqual(pr.music, null);
+console.log('  ok  probe reports the music fields');
 
 // --- 7. the chip renders in every state --------------------------------------
 for (const label of ['tracked', 'unsure', 'off']) {
@@ -633,6 +719,7 @@ async function manualYield() {
   await dayTotalDisplay();
   await manualYield();
   await channelRules();
+  musicRules();
 }
 
 // --- 9. channel rules, live ---------------------------------------------------
@@ -714,6 +801,55 @@ async function channelRules() {
   assert.strictEqual(accrue.video.channelId, 'UCsome');
   assert.strictEqual(accrue.video.why,       'ASR ja');
   console.log('  ok  accrual batches name the video they came from');
+}
+
+// --- 10. music, live ----------------------------------------------------------
+function musicRules() {
+  const cycle = sandbox.cycleOverride;
+  const cache = () => vm.runInContext('channelCache', ctx);
+
+  // Same reason a blocked channel has its own wording: the audio IS Japanese.
+  resetAccrual();
+  Object.assign(st, { videoId: 'vid020', channelId: 'UCtopic', verdict: 'other',
+                      override: null, blocked: false, music: 'sure', checking: false });
+  draw();
+  assert.strictEqual(getChip().textContent, '— music',
+    `a song should say so, got ${JSON.stringify(getChip().textContent)}`);
+  tick(1); tick(1);
+  assert.strictEqual(st.secs, 0, 'a sure song must not accrue');
+  console.log('  ok  a song says "music" and accrues nothing');
+
+  resetAccrual();
+  Object.assign(st, { videoId: 'vid021', channelId: 'UCsinger', verdict: 'unknown',
+                      override: null, blocked: false, music: 'maybe', checking: false });
+  draw();
+  assert.strictEqual(getChip().textContent, '? music — click to count',
+    `a maybe-song should ask as music, got ${JSON.stringify(getChip().textContent)}`);
+  tick(1); tick(1);
+  assert.strictEqual(st.secs, 0, 'an unanswered music prompt must not accrue');
+
+  // "count anyway" counts -- and is about THIS song only. Remembering it would
+  // decide every other video from the channel; the "off" click is the dangerous
+  // one, marking a singer's uncaptioned talk streams not Japanese.
+  delete cache()['UCsinger'];
+  cycle();
+  assert.strictEqual(st.override, true);
+  tick(1); tick(1);
+  assert.ok(st.secs > 0, '"count anyway" on a music prompt must accrue');
+  cycle();
+  assert.strictEqual(st.override, false);
+  assert.strictEqual(cache()['UCsinger'], undefined,
+    'a click on a song must not be remembered for the channel');
+  cycle();
+  console.log('  ok  a music prompt counts on click, and the click stays with the song');
+
+  // Pinned so the guard above doesn't creep: an ordinary video's click still
+  // remembers the channel, as it always has.
+  Object.assign(st, { channelId: 'UCplain', music: null, override: null });
+  cycle();
+  assert.strictEqual(cache()['UCplain'], 'ja', 'a non-music click still remembers the channel');
+  st.override = null;
+  console.log('  ok  clicks on ordinary videos still remember the channel');
 }
 
 accrualChecks()
