@@ -4570,37 +4570,51 @@ async function loadMedia() {
   renderMediaGrid();
 }
 
+// The grid's cards in natural order: series first, then titles outside any
+// series by total_secs DESC (get_media's own order).
+//
+// Under All every series is one stack. Under a status, a series contributes
+// only its matching volumes: two or more stay together as a stack of just
+// those (badged "2/3"), a lone match shows as its own card. Volumes, not
+// series, are what the chip counts count, so a half-finished series shows a
+// different slice under each filter rather than the same stack under two.
+// Every piece of a series keeps the series' order key, so it sits where the
+// series sits in the manual order instead of falling to the end.
+function mediaGridItems(media, series, want) {
+  const matches  = m => want === 'all' || mediaStatusOf(m) === want;
+  const byTitle  = new Map(media.map(m => [m.title, m]));
+  const inSeries = new Set(series.flatMap(s => s.members.map(x => x.title)));
+  const items = [];
+  series.forEach(s => {
+    const key = `s:${s.id}`;
+    if (want === 'all') { items.push({ key, kind: 'series', data: s }); return; }
+    const shown = s.members.filter(x => byTitle.has(x.title) && matches(byTitle.get(x.title)));
+    if (shown.length > 1)        items.push({ key, kind: 'series', data: s, shown });
+    else if (shown.length === 1) items.push({ key, kind: 'title',  data: byTitle.get(shown[0].title) });
+  });
+  media.forEach(m => {
+    if (!inSeries.has(m.title) && matches(m)) items.push({ key: `t:${m.title}`, kind: 'title', data: m });
+  });
+  return items;
+}
+
 function renderMediaGrid() {
   const grid = document.getElementById('media-grid');
 
-  // Titles that belong to a series — hidden as standalone cards
-  const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
   const filtered = mediaAllData.filter(m => !isGridHidden(m));
   renderMediaStatusSeg(filtered);
 
-  // Status filter. Under All, series stay stacked; under a status, they unpack
-  // and their matching volumes show as cards of their own — the chip counts are
-  // per volume, so this is what makes the cards add up to the count, and a
-  // half-finished series no longer shows the same stack under two filters.
   const want    = mediaStatusFilter;
-  const matches = m => want === 'all' || mediaStatusOf(m) === want;
   const byTitle = new Map(filtered.map(m => [m.title, m]));
-  const series  = want === 'all' ? seriesData : [];
-  const ungrouped = filtered.filter(m => (want !== 'all' || !inSeries.has(m.title)) && matches(m));
+  const natural = mediaGridItems(filtered, seriesData, want);
 
   grid.innerHTML = '';
-  if (!ungrouped.length && !series.length) {
+  if (!natural.length) {
     grid.innerHTML = want === 'all'
       ? '<p class="empty-msg">No media found.</p>'
       : `<p class="empty-msg">Nothing ${MEDIA_STATUS_LABEL[want].toLowerCase()}.</p>`;
     return;
   }
-
-  // Natural order: series first, then ungrouped titles by total_secs DESC.
-  const natural = [
-    ...series.map(s => ({ key: `s:${s.id}`, kind: 'series', data: s })),
-    ...ungrouped.map(m => ({ key: `t:${m.title}`, kind: 'title',  data: m })),
-  ];
 
   // Manual order overrides natural for items present in mediaOrderMap.
   const ordered = [...natural].sort((a, b) => {
@@ -4616,7 +4630,7 @@ function renderMediaGrid() {
     const canLeft  = idx > 0;
     const canRight = idx < ordered.length - 1;
     const el = item.kind === 'series'
-      ? makeSeriesCard(item.data, byTitle)
+      ? makeSeriesCard(item.data, byTitle, item.shown)
       : makeMediaCard(item.data);
     // Reordering only under All: shiftMediaCard swaps neighbours in the FULL
     // order, so in a filtered view the swap could land on a hidden card and
@@ -4809,40 +4823,55 @@ function cardLayerHTML(member) {
     </div>`;
 }
 
-function makeSeriesCard(s, byTitle = new Map()) {
-  const members = s.members;
-  const front  = members[0];
-  const mid    = members[1];
-  // Status and progress come from the volumes' grid data; a volume missing
-  // from it (hidden source) simply doesn't count.
-  const vols   = members.map(x => byTitle.get(x.title)).filter(Boolean);
+// What a series card shows. `shown` is the volumes on the card: the whole
+// series under All, or the ones matching a status filter (mediaGridItems).
+// Everything comes from the volumes' own grid data, so a stack adds up to the
+// cards it holds — time included, manual shaves and all, which get_series'
+// raw session sum doesn't carry. A volume missing from the grid data (hidden
+// source) counts for nothing here. A partial stack is badged shown/total,
+// where total is the volumes that can carry a status: one that never appears
+// under any filter (an anime adaptation) can't be one of the missing.
+function seriesCardFacts(s, byTitle, shown = s.members) {
+  const all  = s.members.map(x => byTitle.get(x.title)).filter(Boolean);
+  const vols = shown.map(x => byTitle.get(x.title)).filter(Boolean);
   const status = seriesStatusOf(vols);
+  const badge = shown.length < s.members.length
+    ? `${shown.length}/${all.filter(hasMediaStatus).length}`
+    : s.members.length > 1 ? String(s.members.length) : '';
+  return {
+    badge,
+    secs:  vols.reduce((a, m) => a + (m.total_secs || 0), 0),
+    status,
+    pct:   status ? seriesProgressPct(vols) : null,
+    color: status ? acolor((vols.find(hasMediaStatus) || {}).activity_type) : null,
+  };
+}
+
+function makeSeriesCard(s, byTitle = new Map(), shown = s.members) {
+  const front = shown[0];
+  const mid   = shown[1];
+  const f     = seriesCardFacts(s, byTitle, shown);
 
   const el = document.createElement('div');
   el.className = 'series-stack';
   el.dataset.seriesId = s.id;
 
-  // Grid icon stacks at most two covers (front + one peek), even for longer
-  // series; the badge still shows the true member count.
+  // Grid icon stacks at most two covers (front + one peek) from the volumes on
+  // the card, even for longer series; the badge carries the count.
   let html = '';
   if (mid)   html += `<div class="series-layer series-layer-mid">${cardLayerHTML(mid)}</div>`;
   html += `<div class="series-layer series-layer-front">${cardLayerHTML(front)}</div>`;
 
-  if (members.length > 1) {
-    html += `<div class="series-badge">${members.length}</div>`;
-  }
+  if (f.badge) html += `<div class="series-badge">${f.badge}</div>`;
   html += `
     <div class="media-card-footer">
       <div class="media-card-title">${escHtml(s.name)}</div>
       <div class="media-card-meta">
-        <span class="media-card-time">${fmtTime(s.total_secs)}</span>
+        <span class="media-card-time">${fmtTime(f.secs)}</span>
         <span class="media-card-source">Series</span>
       </div>
     </div>`;
-  if (status) {
-    const color = acolor((vols.find(hasMediaStatus) || {}).activity_type);
-    html += cardLineHTML(status, seriesProgressPct(vols), color);
-  }
+  if (f.status) html += cardLineHTML(f.status, f.pct, f.color);
 
   el.innerHTML = html;
   el.onclick = () => openSeriesDetail(s.id);

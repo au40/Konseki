@@ -729,10 +729,22 @@ would drift from the per-volume completion the catalog counts. Consequences:
   ([db.py](src/db.py)), in one transaction. Completed marks them all; any other
   pick spares volumes already Completed, so dropping a series never erases what
   was finished.
-- Under a status filter the grid **unpacks** series into their matching volumes.
-  The chip counts are per volume, and this is what keeps cards and counts in
-  agreement. Under All they stay stacked, with the edge line drawn from the
-  derived status and the same progress basis as the series page's bar.
+- Under a status filter a series shows **only its matching volumes**
+  (`mediaGridItems` in [ui.js](src/ui.js)): two or more stay grouped as a stack
+  of just those, badged `shown/total`; a lone match is a plain volume card. Both
+  keep the series' manual-order slot. The chip counts stay per volume — a
+  stack's badge is what makes the cards add up to the count, the same way All
+  already counts volumes while showing stacks. `total` counts only volumes that
+  can carry a status, so an anime adaptation in a novel series never reads as
+  one of the missing. Clicking a partial stack opens the **whole** series page,
+  not a filtered one: the series pill there writes every volume, and a page
+  showing a slice would invite reading a pick as slice-only. Under All the
+  stack is the whole series, with the edge line drawn from the derived status
+  and the same progress basis as the series page's bar.
+- **A series card's time is summed from its volumes' grid cards**
+  (`seriesCardFacts`), never `get_series_data`'s `total_secs`. That figure is a
+  raw `SUM(time_seconds)` with no manual shave, so the card used to show more
+  time than the volumes inside it. The portal chips sum the same way.
 - Accepted gap: between volumes, a series whose known volumes are all done reads
   Completed until the next volume is dragged in.
 

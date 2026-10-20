@@ -114,6 +114,7 @@ const PROBE = `
   hexMix, contrastRatio, textCustomPair,
   get appSettings() { return appSettings; }, set appSettings(v) { appSettings = v; },
   goalHasPeriodLine, goalDailyShare, fmtGoalMetric, todayGoalRows,
+  mediaGridItems, seriesCardFacts,
 };`;
 
 try {
@@ -814,6 +815,49 @@ const hb250 = P.hourBlockBars([{ index: 2, days: 10, active_days: 9, hours: 250,
 check('block size drives the mark, not the row', hb250.labels[0], '500h');
 
 check('no blocks yields no bars', P.hourBlockBars([], 100).labels.length, 0);
+
+// mediaGridItems / seriesCardFacts -- under a status filter a series shows only
+// its matching volumes: 2+ stay a stack badged shown/total, one is a plain card.
+console.log('\n--- media grid: series group by status ---');
+const vol = (title, status, secs, extra = {}) =>
+  ({ title, status, total_secs: secs, activity_type: 'Reading', total_chars: 100, ...extra });
+const gridMedia = [
+  vol('A1', 'completed', 100), vol('A2', 'completed', 200), vol('A3', 'in_progress', 300),
+  vol('Anime', null, 50, { activity_type: 'Anime', total_chars: 0 }),
+  vol('B1', 'dropped', 40), vol('B2', 'on_hold', 60),
+  vol('Solo', 'completed', 70),
+];
+const gridSeries = [
+  { id: 1, name: 'A', total_secs: 9999, members: ['A1', 'A2', 'A3', 'Anime'].map(title => ({ title })) },
+  { id: 2, name: 'B', total_secs: 9999, members: ['B1', 'B2'].map(title => ({ title })) },
+];
+const gridByTitle = new Map(gridMedia.map(m => [m.title, m]));
+const summary = items => items.map(i =>
+  `${i.kind}:${i.key}${i.shown ? '[' + i.shown.map(x => x.title).join(',') + ']' : ''}`).join(' ');
+
+check('All: every series is one whole stack, then titles outside a series',
+  summary(P.mediaGridItems(gridMedia, gridSeries, 'all')), 'series:s:1 series:s:2 title:t:Solo');
+check('Completed: two matching volumes stay a stack of just those',
+  summary(P.mediaGridItems(gridMedia, gridSeries, 'completed')), 'series:s:1[A1,A2] title:t:Solo');
+check('In progress: a lone match is a plain card in its series\' slot',
+  summary(P.mediaGridItems(gridMedia, gridSeries, 'in_progress')), 'title:s:1');
+check('...carrying the volume itself',
+  P.mediaGridItems(gridMedia, gridSeries, 'in_progress')[0].data.title, 'A3');
+check('a series with no match contributes nothing',
+  summary(P.mediaGridItems(gridMedia, gridSeries, 'on_hold')), 'title:s:2');
+
+const shownA = gridSeries[0].members.slice(0, 2);
+const partial = P.seriesCardFacts(gridSeries[0], gridByTitle, shownA);
+check('a partial stack is badged shown/total, the anime not counted', partial.badge, '2/3');
+check('...its time is just its own volumes', partial.secs, 300);
+check('...and its line is the filter\'s status', partial.status, 'completed');
+const whole = P.seriesCardFacts(gridSeries[0], gridByTitle);
+check('a whole series keeps the plain member count', whole.badge, '4');
+check('a whole series\' time is its volume cards summed, not get_series\' raw total', whole.secs, 650);
+check('a status-less volume on its own draws no line',
+  P.seriesCardFacts(gridSeries[0], gridByTitle, [{ title: 'Anime' }]).status, null);
+check('a volume missing from the grid data adds no time',
+  P.seriesCardFacts({ members: [{ title: 'A1' }, { title: 'gone' }] }, gridByTitle).secs, 100);
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);
