@@ -2279,15 +2279,18 @@ async function loadStats(range_val) {
       statsCache[customBase] = await window.pywebview.api.get_stats(customBase);
     }
     renderClientStats();
-    return;
+  } else {
+    if (!statsCache[range_val]) {
+      statsCache[range_val] = await window.pywebview.api.get_stats(range_val);
+      const others = ['30d','90d','6m','1y','All'].filter(r => r !== range_val);
+      setTimeout(() => prefetchStats(others, 0), 500);
+    }
+    rerenderActiveStats();   // backend-exact cards unless an activity filter is on
   }
-
-  if (!statsCache[range_val]) {
-    statsCache[range_val] = await window.pywebview.api.get_stats(range_val);
-    const others = ['30d','90d','6m','1y','All'].filter(r => r !== range_val);
-    setTimeout(() => prefetchStats(others, 0), 500);
-  }
-  rerenderActiveStats();   // backend-exact cards unless an activity filter is on
+  // All-time views, independent of the range selector and the brush/filter
+  // render path — drawn on every Stats load (and so on the daily rollover
+  // reload), refetched only when the logical day has moved on.
+  renderShowcase();
 }
 
 function prefetchStats(ranges, idx) {
@@ -2460,9 +2463,6 @@ function renderStats(d) {
   renderDailyChart(d.daily);
   renderDowChart(d.daily);
   renderDonutChart(d.activity);
-  // All-time views; independent of the range selector, so fetched once and
-  // cached rather than refetched on every range change.
-  renderShowcase();
 }
 
 // ── Charts ─────────────────────────────────────────────────────────────────
@@ -3068,13 +3068,30 @@ function renderDonutChart(activity) {
 }
 
 // ── Lifetime showcase charts ───────────────────────────────────────────────
-// Four all-time views that deliberately ignore the range selector. Fetched
-// once per Stats load in a single round trip (Api.get_showcase); only the block
-// chart re-fetches, and only when its size seg changes.
+// Four all-time views that deliberately ignore the range selector. Fetched in a
+// single round trip (Api.get_showcase) and refetched when either stamp goes
+// stale — not on every Stats load, since a range click goes through loadStats
+// too and would recompute four unchanged all-time charts:
+//  - showcaseFor: the statsCache object it was fetched under. Every data change
+//    (ingest, delete, edit, import) invalidates with `statsCache = {}`, a new
+//    object, so this follows all of them without a second clear at each site.
+//  - showcaseDay: the logical day. With no data change the views still move at
+//    the rollover (the in-progress hour block, today's week); the daily reload
+//    in scheduleRolloverRefresh is what brings an open Stats page across it.
+// Otherwise only the block chart re-fetches, when its size seg changes.
 let showcaseCache = null;
+let showcaseFor   = null;   // statsCache object showcaseCache was fetched under
+let showcaseDay   = null;   // logical day showcaseCache was fetched on
 
 async function renderShowcase() {
-  if (!showcaseCache) showcaseCache = await window.pywebview.api.get_showcase();
+  if (!showcaseCache || showcaseFor !== statsCache || showcaseDay !== today()) {
+    const gen = statsCache, day = today();
+    // Current block size, not the default: a refetch must not snap the chart
+    // back to 100h while the seg still shows the user's pick.
+    showcaseCache = await window.pywebview.api.get_showcase(blockHours);
+    showcaseFor   = gen;
+    showcaseDay   = day;
+  }
   const d = showcaseCache || {};
   renderHourBlocksChart(d.blocks || []);
   renderStreamsChart(d.streams || { dates: [], series: [] });

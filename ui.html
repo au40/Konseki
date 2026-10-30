@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Konseki</title>
+<script src="assets/chart.umd.min.js"></script>
+<link rel="stylesheet" href="assets/dark.min.css">
+<script src="assets/flatpickr.min.js"></script>
+<link rel="stylesheet" href="ui.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Sidebar ─────────────────────────────────────────────────────────── -->
+  <nav class="sidebar">
+    <div class="sidebar-logo">
+      <div class="name-jp">痕跡</div>
+    </div>
+    <div class="nav-item active" data-page="dashboard" onclick="navigate('dashboard')">
+      <span class="nav-icon">◈</span>Dashboard
+    </div>
+    <div class="nav-item" data-page="log" onclick="navigate('log')">
+      <span class="nav-icon">＋</span>Log entry
+    </div>
+    <div class="nav-item" data-page="history" onclick="navigate('history')">
+      <span class="nav-icon">≡</span>History
+    </div>
+    <div class="nav-item" data-page="stats" onclick="navigate('stats')">
+      <span class="nav-icon">◎</span>Stats
+    </div>
+    <div class="nav-item" data-page="goals" onclick="navigate('goals')">
+      <span class="nav-icon">◉</span>Goals
+    </div>
+    <div class="nav-item" data-page="media" onclick="navigate('media')">
+      <span class="nav-icon">▦</span>Media
+    </div>
+    <div class="nav-item" data-page="catalog" onclick="navigate('catalog')">
+      <span class="nav-icon">▤</span>Catalog
+    </div>
+    <div class="nav-item" data-page="settings" onclick="navigate('settings')">
+      <span class="nav-icon">⚙</span>Settings
+    </div>
+    <div class="nav-item" data-page="dev" onclick="navigate('dev')">
+      <span class="nav-icon">⌗</span>Dev
+    </div>
+    <div class="sidebar-actions">
+      <button class="sidebar-action-btn" id="pull-btn" onclick="doPullGSM()">↻ Pull GSM</button>
+      <button class="sidebar-action-btn" id="ttsu-btn"
+              onclick="doOpenTtsuZip()"
+              ondragover="event.preventDefault(); this.classList.add('drag-over')"
+              ondragleave="this.classList.remove('drag-over')"
+              ondrop="doDropTtsuZip(event)">⬇ Drag ttsu log zip here</button>
+      <div class="feedback" id="ttsu-feedback" style="margin-top:4px;min-height:14px"></div>
+    </div>
+    <div class="sidebar-status" id="status">Loading…</div>
+  </nav>
+
+  <!-- ── Content ─────────────────────────────────────────────────────────── -->
+  <main class="content">
+
+    <!-- ── Dashboard ─────────────────────────────────────────────────────── -->
+    <div id="page-dashboard" class="page active">
+      <div class="page-header">
+        <h1>Today</h1>
+        <div class="right">
+          <span class="muted" id="today-date"></span>
+        </div>
+      </div>
+      <div class="stat-grid">
+        <div class="stat-card"><div class="label">Time today</div>
+          <div class="value" id="d-time" style="color:var(--accent)">—</div></div>
+        <div class="stat-card"><div class="label">Characters</div>
+          <div class="value" id="d-chars" style="color:var(--success)">—</div></div>
+        <div class="stat-card"><div class="label">Chars/hour</div>
+          <div class="value" id="d-lines" style="color:var(--warn)">—</div></div>
+        <div class="stat-card"><div class="label">Streak</div>
+          <div class="value" id="d-days" style="color:var(--purple)">—</div></div>
+      </div>
+      <h2>Today's sessions</h2>
+      <div class="session-list" id="today-sessions"></div>
+      <h2>Last 7 days</h2>
+      <div class="weekly-bars" id="weekly-bars"></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0 8px">
+        <h2 style="margin:0">Activity heatmap</h2>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn btn-outline btn-sm" onclick="changeDashHeatmapYear(-1)">←</button>
+          <span id="dash-heatmap-year" style="font-size:13px;font-weight:600;color:var(--text);min-width:36px;text-align:center"></span>
+          <button class="btn btn-outline btn-sm" id="dash-heatmap-next" onclick="changeDashHeatmapYear(1)">→</button>
+        </div>
+      </div>
+      <div class="heatmap-wrap"><div id="heatmap-dash"></div></div>
+    </div>
+
+    <!-- ── Log entry ─────────────────────────────────────────────────────── -->
+    <div id="page-log" class="page">
+      <div class="page-header"><h1>Log entry</h1></div>
+      <p class="muted" style="margin:6px 0 20px">Manually record an immersion session.</p>
+      <div class="card" style="margin-bottom:16px">
+        <div class="form-group">
+          <label>Activity type</label>
+          <div class="pill-group" id="atype-pills"></div>
+        </div>
+        <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+          <div class="form-group" style="width:140px;flex-shrink:0">
+            <label>Time (minutes)</label>
+            <input type="number" id="log-minutes" min="1" oninput="updateCharsHint()">
+          </div>
+          <div class="form-group" id="log-chars-group" style="display:none;width:140px;flex-shrink:0">
+            <label>Characters (optional)</label>
+            <input type="number" id="log-chars" min="0" oninput="updateCharsHint()">
+          </div>
+          <div class="form-group" id="log-cph-group" style="display:none;width:140px;flex-shrink:0">
+            <label>Chars / hour (optional)</label>
+            <input type="number" id="log-cph" min="0" oninput="updateCharsHint()">
+          </div>
+          <div class="form-group" style="flex:1;min-width:200px">
+            <label>Title / media (optional)</label>
+            <input type="text" id="log-title" list="media-titles" placeholder="Type, or pick existing media">
+            <datalist id="media-titles"></datalist>
+          </div>
+        </div>
+        <div id="log-chars-hint" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
+        <div class="form-group" style="max-width:180px">
+          <label>Date</label>
+          <input type="text" id="log-date">
+        </div>
+        <div class="feedback" id="log-feedback"></div>
+        <button class="btn btn-primary" style="margin-top:4px" onclick="doLogSession()">Add entry</button>
+      </div>
+
+      <h2 style="display:flex;align-items:center;gap:7px">Total time log<span
+        style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;border:1px solid var(--dim);color:var(--dim);font-size:10px;font-style:italic;font-weight:700;cursor:help"
+        title="Paste your reading app's running total — it logs the difference since your last entry. The totals are kept privately just to compute the next diff; only the difference is logged.">i</span></h2>
+      <div class="card" style="margin-bottom:16px">
+        <div class="form-group">
+          <label>Totals are tracked</label>
+          <div class="pill-group" id="tlog-mode-pills">
+            <button class="pill active" id="tlog-mode-global" onclick="toggleTotalLogMode('global')">Globally</button>
+            <button class="pill" id="tlog-mode-permedia" onclick="toggleTotalLogMode('per_media')">Per media</button>
+          </div>
+        </div>
+        <div class="muted" id="tlog-baseline" style="margin:-4px 0 14px;font-size:13px"></div>
+        <div style="display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap">
+          <div class="form-group" style="width:140px;flex-shrink:0">
+            <label>New total time (H:MM:SS)</label>
+            <input type="text" id="tlog-time" oninput="updateTotalLogPreview()">
+          </div>
+          <div class="form-group" style="width:150px;flex-shrink:0">
+            <label>New total chars (optional)</label>
+            <input type="number" id="tlog-chars" min="0" oninput="updateTotalLogPreview()">
+          </div>
+          <div class="form-group" style="width:140px;flex-shrink:0">
+            <label>Chars / hour (optional)</label>
+            <input type="number" id="tlog-cph" min="0" oninput="updateTotalLogPreview()">
+          </div>
+          <div class="form-group" style="flex:1;min-width:200px">
+            <label>Media (optional)</label>
+            <select id="tlog-media" onchange="onTotalLogMediaChange()"></select>
+          </div>
+        </div>
+        <div class="form-group" style="max-width:180px">
+          <label>Date</label>
+          <input type="text" id="tlog-date">
+        </div>
+        <div id="tlog-preview" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
+        <div class="feedback" id="tlog-feedback"></div>
+        <div style="display:flex;gap:10px;margin-top:12px;flex-wrap:wrap">
+          <button class="btn btn-primary" id="tlog-submit" onclick="doTotalLog()">Log difference</button>
+          <button class="btn btn-outline" onclick="doSetTotalBaseline()">Set as baseline</button>
+        </div>
+      </div>
+
+      <h2>Custom Categories</h2>
+      <div class="card">
+        <p class="muted" style="margin-bottom:14px">Add your own activity categories alongside the built-in ones.</p>
+        <div class="pill-group" id="custom-cat-list" style="margin-bottom:14px"></div>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end">
+          <div class="form-group" style="margin-bottom:0">
+            <label>Category name</label>
+            <input type="text" id="new-cat-name" maxlength="32">
+          </div>
+          <button class="btn btn-outline" style="height:40px" onclick="doAddCategory()">Add</button>
+        </div>
+        <div style="margin-top:10px">
+          <label class="muted">Color</label>
+          <div class="color-grid" id="cat-color-swatches"></div>
+        </div>
+        <div class="feedback" id="cat-feedback"></div>
+      </div>
+    </div>
+
+    <!-- ── History ────────────────────────────────────────────────────────── -->
+    <div id="page-history" class="page">
+      <div class="page-header"><h1>Session history</h1></div>
+      <p class="muted" style="margin:6px 0 16px">Most recent 30 sessions</p>
+      <div class="session-list" id="history-list"></div>
+    </div>
+
+    <!-- ── Stats ──────────────────────────────────────────────────────────── -->
+    <div id="page-stats" class="page">
+      <div class="stats-ctrl">
+        <h1>Stats</h1>
+        <div style="display:flex;align-items:flex-start;gap:10px">
+        <div class="filter-wrap">
+          <button id="activity-filter-btn" class="btn btn-outline btn-sm" onclick="toggleActivityFilterPop(event)">
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" style="flex-shrink:0">
+              <path d="M1.5 2.5h13L9 9v4.5L7 12V9L1.5 2.5z" fill="currentColor"/>
+            </svg>
+            <span id="activity-filter-label">Filter</span>
+          </button>
+          <div id="activity-filter-pop" class="filter-pop" hidden></div>
+        </div>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:6px">
+          <div class="seg" id="range-seg">
+            <button class="seg-btn active" data-range="30d" onclick="setRange('30d')">30d</button>
+            <button class="seg-btn"        data-range="90d" onclick="setRange('90d')">90d</button>
+            <button class="seg-btn"        data-range="6m"  onclick="setRange('6m')">6m</button>
+            <button class="seg-btn"        data-range="1y"  onclick="setRange('1y')">1y</button>
+            <button class="seg-btn"        data-range="All" onclick="setRange('All')">All</button>
+            <button class="seg-btn"        data-range="Custom" onclick="setRange('Custom')"
+                    title="Drag the handles on the daily chart to pick an exact range">Custom</button>
+          </div>
+          <div class="seg" id="gran-seg">
+            <div class="gran-grp has-sel" data-grp="short">
+              <span class="gran-lbl">Short</span>
+              <div class="gran-opts"><div class="gran-opts-inner">
+                <button class="seg-btn gran-opt active" data-gran="day"   onclick="setGranularity('day')">Day</button>
+                <button class="seg-btn gran-opt"        data-gran="week"  onclick="setGranularity('week')">Week</button>
+                <button class="seg-btn gran-opt"        data-gran="2wk"   onclick="setGranularity('2wk')">2 Wk</button>
+                <button class="seg-btn gran-opt"        data-gran="month" onclick="setGranularity('month')">Month</button>
+              </div></div>
+            </div>
+            <div class="gran-grp" data-grp="long">
+              <span class="gran-lbl">Long</span>
+              <div class="gran-opts"><div class="gran-opts-inner">
+                <button class="seg-btn gran-opt" data-gran="quarter" onclick="setGranularity('quarter')">Qtr</button>
+                <button class="seg-btn gran-opt" data-gran="6mo"     onclick="setGranularity('6mo')">6 Mo</button>
+                <button class="seg-btn gran-opt" data-gran="year"    onclick="setGranularity('year')">Year</button>
+              </div></div>
+            </div>
+          </div>
+        </div>
+        </div>
+      </div>
+
+      <div class="stat-grid">
+        <div class="stat-card"><div class="label" id="sc-time-lbl">Total time</div>
+          <div class="value" id="sc-time" style="color:var(--accent)">—</div></div>
+        <div class="stat-card"><div class="label" id="sc-chars-lbl">Total chars</div>
+          <div class="value" id="sc-chars" style="color:var(--success)">—</div></div>
+        <div class="stat-card"><div class="label" id="sc-cph-lbl">Chars / hour</div>
+          <div class="value" id="sc-cph" style="color:var(--warn)">—</div></div>
+        <div class="stat-card"><div class="label" id="sc-streak-lbl">Current Streak</div>
+          <div class="value" id="sc-streak" style="color:var(--purple)">—</div></div>
+      </div>
+
+      <div class="extra-stat-grid" id="extra-stats-grid">
+        <div class="extra-stat-card">
+          <div class="label" id="sc-avg-lbl">Avg / day</div>
+          <div class="value" id="sc-avg" style="color:var(--accent)">—</div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Best day</div>
+          <div class="value" id="es-best-day" style="color:var(--success)">—</div>
+          <div class="sub" id="es-best-day-date"></div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Best week</div>
+          <div class="value" id="es-best-week" style="color:var(--warn)">—</div>
+          <div class="sub" id="es-best-week-date"></div>
+        </div>
+        <div class="extra-stat-card">
+          <div class="label">Consistency</div>
+          <div class="value" id="es-consistency" style="color:var(--purple)">—</div>
+          <div class="sub" id="es-consistency-sub"></div>
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0 8px">
+        <h2 style="margin:0">Daily time</h2>
+        <div style="display:flex;align-items:center;gap:16px">
+          <label class="toggle-label">
+            <input type="checkbox" id="split-toggle" onchange="onSplitToggle()"> Split by activity
+          </label>
+          <label class="toggle-label">
+            <input type="checkbox" id="cum-toggle" onchange="onCumToggle()"> Show cumulative
+          </label>
+        </div>
+      </div>
+      <div class="chart-wrap" id="daily-chart-wrap"><canvas id="chart-daily" height="180"></canvas>
+        <div id="daily-brush" class="brush" hidden>
+          <div class="brush-mask brush-mask-l"></div>
+          <div class="brush-mask brush-mask-r"></div>
+          <div class="brush-label">
+            <span class="brush-range"></span>
+            <span class="brush-reset" title="Clear selection">✕</span>
+          </div>
+          <div class="brush-handle brush-handle-l" data-side="l"><span></span></div>
+          <div class="brush-handle brush-handle-r" data-side="r"><span></span></div>
+        </div>
+      </div>
+
+      <div style="margin-top:16px">
+        <h2>Daily characters</h2>
+        <div class="chart-wrap"><canvas id="chart-daily-chars" height="180"></canvas></div>
+      </div>
+
+      <div style="margin-top:16px">
+        <h2>Time by day of week</h2>
+        <div class="chart-wrap"><canvas id="chart-dow" height="180"></canvas></div>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:space-between;margin:20px 0 8px">
+        <h2 style="margin:0">Activity heatmap</h2>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button class="btn btn-outline btn-sm" onclick="changeHeatmapYear(-1)">←</button>
+          <span id="heatmap-year-label" style="font-size:13px;font-weight:600;color:var(--text);min-width:36px;text-align:center"></span>
+          <button class="btn btn-outline btn-sm" id="heatmap-next-btn" onclick="changeHeatmapYear(1)">→</button>
+        </div>
+      </div>
+      <div class="heatmap-wrap"><div id="heatmap-stats"></div></div>
+
+      <div style="margin-top:16px">
+        <h2>By activity</h2>
+        <div class="chart-wrap"><canvas id="chart-donut" height="220"></canvas></div>
+      </div>
+      <div style="height:24px"></div>
+    </div>
+
+    <!-- ── Goals ──────────────────────────────────────────────────────────── -->
+    <div id="page-goals" class="page">
+      <div class="page-header">
+        <h1>Goals</h1>
+        <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+          <div class="seg" id="goal-pace-seg">
+            <button class="seg-btn active" data-pace="daily"   onclick="setGoalPaceView('daily')">Daily</button>
+            <button class="seg-btn"        data-pace="weekly"  onclick="setGoalPaceView('weekly')">Weekly</button>
+            <button class="seg-btn"        data-pace="monthly" onclick="setGoalPaceView('monthly')">Monthly</button>
+          </div>
+          <div style="display:flex;gap:8px;width:100%">
+            <button class="btn btn-sm btn-seg" style="flex:1;justify-content:center" id="completed-btn" onclick="showCompletedGoals()">Completed</button>
+            <button class="btn btn-sm btn-seg" style="flex:1;justify-content:center" id="new-goal-btn"   onclick="toggleGoalForm()">New Goal</button>
+          </div>
+        </div>
+      </div>
+      <p class="muted" style="margin:6px 0 20px">Set a target, a deadline, and let the tracker tell you what you need to do each day or week to get there.</p>
+
+      <div class="card" id="goal-form-card" style="margin-bottom:20px;display:none;position:relative">
+        <button onclick="toggleGoalForm()" style="position:absolute;top:12px;right:14px;background:none;border:none;color:var(--dim);font-size:16px;cursor:pointer;line-height:1;padding:0" title="Cancel">✕</button>
+        <div class="form-group">
+          <label>Label</label>
+          <input type="text" id="goal-label">
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+          <div class="form-group" style="margin-bottom:0">
+            <label>Track</label>
+            <select id="goal-metric" onchange="updateGoalUnit()">
+              <option value="time_seconds">Time</option>
+              <option value="chars_read">Characters</option>
+              <option value="time_chars">Time (track chars)</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label id="goal-target-label">Target (hours/day)</label>
+            <input type="number" id="goal-target" min="0.1" step="0.5">
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>Deadline</label>
+            <input type="text" id="goal-deadline">
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;margin-top:12px">
+          <div class="form-group" style="margin-bottom:0">
+            <label>Pace</label>
+            <select id="goal-chunk" onchange="updateGoalUnit()">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="none">None — set total directly</option>
+            </select>
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>Activity filter (optional)</label>
+            <select id="goal-activity"><option value="">All activities</option></select>
+          </div>
+          <div class="form-group" style="margin-bottom:0">
+            <label>Start date (optional)</label>
+            <input type="text" id="goal-start" placeholder="today">
+          </div>
+        </div>
+        <div class="feedback" id="goal-feedback"></div>
+        <button class="btn btn-primary" id="goal-add-btn" style="margin-top:14px" onclick="doAddGoal()">Add goal</button>
+      </div>
+
+      <div id="goal-active-view">
+        <div class="goal-list" id="goal-list">
+          <p class="empty-msg">No goals yet. Add one above.</p>
+        </div>
+      </div>
+
+      <div id="goal-completed-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
+          <button class="btn btn-outline btn-sm" onclick="hideCompletedGoals()">← Back</button>
+          <h2 style="margin:0">Completed goals</h2>
+        </div>
+        <div class="goal-list" id="goal-completed-list">
+          <p class="empty-msg">No completed goals yet.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Media ──────────────────────────────────────────────────────────── -->
+    <div id="page-media" class="page">
+
+      <!-- Grid view -->
+      <div id="media-grid-view">
+        <div class="page-header">
+          <div style="display:flex;align-items:center;gap:12px">
+            <h1>Media</h1>
+            <span class="muted" id="media-count"></span>
+          </div>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-outline btn-sm" onclick="openStatPortal()">📊 Stat portal</button>
+            <button class="btn btn-outline btn-sm" onclick="openAddMediaModal()">+ Add media</button>
+          </div>
+        </div>
+        <p class="muted" style="margin:6px 0 14px">All tracked titles — click any card to see details.</p>
+        <div class="media-grid" id="media-grid">
+          <p class="empty-msg">No media tracked yet.</p>
+        </div>
+      </div>
+
+      <!-- Series detail view (hidden by default) -->
+      <div id="media-series-view" style="display:none">
+        <!-- Back nav -->
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeSeriesDetail()">← Back</button>
+          <span class="muted" style="font-size:12px">Media  ›  Series</span>
+        </div>
+
+        <!-- Hero: stacked covers + info -->
+        <div class="detail-hero">
+          <div id="series-detail-cover" class="series-detail-cover-box"></div>
+          <div class="detail-info">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+              <div id="series-detail-name" class="detail-title" style="margin-bottom:0"></div>
+              <button class="btn btn-outline btn-sm" onclick="doRenameSeriesPrompt()" style="flex-shrink:0">✎ Rename</button>
+            </div>
+            <div id="series-detail-badge"></div>
+            <!-- Members list replaces description -->
+            <div id="series-detail-members" class="series-members-inline"></div>
+          </div>
+        </div>
+
+        <!-- Stat cards -->
+        <div class="stat-grid" id="series-detail-stats"></div>
+
+        <!-- Charts -->
+        <h2 style="margin-top:16px">Daily time</h2>
+        <div class="chart-wrap"><canvas id="chart-series-time" height="180"></canvas></div>
+
+        <h2 style="margin-top:20px">Daily characters</h2>
+        <div class="chart-wrap"><canvas id="chart-series-chars" height="180"></canvas></div>
+
+        <div id="series-speed-section" style="display:none">
+          <h2 style="margin-top:20px">Read speed (chars/h)</h2>
+          <div class="chart-wrap"><canvas id="chart-series-speed" height="180"></canvas></div>
+          <h2 style="margin-top:20px">Read speed — 7d rolling avg (chars/h)</h2>
+          <div class="chart-wrap"><canvas id="chart-series-speed-rolling" height="180"></canvas></div>
+        </div>
+
+        <div style="height:32px"></div>
+      </div>
+
+      <!-- Detail view (hidden by default) -->
+      <div id="media-detail-view" style="display:none">
+        <!-- Back nav -->
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeMediaDetail()">← Back</button>
+          <span class="muted" id="detail-breadcrumb" style="font-size:12px"></span>
+          <button id="detail-complete-btn" class="btn btn-outline btn-sm" style="display:none;margin-left:auto"></button>
+        </div>
+
+        <!-- Hero: cover + info -->
+        <div class="detail-hero">
+          <div id="detail-cover" class="detail-cover-box"></div>
+          <div class="detail-info">
+            <div id="detail-title" class="detail-title"></div>
+            <div id="detail-genres" style="margin-top:6px"></div>
+            <div id="detail-desc" class="detail-desc"></div>
+            <div id="detail-milestones" class="milestones-list" style="display:none"></div>
+            <div id="detail-milestones-add" style="margin-top:8px">
+              <button class="btn btn-outline btn-sm" onclick="openAddMilestoneModal()">+ Add milestone</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Stat cards -->
+        <div class="stat-grid" id="detail-stats-grid"></div>
+
+        <!-- Completion progress bar -->
+        <div id="detail-progress" class="detail-progress" style="display:none">
+          <div class="detail-progress-head">
+            <span id="detail-progress-pct" class="detail-progress-pct"></span>
+            <span class="detail-progress-counts-wrap">
+              <span id="detail-progress-counts" class="detail-progress-counts"></span>
+              <button id="detail-progress-edit" class="progress-edit-btn" style="display:none" title="Edit progress bar length">✎</button>
+            </span>
+          </div>
+          <div class="progress-track" id="detail-progress-track">
+            <div id="detail-progress-fill" class="progress-fill"></div>
+          </div>
+          <div class="detail-progress-foot">
+            <span id="detail-progress-eta" class="detail-progress-eta"></span>
+          </div>
+        </div>
+
+        <!-- Daily activity chart -->
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-top:16px">
+          <h2 style="margin:0">Daily time</h2>
+          <label class="toggle-label" id="ms-split-label" style="display:none">
+            <input type="checkbox" id="ms-split-toggle" onchange="onMilestoneSplitToggle()"> Split by milestone
+          </label>
+        </div>
+        <div class="chart-wrap"><canvas id="chart-detail-time" height="180"></canvas></div>
+
+        <h2 style="margin-top:20px">Daily characters</h2>
+        <div class="chart-wrap"><canvas id="chart-detail" height="180"></canvas></div>
+
+        <div id="detail-speed-section" style="display:none">
+          <h2 style="margin-top:20px">Read speed (chars/h)</h2>
+          <div class="chart-wrap"><canvas id="chart-detail-speed" height="180"></canvas></div>
+          <h2 style="margin-top:20px">Read speed — 7d rolling avg (chars/h)</h2>
+          <div class="chart-wrap"><canvas id="chart-detail-speed-rolling" height="180"></canvas></div>
+        </div>
+
+        <!-- Session list -->
+        <h2 style="margin-top:20px">Sessions <span id="detail-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
+        <div class="detail-sessions" id="detail-session-list"></div>
+        <div style="height:24px"></div>
+      </div>
+
+      <!-- Milestone detail view (mini media pane) -->
+      <div id="media-milestone-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeMilestoneDetail()">← Back</button>
+          <span class="muted" id="milestone-breadcrumb" style="font-size:12px"></span>
+        </div>
+
+        <div class="detail-hero">
+          <div id="milestone-cover" class="detail-cover-box"></div>
+          <div class="detail-info">
+            <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+              <div id="milestone-title" class="detail-title" style="margin-bottom:0"></div>
+              <button class="btn btn-primary btn-sm" id="milestone-end-btn" onclick="endCurrentMilestone()" style="display:none">⏹ End milestone</button>
+              <button class="btn btn-outline btn-sm" id="milestone-edit-btn" onclick="openEditMilestoneModal()">✎ Edit</button>
+              <button class="btn btn-outline btn-sm btn-danger" id="milestone-delete-btn" onclick="deleteCurrentMilestone()">✕ Delete</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="stat-grid" id="milestone-stats-grid"></div>
+
+        <h2 style="margin-top:16px">Daily time</h2>
+        <div class="chart-wrap"><canvas id="chart-milestone-time" height="180"></canvas></div>
+
+        <h2 style="margin-top:20px">Daily characters</h2>
+        <div class="chart-wrap"><canvas id="chart-milestone-chars" height="180"></canvas></div>
+
+        <div id="milestone-speed-section" style="display:none">
+          <h2 style="margin-top:20px">Read speed (chars/h)</h2>
+          <div class="chart-wrap"><canvas id="chart-milestone-speed" height="180"></canvas></div>
+          <h2 style="margin-top:20px">Read speed — 7d rolling avg (chars/h)</h2>
+          <div class="chart-wrap"><canvas id="chart-milestone-speed-rolling" height="180"></canvas></div>
+        </div>
+
+        <h2 style="margin-top:20px">Sessions <span id="milestone-session-count" style="font-size:11px;color:var(--dim);font-weight:400"></span></h2>
+        <div class="detail-sessions" id="milestone-session-list"></div>
+        <div style="height:24px"></div>
+      </div>
+
+      <!-- Stat portal view (compare titles side by side) -->
+      <div id="media-portal-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeStatPortal()">← Back</button>
+          <span class="muted" style="font-size:12px">Media  ›  Stat portal</span>
+        </div>
+
+        <div class="page-header">
+          <div style="display:flex;align-items:center;gap:12px">
+            <h1>Stat portal</h1>
+            <span class="muted" id="portal-sel-count"></span>
+          </div>
+        </div>
+        <p class="muted" style="margin:6px 0 10px">Compare titles side by side. Pick up to 8.</p>
+        <div class="portal-picker-wrap">
+          <div id="portal-picker" class="portal-picker"></div>
+          <div id="portal-add-panel" class="portal-add-panel" style="display:none">
+            <input id="portal-search" class="portal-search" type="text" placeholder="Search titles…" oninput="renderPortalAddList()">
+            <div id="portal-add-list" class="portal-add-list"></div>
+          </div>
+        </div>
+        <div class="portal-controls">
+          <label class="portal-toggle"><input type="checkbox" id="portal-align-toggle" onchange="onPortalAlign()"> Align to a common start (day 0)</label>
+          <label class="portal-toggle"><input type="checkbox" id="portal-split-toggle" onchange="onPortalSplit()"> Split series into entries</label>
+          <button class="btn btn-outline btn-sm" onclick="portalResetZoom()">Reset zoom</button>
+          <span class="muted" style="font-size:11px">Drag across a chart to zoom · double-click it to reset</span>
+        </div>
+
+        <p class="empty-msg" id="portal-empty" style="display:none">Select at least one title.</p>
+        <div id="portal-content">
+          <h2 style="margin-top:16px">Head to head</h2>
+          <div id="portal-table-wrap"></div>
+
+          <div id="portal-speed-section">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:22px">
+              <h2 style="margin:0">Read speed (chars/h)</h2>
+              <label class="portal-toggle"><input type="checkbox" id="portal-rolling-toggle" checked onchange="onPortalSpeedMode()"> 7d rolling</label>
+            </div>
+            <div class="chart-wrap portal-chart"><canvas id="chart-portal-speed" height="200"></canvas></div>
+          </div>
+
+          <div id="portal-norm-section">
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:22px">
+              <h2 style="margin:0">Improvement curves (normalized)</h2>
+              <label class="portal-toggle"><input type="checkbox" id="portal-norm-toggle" onchange="onPortalNormMode()"> by reading day</label>
+            </div>
+            <div class="chart-wrap portal-chart"><canvas id="chart-portal-norm" height="200"></canvas></div>
+          </div>
+
+          <h2 style="margin-top:22px">Cumulative characters</h2>
+          <div class="chart-wrap portal-chart"><canvas id="chart-portal-cum-chars" height="200"></canvas></div>
+
+          <h2 style="margin-top:22px">Cumulative time</h2>
+          <div class="chart-wrap portal-chart"><canvas id="chart-portal-cum-time" height="200"></canvas></div>
+
+          <div id="portal-gain-section">
+            <h2 style="margin-top:22px">Speed gain — first 20% vs last 20% of chars</h2>
+            <div class="chart-wrap"><canvas id="chart-portal-gain" height="180"></canvas></div>
+            <p class="muted" id="portal-gain-note" style="margin:4px 0 0"></p>
+          </div>
+
+          <div id="portal-scatter-section">
+            <h2 style="margin-top:22px">Speed vs volume</h2>
+            <div class="chart-wrap"><canvas id="chart-portal-scatter" height="220"></canvas></div>
+          </div>
+        </div>
+        <div style="height:32px"></div>
+      </div>
+
+    </div>
+
+    <!-- ── Catalog ────────────────────────────────────────────────────────── -->
+    <div id="page-catalog" class="page">
+      <div class="page-header"><h1>Catalog</h1></div>
+
+      <div class="catalog-top">
+        <div class="catalog-left">
+          <p class="muted catalog-intro">
+            A reading ledger for character / volume tracking. Titles you read in the
+            tracker are added automatically and their char counts grow as you read more —
+            nothing here ever touches your stats.
+          </p>
+          <button class="btn btn-outline btn-sm" onclick="addCatalogRow()">＋ Add entry</button>
+        </div>
+        <div class="catalog-hero">
+          <div class="catalog-hero-main">
+            <span class="catalog-hero-num" id="catalog-books">0.0</span>
+            <span class="catalog-hero-label">books read</span>
+          </div>
+          <div class="catalog-hero-sub">1 book = 100,000 characters or 7 manga volumes</div>
+        </div>
+      </div>
+
+      <table class="catalog-table" id="catalog-table">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th class="cat-col-type">Type</th>
+            <th class="cat-col-count">Count</th>
+            <th class="cat-col-del"></th>
+          </tr>
+        </thead>
+        <tbody id="catalog-body"></tbody>
+      </table>
+      <p class="empty-msg" id="catalog-empty" style="display:none">Nothing in the catalog yet.</p>
+    </div>
+
+    <!-- ── Settings ───────────────────────────────────────────────────────── -->
+    <div id="page-settings" class="page">
+
+      <!-- Main settings view -->
+      <div id="settings-main-view">
+      <div class="page-header"><h1>Settings</h1></div>
+
+      <div class="settings-section" style="margin-top:20px">
+        <div class="card setup-entry-card" onclick="openSetupWizard()">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+            <div>
+              <h3 style="margin:0 0 4px">First-time setup / Import wizard</h3>
+              <p class="muted" style="margin:0">Import data from a previous tracker, GameSentenceMiner, or ッツ Reader.</p>
+            </div>
+            <span style="color:var(--dim);font-size:18px">›</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section" style="margin-top:20px">
+        <div class="card">
+          <h3>GameSentenceMiner</h3>
+          <p class="muted">API URL (default: http://localhost:7275/api/stats)</p>
+          <div class="settings-row">
+            <input type="text" id="gsm-url" class="url-input" value="http://localhost:7275/api/stats" onchange="saveSettings()">
+            <button class="btn btn-outline btn-sm" onclick="doTestGSM()">Test connection</button>
+          </div>
+          <div class="feedback" id="gsm-status" style="margin-top:8px"></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Day rollover</h3>
+          <p class="muted" style="margin-bottom:12px">Sessions logged before this time count as the previous day.</p>
+          <select id="rollover-hour" onchange="saveSettings()" style="max-width:280px">
+            <option value="0">Midnight (default — no rollover)</option>
+            <option value="1">1:00 AM</option>
+            <option value="2">2:00 AM</option>
+            <option value="3">3:00 AM</option>
+            <option value="4">4:00 AM</option>
+            <option value="5">5:00 AM</option>
+            <option value="6">6:00 AM</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Appearance</h3>
+          <p class="muted" style="margin-bottom:4px">Color theme for the app.</p>
+          <div class="theme-options">
+            <button class="theme-opt" data-theme="dark" onclick="setTheme('dark')">
+              <div class="theme-swatch">
+                <span class="theme-swatch-dot" style="background:#1C1C28"></span>
+                <span class="theme-swatch-dot" style="background:#5B8CFF"></span>
+                <span class="theme-swatch-dot" style="background:#4ECBA0"></span>
+              </div>
+              Dark
+            </button>
+            <button class="theme-opt" data-theme="mint" onclick="setTheme('mint')">
+              <div class="theme-swatch">
+                <span class="theme-swatch-dot" style="background:#EEF8F5"></span>
+                <span class="theme-swatch-dot" style="background:#2EAA92"></span>
+                <span class="theme-swatch-dot" style="background:#9A82D4"></span>
+              </div>
+              Light
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Browser extension</h3>
+          <p class="muted" style="margin-bottom:12px">Copy these into the Konseki Sync extension popup.</p>
+          <div class="settings-row" style="margin-bottom:8px">
+            <label style="min-width:48px;color:var(--text-muted);font-size:12px">Port</label>
+            <input type="text" id="ext-port" readonly style="max-width:90px;font-family:monospace;font-size:13px">
+            <button class="btn btn-outline btn-sm" onclick="copyExtField('ext-port')">Copy</button>
+          </div>
+          <div class="settings-row">
+            <label style="min-width:48px;color:var(--text-muted);font-size:12px">Token</label>
+            <input type="text" id="ext-token" readonly style="font-family:monospace;font-size:11px">
+            <button class="btn btn-outline btn-sm" onclick="copyExtField('ext-token')">Copy</button>
+            <button class="btn btn-outline btn-sm" onclick="rerollExtToken()">Reroll</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Sessions folder</h3>
+          <p id="sessions-dir" style="color:var(--accent);font-size:12px;margin-bottom:8px">…</p>
+          <p class="muted">Drop any *.json session file here and it will be ingested automatically.</p>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3 style="color:var(--text-muted)">Advanced</h3>
+          <p class="muted" style="margin-bottom:16px">For power users. Defaults are fine for most setups.</p>
+
+          <label style="display:block;margin-bottom:6px;font-size:13px">GSM pull debounce</label>
+          <p class="muted" style="margin-bottom:8px">How long GSM must be idle before the tracker pulls new stats. Increase this if GSM is resource-heavy while you're playing.</p>
+          <div class="settings-row">
+            <input type="number" id="gsm-debounce" min="5" max="3600" placeholder="60" onchange="saveSettings()" style="max-width:100px">
+            <span style="color:var(--text-muted);font-size:13px">seconds</span>
+          </div>
+
+          <label style="display:block;margin:16px 0 6px;font-size:13px">GSM reopen catch-up gap <span style="color:var(--text-muted);font-weight:normal">(experimental)</span></label>
+          <p class="muted" style="margin-bottom:8px">Off by default. If GSM was idle this long before a new write, pull immediately on the next write — catches the previous session's tail reading time that flushed after the app closed. Usually unnecessary: the normal settle pull already handles it. Set a value (e.g. 300) to enable.</p>
+          <div class="settings-row">
+            <input type="number" id="gsm-open-gap" min="0" max="86400" placeholder="0" onchange="saveSettings()" style="max-width:100px">
+            <span style="color:var(--text-muted);font-size:13px">seconds (0 = off)</span>
+          </div>
+        </div>
+      </div>
+
+      </div><!-- /#settings-main-view -->
+
+      <!-- Setup wizard sub-view -->
+      <div id="settings-setup-view" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:22px">
+          <button class="btn btn-outline btn-sm" onclick="closeSetupWizard()">← Back</button>
+          <span class="muted" style="font-size:12px">Settings  ›  First-time setup</span>
+        </div>
+
+        <div class="page-header"><h1>First-time setup</h1></div>
+        <p class="muted" style="margin:6px 0 20px;line-height:1.6">
+          Bring your existing immersion data into the tracker. Each section is independent — use whichever ones apply to you.
+        </p>
+
+        <!-- Step 1: CSV -->
+        <div class="settings-section">
+          <div class="card">
+            <h3><span class="setup-step-num">1</span>Import CSV from previous tracker</h3>
+            <p class="muted" style="margin-bottom:14px;line-height:1.6">
+              CSV columns: <code>Activity, Language, Activity Type, Time (minutes), Date</code>
+            </p>
+            <div style="display:flex;align-items:center;gap:14px">
+              <button class="btn btn-outline btn-sm" onclick="doImportCSV()">Choose CSV file…</button>
+              <span class="feedback" id="setup-csv-feedback"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2: GSM -->
+        <div class="settings-section">
+          <div class="card">
+            <h3><span class="setup-step-num">2</span>Import history from GameSentenceMiner</h3>
+            <p class="muted" style="margin-bottom:10px;line-height:1.6">
+              Reads GSM's local database directly to pull authoritative per-day chars and reading time for every game you've played. Per game:
+              <strong>Track</strong> includes the game in the import; <strong>Count as time</strong> sets whether new rows count toward your time stats. Existing rows in your tracker keep whatever state they already have — the import never silently changes that.
+            </p>
+            <p class="muted" style="font-size:11px;margin-bottom:12px">Reading from: <span id="gsm-db-path" style="font-family:monospace">…</span></p>
+            <div id="gsm-anomalies-banner" style="margin-bottom:12px"></div>
+            <div id="gsm-games-list" style="margin-bottom:12px"></div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-outline btn-sm" onclick="doRefreshGSMGames()">↻ Refresh games</button>
+              <button class="btn btn-outline btn-sm" onclick="doPreviewGSMImport()">Preview import</button>
+              <button class="btn btn-primary btn-sm" id="gsm-apply-btn" onclick="doApplyGSMImport()" disabled>Apply import</button>
+            </div>
+            <div id="gsm-import-preview" style="margin-top:12px"></div>
+            <div class="feedback" id="gsm-import-feedback" style="margin-top:8px"></div>
+            <div class="feedback" id="setup-gsm-feedback"></div>
+          </div>
+        </div>
+
+        <!-- Step 3: ッツ Reader -->
+        <div class="settings-section">
+          <div class="card">
+            <h3><span class="setup-step-num">3</span>Import history from ッツ Reader</h3>
+            <p class="muted" style="margin-bottom:10px;line-height:1.6">
+              ッツ Reader can export all of your stats as a zip file. To import:
+            </p>
+            <ol class="muted" style="margin:0 0 14px 18px;line-height:1.7">
+              <li>Open ッツ Reader and go to the <strong>Statistics</strong> page.</li>
+              <li>Click the option to download all stats as a zip.</li>
+              <li>Drag the zip onto the <strong>⬇ Drag ttsu log zip here</strong> button in the sidebar.</li>
+            </ol>
+            <label class="toggle-label setup-toggle">
+              <input type="checkbox" id="ttsu-history-include-time" onchange="onSetupTogglePastTime('ttsu')">
+              <span>Include time from past sessions</span>
+            </label>
+            <p class="muted setup-toggle-hint">
+              Default: <strong>off</strong> — only character counts are added to your stats. Today's sessions always count time fully, regardless of this setting.
+            </p>
+            <div class="feedback" id="setup-ttsu-feedback"></div>
+          </div>
+        </div>
+
+        <div style="height:32px"></div>
+      </div>
+
+      <!-- ── GSM aggregate import — INACTIVE ────────────────────────────────
+           Commented out alongside gsm_aggregate_import() in tracker.py.
+           Problem: totalCharsPerGame labels don't match currentGameStats.game_name.
+           Restore both this block and the tracker.py commented section together.
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Full GSM history import</h3>
+          <p class="muted" style="margin-bottom:6px;line-height:1.65">
+            Imports all-time character counts and reading time for every game
+            tracked in GSM. Chars count in Stats and Media. Time is stored but
+            only surfaces in the Media tab.
+          </p>
+          <div id="gsm-import-status" style="font-size:11px;color:var(--dim);margin-bottom:12px;min-height:16px"></div>
+          <button class="btn btn-outline" id="gsm-import-btn" onclick="doImportGSMHistory()">
+            ↓ Import full GSM history
+          </button>
+          <div class="feedback" id="gsm-import-feedback" style="margin-top:10px"></div>
+        </div>
+      </div>
+      ──────────────────────────────────────────────────────────────────── -->
+    </div>
+
+    <!-- ── Dev ─────────────────────────────────────────────────────────────── -->
+    <div id="page-dev" class="page">
+      <div class="page-header"><h1>Dev</h1></div>
+
+      <div class="settings-section" style="margin-top:20px">
+        <div class="card">
+          <h3>Console</h3>
+          <p class="muted" style="margin-bottom:10px">Log output from this run. [py] = backend, [js] = UI.</p>
+          <div class="settings-row" style="margin:0 0 10px">
+            <button class="btn btn-outline btn-sm" onclick="refreshDevLogs()">↻ Refresh</button>
+            <button class="btn btn-outline btn-sm" onclick="clearDevLogs()">Clear</button>
+            <span class="muted" id="dev-log-count" style="font-size:11px"></span>
+          </div>
+          <div id="dev-log-output" class="dev-log-box"></div>
+        </div>
+      </div>
+
+      <div class="settings-section">
+        <div class="card">
+          <h3>Notes</h3>
+          <p class="muted" style="margin-bottom:10px">Quick scratchpad for bugs and ideas.</p>
+          <div class="settings-row" style="margin:0 0 12px">
+            <input type="text" id="dev-note-input" placeholder="Jot a bug or idea…" style="flex:1"
+                   onkeydown="if(event.key==='Enter') addDevNote()">
+            <button class="btn btn-outline btn-sm" onclick="addDevNote()">Add</button>
+          </div>
+          <div id="dev-notes-list"></div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<!-- ── First-run welcome modal ─────────────────────────────────────────── -->
+<div id="firstrun-overlay" style="display:none">
+  <div id="firstrun-dialog" class="card">
+    <h2 style="margin:0 0 10px">Welcome to Konseki</h2>
+    <p style="font-size:13px;color:var(--text);line-height:1.6;margin:0 0 18px">
+      Are you a first-time user? We can walk you through importing data from a previous tracker, GameSentenceMiner, and ッツ Reader.
+    </p>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn btn-outline btn-sm" onclick="dismissFirstRun(false)">Skip</button>
+      <button class="btn btn-primary btn-sm" onclick="dismissFirstRun(true)">Walk me through setup</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Confirm dialog ──────────────────────────────────────────────────── -->
+<div id="confirm-overlay" style="display:none">
+  <div id="confirm-dialog" class="card">
+    <p id="confirm-message"></p>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="confirmResolve(false)">Cancel</button>
+      <button class="btn btn-sm" id="confirm-ok-btn" onclick="confirmResolve(true)">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Edit manual log modal ───────────────────────────────────────────── -->
+<div id="edit-log-overlay" style="display:none">
+  <div id="edit-log-dialog" class="card">
+    <h2 style="margin:0 0 16px">Edit log entry</h2>
+    <div class="form-group">
+      <label>Activity type</label>
+      <div class="pill-group" id="edit-log-atype-pills"></div>
+    </div>
+    <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+      <div class="form-group" style="width:120px;flex-shrink:0">
+        <label>Time (minutes)</label>
+        <input type="number" id="edit-log-minutes" min="0" step="any" oninput="updateEditCharsHint()">
+      </div>
+      <div class="form-group" id="edit-log-chars-group" style="display:none;width:130px;flex-shrink:0">
+        <label>Characters (optional)</label>
+        <input type="number" id="edit-log-chars" min="0" oninput="updateEditCharsHint()">
+      </div>
+      <div class="form-group" id="edit-log-cph-group" style="display:none;width:120px;flex-shrink:0">
+        <label>Chars / hour (optional)</label>
+        <input type="number" id="edit-log-cph" min="0" oninput="updateEditCharsHint()">
+      </div>
+      <div class="form-group" style="flex:1;min-width:160px">
+        <label>Title / media (optional)</label>
+        <input type="text" id="edit-log-title" list="media-titles" placeholder="Type, or pick existing media">
+      </div>
+    </div>
+    <div id="edit-log-chars-hint" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
+    <div class="form-group" style="max-width:180px">
+      <label>Date</label>
+      <input type="text" id="edit-log-date">
+    </div>
+    <div class="feedback" id="edit-log-feedback"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="closeLogEdit()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitLogEdit()">Save changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── GSM entry adjust modal (subtract dead time / rollover) ──────────── -->
+<div id="gsm-edit-overlay" style="display:none">
+  <div id="gsm-edit-dialog" class="card">
+    <h2 style="margin:0 0 14px" id="gsm-edit-title">Adjust entry</h2>
+    <div class="seg" id="gsm-edit-seg" style="margin-bottom:16px">
+      <button class="seg-btn active" data-tab="subtract" onclick="switchGsmEditTab('subtract')">Subtract minutes</button>
+      <button class="seg-btn" data-tab="rollover" id="gsm-edit-rollover-tab" onclick="switchGsmEditTab('rollover')">Rollover</button>
+    </div>
+
+    <div class="gsm-edit-pane" id="gsm-edit-pane-subtract">
+      <div class="form-group" style="max-width:160px">
+        <label>Minutes</label>
+        <input type="number" id="gsm-edit-sub-minutes" min="0" step="any">
+      </div>
+      <div class="muted" style="font-size:12px;margin:-4px 0 4px" id="gsm-edit-sub-hint"></div>
+    </div>
+
+    <div class="gsm-edit-pane" id="gsm-edit-pane-rollover" style="display:none">
+      <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+        <div class="form-group" style="width:150px;flex-shrink:0">
+          <label>Characters</label>
+          <input type="number" id="gsm-edit-roll-chars" min="0" step="1">
+        </div>
+        <div class="form-group" style="width:150px;flex-shrink:0">
+          <label>Minutes</label>
+          <input type="number" id="gsm-edit-roll-minutes" min="0" step="any">
+        </div>
+      </div>
+      <div class="muted" style="font-size:12px;margin:-4px 0 4px" id="gsm-edit-roll-hint"></div>
+    </div>
+
+    <div class="feedback" id="gsm-edit-feedback"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="closeGsmEdit()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitGsmEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Add media modal ─────────────────────────────────────────────────── -->
+<div id="add-media-overlay" style="display:none">
+  <div id="add-media-dialog" class="card">
+    <h2 style="margin:0 0 4px">Add media</h2>
+    <p class="muted" style="margin:0 0 16px;font-size:12px">Manually add a title you track by hand, with an initial logged session.</p>
+    <div class="form-group">
+      <label>Title / media</label>
+      <input type="text" id="add-media-title" placeholder="e.g. ある小説のタイトル">
+    </div>
+    <div class="form-group">
+      <label>Activity type</label>
+      <div class="pill-group" id="add-media-atype-pills"></div>
+    </div>
+    <div style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
+      <div class="form-group" style="width:120px;flex-shrink:0">
+        <label>Time (minutes)</label>
+        <input type="number" id="add-media-minutes" min="0" step="any" oninput="updateAddMediaCharsHint()">
+      </div>
+      <div class="form-group" id="add-media-chars-group" style="display:none;width:130px;flex-shrink:0">
+        <label>Characters (optional)</label>
+        <input type="number" id="add-media-chars" min="0" oninput="updateAddMediaCharsHint()">
+      </div>
+      <div class="form-group" id="add-media-cph-group" style="display:none;width:120px;flex-shrink:0">
+        <label>Chars / hour (optional)</label>
+        <input type="number" id="add-media-cph" min="0" oninput="updateAddMediaCharsHint()">
+      </div>
+      <div class="form-group" style="max-width:180px">
+        <label>Date</label>
+        <input type="text" id="add-media-date">
+      </div>
+    </div>
+    <div id="add-media-chars-hint" class="muted" style="display:none;font-size:12px;margin:-6px 0 6px"></div>
+    <div class="form-group">
+      <label>Cover image (optional)</label>
+      <button class="btn btn-outline btn-sm" type="button" onclick="pickAddMediaCover()">Choose image…</button>
+      <span class="muted" id="add-media-cover-name" style="font-size:12px;margin-left:8px"></span>
+    </div>
+    <div class="feedback" id="add-media-feedback"></div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="closeAddMediaModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitAddMedia()">Add media</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Milestone add/edit modal ────────────────────────────────────────── -->
+<div id="milestone-overlay" style="display:none">
+  <div id="milestone-dialog" class="card">
+    <h2 id="milestone-modal-title" style="margin:0 0 14px">Add milestone</h2>
+    <div style="display:flex;flex-direction:column;gap:10px">
+      <label style="font-size:11px;color:var(--dim)">Name
+        <input id="milestone-input-name" type="text" placeholder="e.g. Part 1, Blood and Wine" />
+      </label>
+      <label style="font-size:11px;color:var(--dim)">Distinguisher (unit)
+        <select id="milestone-input-unit">
+          <option value="hours">Hours</option>
+          <option value="chars">Characters</option>
+        </select>
+      </label>
+      <div style="font-size:11px;color:var(--dim)">Color
+        <div id="milestone-color-strip" class="color-strip"></div>
+      </div>
+      <div style="display:flex;gap:8px">
+        <label style="flex:1;font-size:11px;color:var(--dim)">Start <span style="opacity:0.7" id="milestone-start-hint">(empty = from beginning)</span>
+          <input id="milestone-input-start" type="number" step="any" min="0" placeholder="empty" />
+        </label>
+        <label style="flex:1;font-size:11px;color:var(--dim)">End <span style="opacity:0.7" id="milestone-end-hint">(empty = ongoing)</span>
+          <input id="milestone-input-end" type="number" step="any" min="0" placeholder="empty" />
+        </label>
+      </div>
+      <div id="milestone-error" style="color:var(--danger);font-size:12px;display:none"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm" onclick="closeMilestoneModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" id="milestone-save-btn" onclick="saveMilestoneModal()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Media length (custom progress bar) modal ────────────────────────── -->
+<div id="media-length-overlay" style="display:none">
+  <div id="media-length-dialog" class="card">
+    <h2 id="media-length-title" style="margin:0 0 6px">Add progress bar</h2>
+    <p class="muted" id="media-length-sub" style="font-size:12px;margin:0 0 14px"></p>
+    <label style="font-size:11px;color:var(--dim)">Total length (characters)
+      <input id="media-length-input" type="number" min="0" step="1" placeholder="e.g. 1200000" />
+    </label>
+    <div id="media-length-error" style="color:var(--danger);font-size:12px;display:none;margin-top:8px"></div>
+    <div style="display:flex;gap:8px;margin-top:18px">
+      <button class="btn btn-outline btn-sm btn-danger" id="media-length-remove-btn" onclick="submitMediaLength(0)" style="display:none">Remove bar</button>
+      <span style="flex:1"></span>
+      <button class="btn btn-outline btn-sm" onclick="closeMediaLengthModal()">Cancel</button>
+      <button class="btn btn-primary btn-sm" onclick="submitMediaLength()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script src="ui.js"></script>
+</body>
+</html>

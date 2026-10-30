@@ -871,5 +871,7 @@ to the old shape fails three of its tests.
 - **Anki's own "cards studied today" can disagree** with Konseki's Anki row when
   Anki's rollover hour differs from Konseki's. Deliberate: every source in
   Konseki sits on Konseki's calendar.
-- `db_get_goal_progress` applies no `time_excluded` filter at all — a
-  pre-existing quirk, now reachable by Anki rows too.
+- Goals (`db_get_goal_progress` / `db_get_goal_burnup`, via `_goal_metric_expr`)
+  drop `time_excluded` time like every other time figure, so a suppressed Anki
+  day doesn't count toward a time goal. They used to sum the bare column, which
+  put a year's time goal tens of hours above the Stats page.

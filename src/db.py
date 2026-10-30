@@ -2673,6 +2673,21 @@ def db_delete_goal(goal_id):
     con.commit()
     con.close()
 
+def _goal_metric_expr(metric):
+    """SQL expression a goal sums, on the same basis as every other global figure.
+
+    Shared by db_get_goal_progress and db_get_goal_burnup so the card and its
+    burn-up line can't drift. A chars goal withholds chars-excluded titles
+    (_counted_chars); a time goal drops time_excluded rows, exactly as
+    _adjusted_day_totals and get_daily_time_series do — that time is overlap or
+    chars-only backfill, already counted elsewhere or never meant to count.
+    Summing the bare column put a year's time goal far above the Stats page."""
+    if metric == "chars_read":
+        return _counted_chars()
+    if metric == "time_seconds":
+        return "CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END"
+    return metric
+
 def db_get_goal_progress():
     goals     = db_get_goals()
     results   = []
@@ -2717,11 +2732,9 @@ def db_get_goal_progress():
         # Same date window/activity filter as the goal; never affects pacing.
         want_chars = (g["metric"] == "time_seconds" and g.get("track_chars"))
 
-        # A chars-graded goal counts chars the same way every other global figure
-        # does, so a title the user marked unrepresentative can't pad it. Metrics
-        # other than chars_read are untouched — the exclusion is chars-only.
-        metric_expr = (_counted_chars() if g["metric"] == "chars_read"
-                       else g["metric"])
+        # Same basis as every other global figure: a chars goal skips titles
+        # marked unrepresentative, a time goal skips time_excluded rows.
+        metric_expr = _goal_metric_expr(g["metric"])
 
         where_parts = ["session_date >= ?", "session_date <= ?"]
         params      = [g["start_date"], count_up_to]
@@ -2923,9 +2936,9 @@ def db_get_goal_burnup(goal_id):
     if g["activity_type"]:
         where.append("activity_type=?")
         params.append(g["activity_type"])
-    # Same chars basis as db_get_goal_progress: a chars-excluded title is out of
-    # a chars-graded goal, so the burn-up line lands on the card's own number.
-    metric_expr = _counted_chars() if g["metric"] == "chars_read" else g["metric"]
+    # Same basis as db_get_goal_progress, so the burn-up line lands on the
+    # card's own number.
+    metric_expr = _goal_metric_expr(g["metric"])
     rows = _q(
         f"SELECT session_date, COALESCE(SUM({metric_expr}),0) FROM sessions "
         f"WHERE {' AND '.join(where)} GROUP BY session_date", *params

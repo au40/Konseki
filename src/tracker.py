@@ -312,7 +312,7 @@ class Api:
             "titles":          [{"title": t[0], "hours": t[1]} for t in titles],
         }
 
-    def get_showcase(self):
+    def get_showcase(self, block_hours=100):
         """The four lifetime views on the Stats page, in one round trip."""
         return {
             # All-time by default: this sits under a "Lifetime" heading, so
@@ -320,8 +320,9 @@ class Api:
             "streams":  get_title_streams(None),
             "speeds":   get_title_speed_distributions(5, None),
             "activity": get_activity_trend(None),
-            # Default block size; the seg control re-fetches via get_hour_blocks.
-            "blocks":   get_hour_blocks(100),
+            # The page's current block size, so its daily refetch keeps the
+            # user's pick; the seg control re-fetches via get_hour_blocks.
+            "blocks":   get_hour_blocks(int(block_hours or 100)),
         }
 
     def get_hour_blocks(self, block_hours=100):

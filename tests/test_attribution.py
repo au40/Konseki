@@ -1108,3 +1108,52 @@ class TestGoalBurnup:
 
     def test_an_unknown_goal_returns_none(self, seed, db):
         assert db.db_get_goal_burnup(9999) is None
+
+
+class TestGoalTimeExcluded:
+    """A time goal counts time on the same basis as the Stats page: rows
+    flagged time_excluded (overlap, chars-only backfill, an Anki day already
+    hand-logged) add nothing. Summing the bare column put a year's time goal
+    tens of hours above the Stats total for the same span."""
+
+    def _seed_overlap(self, seed):
+        d = seed.day(3)
+        seed.gsm(d, chars=10_000, secs=3600, game_id="g1")
+        seed.session(d, chars=2_000, secs=1800, source="gsm_history",
+                     title="Backfill", time_excluded=1)
+        return d
+
+    def test_a_time_goal_skips_excluded_time(self, seed, db):
+        self._seed_overlap(seed)
+        gid = _add_goal(seed, db, metric="time_seconds", target=360_000)
+        assert _card(db, gid)["completed"] == 3600
+
+    def test_a_time_goal_agrees_with_the_stats_total(self, seed, db):
+        self._seed_overlap(seed)
+        seed.session(seed.day(2), secs=900, source="manual",
+                     title="Podcast", atype="Listening")
+        gid = _add_goal(seed, db, metric="time_seconds", target=360_000)
+        _, stats_secs, _ = db.get_range_totals(11)      # same span as the goal
+        assert _card(db, gid)["completed"] == pytest.approx(stats_secs)
+
+    def test_the_period_figures_skip_it_too(self, seed, db):
+        d = seed.day(0)
+        seed.gsm(d, chars=10_000, secs=3600, game_id="g1")
+        seed.session(d, secs=1800, source="gsm_history",
+                     title="Backfill", time_excluded=1)
+        g = _card(db, _add_goal(seed, db, metric="time_seconds", target=360_000))
+        assert g["today_completed"] == 3600
+        assert g["week_completed"] == 3600
+        assert g["month_completed"] == 3600
+
+    def test_the_burnup_lands_on_the_card(self, seed, db):
+        self._seed_overlap(seed)
+        gid = _add_goal(seed, db, metric="time_seconds", target=360_000)
+        assert db.db_get_goal_burnup(gid)["actual"][-1] == 3600
+
+    def test_a_chars_goal_keeps_their_chars(self, seed, db):
+        """time_excluded suppresses time, never chars."""
+        self._seed_overlap(seed)
+        gid = _add_goal(seed, db)
+        assert _card(db, gid)["completed"] == 12_000
+        assert db.db_get_goal_burnup(gid)["actual"][-1] == 12_000
