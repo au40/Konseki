@@ -112,6 +112,13 @@ def init_db():
     # window as a passive companion stat (graded on time, chars shown only).
     if "track_chars" not in goal_cols:
         con.execute("ALTER TABLE goals ADD COLUMN track_chars INTEGER NOT NULL DEFAULT 0")
+    # Auto-raise: the most days ahead the goal lets you get (NULL = off), and
+    # the logical date it was switched on — raises only look at days from
+    # then. The raise itself is never stored; db_get_goal_progress derives it.
+    if "raise_cap_days" not in goal_cols:
+        con.execute("ALTER TABLE goals ADD COLUMN raise_cap_days REAL")
+    if "raise_cap_from" not in goal_cols:
+        con.execute("ALTER TABLE goals ADD COLUMN raise_cap_from TEXT")
 
     # GSM game metadata table — stores cover images, descriptions, genres etc.
     con.execute("""
@@ -2618,15 +2625,27 @@ def db_finish_goal(goal_id):
 
 def db_get_goals():
     rows = _q(
-        "SELECT id,label,metric,target_value,deadline,chunk_period,activity_type,start_date,user_finished,track_chars "
+        "SELECT id,label,metric,target_value,deadline,chunk_period,activity_type,start_date,user_finished,track_chars,"
+        "raise_cap_days,raise_cap_from "
         "FROM goals ORDER BY deadline"
     )
     return [
         {"id": r[0], "label": r[1], "metric": r[2], "target": r[3],
          "deadline": r[4], "chunk_period": r[5], "activity_type": r[6], "start_date": r[7],
-         "user_finished": bool(r[8]), "track_chars": bool(r[9])}
+         "user_finished": bool(r[8]), "track_chars": bool(r[9]),
+         "raise_cap_days": r[10], "raise_cap_from": r[11]}
         for r in rows
     ]
+
+def _valid_raise_cap(cap):
+    """None / '' → None (auto-raise off); otherwise a day count >= 0. Fractions
+    are fine — half a day of cushion is a reasonable cap on a short goal."""
+    if cap is None or (isinstance(cap, str) and not cap.strip()):
+        return None
+    cap = float(cap)
+    if not math.isfinite(cap) or cap < 0:
+        raise ValueError("Auto-raise must be 0 or more days ahead")
+    return cap
 
 def _valid_goal_start(start_date, deadline):
     """Normalize an optional backdated start: empty → today, else validate
@@ -2639,30 +2658,48 @@ def _valid_goal_start(start_date, deadline):
         raise ValueError("Start date must be on or before the deadline")
     return start
 
-def db_add_goal(label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False, start_date=None):
+def db_add_goal(label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False, start_date=None,
+                raise_cap_days=None):
     if metric not in SAFE_METRICS:
         raise ValueError(f"Invalid metric: {metric}")
     start = _valid_goal_start(start_date, deadline)
+    cap   = _valid_raise_cap(raise_cap_days)
     con = sqlite3.connect(DB_PATH)
     con.execute(
         "INSERT INTO goals "
-        "(label,metric,target_value,deadline,chunk_period,activity_type,start_date,created_at,track_chars) "
-        "VALUES (?,?,?,?,?,?,?,?,?)",
+        "(label,metric,target_value,deadline,chunk_period,activity_type,start_date,created_at,track_chars,"
+        "raise_cap_days,raise_cap_from) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (label, metric, float(target), deadline, chunk_period,
          activity_type or None, start, datetime.now().isoformat(),
-         1 if track_chars else 0)
+         1 if track_chars else 0,
+         cap, get_today() if cap is not None else None)
     )
     con.commit()
     con.close()
 
-def db_update_goal(goal_id, label, target, deadline, activity_type, track_chars=False, start_date=None):
+_KEEP = object()
+
+def db_update_goal(goal_id, label, target, deadline, activity_type, track_chars=False, start_date=None,
+                   raise_cap_days=_KEEP):
+    """`raise_cap_days` left out keeps the goal's auto-raise as it is; None
+    switches it off. Switching it on stamps today as `raise_cap_from`; changing
+    the cap while it's on keeps the stamp, so the new cap re-derives over the
+    same days rather than restarting."""
     sets   = "label=?, target_value=?, deadline=?, activity_type=?, track_chars=?"
     params = [label, float(target), deadline, activity_type or None, 1 if track_chars else 0]
     if start_date:
         sets += ", start_date=?"
         params.append(_valid_goal_start(start_date, deadline))
-    params.append(int(goal_id))
     con = sqlite3.connect(DB_PATH)
+    if raise_cap_days is not _KEEP:
+        cap = _valid_raise_cap(raise_cap_days)
+        row = con.execute("SELECT raise_cap_days, raise_cap_from FROM goals WHERE id=?",
+                          (int(goal_id),)).fetchone()
+        was_on = bool(row) and row[0] is not None
+        sets += ", raise_cap_days=?, raise_cap_from=?"
+        params += [cap, None if cap is None else (row[1] if was_on and row[1] else get_today())]
+    params.append(int(goal_id))
     con.execute(f"UPDATE goals SET {sets} WHERE id=?", params)
     con.commit()
     con.close()
@@ -2819,30 +2856,86 @@ def db_get_goal_progress():
             if month_start_d <= month_sum_end_d:
                 chars_month = max(0.0, chars_month + _sum_adj(month_start_d, month_sum_end_d, "chars_read"))
 
-        remaining = max(0.0, g["target"] - completed)
+        # Goal length counts BOTH ends: the start date and the deadline are
+        # reading days, so Nov 1 → Nov 14 is 14 days and the plan's daily amount
+        # is target/14. days_left excludes today; every "days still to read"
+        # figure is days_left + 1 while the goal is live. The card used to mix
+        # this with deadline − start (13), which put the expected marker at
+        # 100% a day early and showed a fresh short goal as already ahead.
+        days_left  = max(0, (deadline_d - today_d).days)
+        total_days = max(1, (deadline_d - start_d).days + 1)
+        days_to_read = days_left + 1 if today_d <= deadline_d else 0
+
+        # Auto-raise (raise_cap_days): reading that takes you more than the cap
+        # past the plan line is added onto the target when its day closes, so
+        # you're never more than `cap` days ahead going into a new day. The
+        # plan's daily amount stays the base target's — the line steps up by
+        # each raise rather than steepening, so one good day early in a long
+        # goal raises it by what you read past the cap, not by that pace
+        # stretched over the rest of the goal. Derived from closed days on
+        # every read, never stored: changing the cap or correcting a day's data
+        # re-derives it. `target` below is the raised figure; the user's own
+        # number is `base_target`.
+        base_target = g["target"]
+        daily_plan  = base_target / total_days
+        raise_by_day = []
+        if g.get("raise_cap_days") is not None and base_target > 0:
+            last_closed = min(today_d - timedelta(days=1), deadline_d)
+            _, closed   = _goal_cumulative(g, start_d, last_closed, adj)
+            raise_by_day = _goal_raise_series(g, start_d, total_days, closed)
+        raised_by = raise_by_day[-1] if raise_by_day else 0.0
+
+        def _raised_through(d):
+            i = (d - start_d).days
+            return 0.0 if i < 0 or not raise_by_day else raise_by_day[min(i, len(raise_by_day) - 1)]
+        # What was raised since the week/month began, so the period bars can
+        # hold their target steady through the period (see makeGoalCard).
+        week_raise  = raised_by - _raised_through(week_start_d - timedelta(days=1))
+        month_raise = raised_by - _raised_through(month_start_d - timedelta(days=1))
+        target      = base_target + raised_by
+
+        remaining = max(0.0, target - completed)
         # Unclamped so overshoot (>100%) is visible in the displayed number;
         # the UI clamps the bar fill width separately to keep it inside the track.
-        pct       = round(completed / g["target"] * 100, 1) if g["target"] > 0 else 0.0
-
-        days_left  = max(0, (deadline_d - today_d).days)
-        total_days = max(1, (deadline_d - start_d).days)
+        pct       = round(completed / target * 100, 1) if target > 0 else 0.0
 
         original_chunk = None
         chunk_needed   = None
 
         if g["chunk_period"] == "daily":
-            original_chunk = g["target"] / total_days
-            chunk_needed   = remaining / days_left if days_left > 0 else 0.0
+            original_chunk = base_target / total_days
+            chunk_needed   = remaining / days_to_read if days_to_read > 0 else 0.0
         elif g["chunk_period"] == "weekly":
             total_weeks    = max(1.0, total_days / 7.0)
-            weeks_left     = days_left / 7.0
-            original_chunk = g["target"] / total_weeks
+            weeks_left     = days_to_read / 7.0
+            original_chunk = base_target / total_weeks
             chunk_needed   = remaining / weeks_left if weeks_left > 0 else 0.0
         elif g["chunk_period"] == "monthly":
             total_months   = max(1.0, total_days / 30.44)
-            months_left    = days_left / 30.44
-            original_chunk = g["target"] / total_months
+            months_left    = days_to_read / 30.44
+            original_chunk = base_target / total_months
             chunk_needed   = remaining / months_left if months_left > 0 else 0.0
+
+        # Where the plan line sits at the end of today — the card's expected
+        # marker. Straight from start to deadline, stepped up by any raises.
+        day_index     = min(total_days, max(0, (today_d - start_d).days + 1))
+        plan_expected = daily_plan * day_index + raised_by
+
+        # Days banked: how far above the plan line you are, counted in days of
+        # the plan's daily amount (base target / total_days) — "you could read
+        # nothing for this many days and still be on plan". Only reading
+        # already done counts; nothing is extrapolated (that's projected_end's
+        # job). Today is measured against the end-of-today plan, but its
+        # unfinished share is forgiven until the day closes, so an on-plan
+        # morning reads "on plan" instead of a day behind, and reading today
+        # only ever moves the figure up. With a cap, it can sit above the cap
+        # during today; the raise lands when the day closes.
+        banked_amount = None
+        banked_days   = None
+        if target > 0 and completed < target and start_d <= today_d <= deadline_d:
+            banked_amount = (completed - plan_expected
+                             + max(0.0, daily_plan - today_completed))
+            banked_days   = banked_amount / daily_plan
 
         # Projected finish date at the observed average pace (completed ÷ days
         # elapsed since start, today inclusive). ceil(target/pace) is the
@@ -2855,12 +2948,19 @@ def db_get_goal_progress():
         if remaining > 0 and completed > 0 and start_d <= today_d <= deadline_d:
             pace = completed / max(1, (today_d - start_d).days + 1)
             if pace > 0:
-                proj_d = start_d + timedelta(days=math.ceil(g["target"] / pace) - 1)
+                proj_d = start_d + timedelta(days=math.ceil(target / pace) - 1)
                 projected_end        = proj_d.strftime("%Y-%m-%d")
                 projected_days_delta = (proj_d - deadline_d).days
 
         results.append({
             **g,
+            "target":          target,       # raised; == base_target with auto-raise off
+            "base_target":     base_target,  # what the user set — the edit form's number
+            "raised_by":       raised_by,
+            "week_raise":      week_raise,
+            "month_raise":     month_raise,
+            "daily_plan":      daily_plan,
+            "plan_expected":   plan_expected,
             "completed":       completed,  # db_get_goal_burnup's last point == this
             "remaining":       remaining,
             "pct":             pct,
@@ -2881,10 +2981,98 @@ def db_get_goal_progress():
             "chars_month":       chars_month,
             "projected_end":        projected_end,
             "projected_days_delta": projected_days_delta,
-            "is_complete":     completed >= g["target"],
-            "is_overdue":      days_left == 0 and completed < g["target"],
+            "banked_amount":        banked_amount,
+            "banked_days":          banked_days,
+            "is_complete":     completed >= target,
+            # The deadline day is still a reading day; overdue starts after it.
+            "is_overdue":      today_d > deadline_d and completed < target,
         })
     return results
+
+
+def _goal_cumulative(g, start_d, end_d, adj=None):
+    """Per-day cumulative progress for a goal, start_d..end_d inclusive, as
+    (dates, totals). The burn-up's actual line, and the closed-day series the
+    auto-raise reads — one function, so a raise is decided on exactly the
+    numbers the chart plots.
+
+    Same metric column, activity filter and attribution rule as
+    db_get_goal_progress's `completed`, with `max(0, ...)` applied to the
+    running total (not per day) — floor the days independently and a single
+    over-displaced day would make the series sum to more than `completed`.
+    Net-adjustment-per-day pattern (CLAUDE.md): raw per-day sums plus
+    `get_gsm_day_adjustments()`, which already folds in the manual time
+    overlay, so it must not be re-applied here."""
+    dates, totals = [], []
+    if end_d < start_d:
+        return dates, totals
+    where  = ["session_date>=?", "session_date<=?"]
+    params = [start_d.isoformat(), end_d.isoformat()]
+    if g["activity_type"]:
+        where.append("activity_type=?")
+        params.append(g["activity_type"])
+    metric_expr = _goal_metric_expr(g["metric"])
+    rows = _q(
+        f"SELECT session_date, COALESCE(SUM({metric_expr}),0) FROM sessions "
+        f"WHERE {' AND '.join(where)} GROUP BY session_date", *params
+    )
+    raw = {r[0]: (r[1] or 0.0) for r in rows}
+
+    # GSM is always 'Reading', so attribution applies to Reading goals and to
+    # untyped ones. lines_read has no attribution component and falls to 0.
+    apply_attr = (not g["activity_type"]) or g["activity_type"] == "Reading"
+    if not apply_attr:
+        adj = {}
+    elif adj is None:
+        adj = get_gsm_day_adjustments()
+
+    cum = 0.0
+    cur = start_d
+    while cur <= end_d:
+        ds = cur.isoformat()
+        ac, at, ak = adj.get(ds, (0, 0, 0))
+        cum += raw.get(ds, 0.0) + {"chars_read": ac, "time_seconds": at,
+                                   "cards_mined": ak}.get(g["metric"], 0)
+        dates.append(ds)
+        totals.append(max(0.0, cum))
+        cur += timedelta(days=1)
+    return dates, totals
+
+
+def _goal_raise_series(g, start_d, total_days, closed):
+    """How much auto-raise has added to a goal by the end of each closed day,
+    aligned with `closed` (cumulative totals from start_d, one per day).
+
+    On each closed day from `raise_cap_from` on, anything past `cap` days of
+    the base plan's daily amount above the (already raised) plan line is added
+    to the target, so the day ends exactly `cap` days ahead. Two stops:
+
+    - **Days before `raise_cap_from` never raise.** Switching the cap on for a
+      goal you're ahead on caps you from then. Deriving from the goal's start
+      instead would raise by the peak you hit weeks ago — if you'd slowed since,
+      switching it on would put you behind at once.
+    - **A goal that reached its target stops raising.** Without this, the day
+      you finish early would close by raising the target past what you read,
+      and a goal marked Complete would un-complete overnight.
+    """
+    cap  = g.get("raise_cap_days")
+    base = g["target"]
+    if cap is None or base <= 0:
+        return [0.0] * len(closed)
+    plan = base / total_days
+    try:
+        from_d = datetime.strptime(g.get("raise_cap_from") or "", "%Y-%m-%d").date()
+    except ValueError:
+        from_d = start_d
+    raised, done, out = 0.0, False, []
+    for i, c in enumerate(closed):
+        done = done or c >= base + raised
+        if not done and start_d + timedelta(days=i) >= from_d:
+            excess = c - (plan * (i + 1) + raised) - cap * plan
+            if excess > 1e-9:
+                raised += excess
+        out.append(raised)
+    return out
 
 
 def db_get_goal_burnup(goal_id):
@@ -2892,23 +3080,21 @@ def db_get_goal_burnup(goal_id):
 
     The value on day d is exactly db_get_goal_progress's `completed` evaluated
     with count_up_to=d, so the **last point equals the number on the goal card
-    by construction** rather than by two formulas happening to agree. Same
-    metric column, same activity filter, same attribution rule, same
-    `max(0, ...)` applied to the running total (not per day) — floor the days
-    independently and a single over-displaced day would make the series sum to
-    more than `completed`.
-
-    Net-adjustment-per-day pattern (CLAUDE.md): raw per-day sums plus
-    `get_gsm_day_adjustments()`, which already folds in the manual time overlay,
-    so it must not be re-applied here. The window's upper bound is
+    by construction** rather than by two formulas happening to agree — both
+    come off `_goal_cumulative`'s basis. The window's upper bound is
     min(logical today, deadline) — the window_bounds clamp, so GSM's
     rollover-window writes at a future calendar date can't leak in.
 
-    Only the actual line lives here. The required-pace line, the projection and
-    the days-of-slack figure are drawn in the UI from `target` / `start_date` /
-    `deadline` / `projected_end`, which db_get_goal_progress already computes —
-    duplicating that math would give the card and the chart two different
-    projections.
+    `raised` is the auto-raise added by the end of each day (today carries
+    yesterday's: a day raises only once it closes), so the UI can step the
+    pace and target lines up on the day each raise landed. Its last value is
+    the card's `raised_by`, from the same `_goal_raise_series` call shape.
+
+    The required-pace line and the projection are drawn in the UI from
+    `target` / `base_target` / `start_date` / `deadline` / `projected_end`, and
+    the days-banked chip reads `banked_days`, all of which db_get_goal_progress
+    already computes — duplicating that math would give the card and the chart
+    two different answers.
     """
     g = next((x for x in db_get_goals() if x["id"] == int(goal_id)), None)
     if not g or g["metric"] not in SAFE_METRICS:
@@ -2926,40 +3112,20 @@ def db_get_goal_burnup(goal_id):
 
     end_d = min(today_d, deadline_d)
     out   = {"id": g["id"], "label": g["label"], "metric": g["metric"],
-             "target": g["target"], "start_date": g["start_date"],
-             "deadline": g["deadline"], "dates": [], "actual": []}
+             "target": g["target"], "base_target": g["target"],
+             "start_date": g["start_date"], "deadline": g["deadline"],
+             "dates": [], "actual": [], "raised": []}
     if end_d < start_d:
         return out                      # backdated start in the future: nothing yet
 
-    where  = ["session_date>=?", "session_date<=?"]
-    params = [start_d.isoformat(), end_d.isoformat()]
-    if g["activity_type"]:
-        where.append("activity_type=?")
-        params.append(g["activity_type"])
-    # Same basis as db_get_goal_progress, so the burn-up line lands on the
-    # card's own number.
-    metric_expr = _goal_metric_expr(g["metric"])
-    rows = _q(
-        f"SELECT session_date, COALESCE(SUM({metric_expr}),0) FROM sessions "
-        f"WHERE {' AND '.join(where)} GROUP BY session_date", *params
-    )
-    raw = {r[0]: (r[1] or 0.0) for r in rows}
-
-    # GSM is always 'Reading', so attribution applies to Reading goals and to
-    # untyped ones. lines_read has no attribution component and falls to 0.
-    apply_attr = (not g["activity_type"]) or g["activity_type"] == "Reading"
-    adj        = get_gsm_day_adjustments() if apply_attr else {}
-
-    cum = 0.0
-    cur = start_d
-    while cur <= end_d:
-        ds = cur.isoformat()
-        ac, at, ak = adj.get(ds, (0, 0, 0))
-        cum += raw.get(ds, 0.0) + {"chars_read": ac, "time_seconds": at,
-                                   "cards_mined": ak}.get(g["metric"], 0)
-        out["dates"].append(ds)
-        out["actual"].append(max(0.0, cum))
-        cur += timedelta(days=1)
+    dates, actual = _goal_cumulative(g, start_d, end_d)
+    total_days = max(1, (deadline_d - start_d).days + 1)
+    n_closed   = sum(1 for d in dates if d < today_d.isoformat())
+    raised     = _goal_raise_series(g, start_d, total_days, actual[:n_closed])
+    last       = raised[-1] if raised else 0.0
+    out.update(dates=dates, actual=actual,
+               raised=raised + [last] * (len(dates) - n_closed),
+               target=g["target"] + last)
     return out
 
 

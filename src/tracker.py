@@ -429,16 +429,22 @@ class Api:
         # would pay for it on every pace-view switch otherwise.
         return db_get_goal_burnup(goal_id)
 
-    def add_goal(self, label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False, start_date=None):
+    def add_goal(self, label, metric, target, deadline, chunk_period="daily", activity_type=None, track_chars=False, start_date=None,
+                 raise_cap_days=None):
         try:
-            db_add_goal(label, metric, float(target), deadline, chunk_period, activity_type, track_chars, start_date)
+            db_add_goal(label, metric, float(target), deadline, chunk_period, activity_type, track_chars, start_date,
+                        raise_cap_days)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    def update_goal(self, goal_id, label, target, deadline, activity_type=None, track_chars=False, start_date=None):
+    def update_goal(self, goal_id, label, target, deadline, activity_type=None, track_chars=False, start_date=None,
+                    raise_cap_days=None):
+        # The edit form always sends the cap field, so None here means the
+        # user cleared it (auto-raise off), not "leave it alone".
         try:
-            db_update_goal(goal_id, label, float(target), deadline, activity_type, track_chars, start_date)
+            db_update_goal(goal_id, label, float(target), deadline, activity_type, track_chars, start_date,
+                           raise_cap_days)
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}

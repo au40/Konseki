@@ -3878,6 +3878,7 @@ async function loadGoals() {
   document.getElementById('goal-target').value   = '';
   document.getElementById('goal-deadline').value = '';
   document.getElementById('goal-start').value    = '';
+  document.getElementById('goal-raise-cap').value = '';
   await populateGoalActivitySelect();
   const goals = await window.pywebview.api.get_goals();
   goals.forEach(g => { goalDataCache[g.id] = g; });
@@ -3938,9 +3939,11 @@ function hideCompletedGoals() {
 // so the two can't disagree about what a goal asks of today.
 
 // A goal gets a period line (and a daily share) only while it's live: not
-// complete, not overdue, with days and an amount still left.
+// complete, not overdue, with an amount still left. The deadline day is a
+// reading day (db.py counts both ends of a goal), so it keeps its period line;
+// is_overdue only turns on the day after.
 function goalHasPeriodLine(g) {
-  return !g.is_complete && !g.is_overdue && g.days_left > 0 && g.remaining > 0;
+  return !g.is_complete && !g.is_overdue && g.remaining > 0;
 }
 
 // Today's share of a goal. Today's progress is added back onto what's left so
@@ -3979,7 +3982,7 @@ function makeGoalCard(g) {
     statusBadge = `<span class="badge badge-overdue">Overdue</span>`;
   } else {
     const urgency = g.days_left <= 3 ? 'var(--danger)' : g.days_left <= 7 ? 'var(--warn)' : 'var(--dim)';
-    statusBadge = `<span class="badge" style="color:${urgency}">${g.days_left}d left</span>`;
+    statusBadge = `<span class="badge" style="color:${urgency}">${g.days_left === 0 ? 'last day' : `${g.days_left}d left`}</span>`;
   }
 
   let chunkHtml = '';
@@ -3996,10 +3999,15 @@ function makeGoalCard(g) {
     // and days_left_at_start = days_left + days-elapsed-this-period. Both are
     // invariant across the period (reading cancels within a day; the day-to-day
     // index growth cancels the days_left decrease), so the bar target holds
-    // steady while only the fill moves.
+    // steady while only the fill moves. An auto-raise that lands mid-period
+    // grows `remaining` too, so it's taken back out (week_raise/month_raise):
+    // the bar picks the raise up at the next period boundary instead of
+    // jumping mid-week. The daily view needs none — raises land when a day
+    // closes, never during one.
+    // originalChunk is the base plan's amount, which auto-raise never changes.
     if (goalPaceView === 'daily') {
       chunkNeeded   = goalDailyShare(g);
-      originalChunk = g.target / Math.max(1, g.total_days);
+      originalChunk = g.base_target / Math.max(1, g.total_days);
       periodDone    = g.today_completed || 0;
       periodChars   = g.chars_today || 0;
       periodLabel   = 'Today';
@@ -4012,10 +4020,10 @@ function makeGoalCard(g) {
       // +1: days_left excludes today; the inclusive period length (week_period_days
       // / the *7 multiplier) counts it, so the denominator must too (else target > remPs).
       const daysLeftPs = (g.days_left + 1) + ((g.week_day_index || 1) - 1);
-      const remPs      = g.remaining + (g.week_completed || 0);
+      const remPs      = g.remaining + (g.week_completed || 0) - (g.week_raise || 0);
       const flatDaily  = daysLeftPs > 0 ? remPs / daysLeftPs : 0;
       chunkNeeded   = flatDaily * 7;
-      originalChunk = g.target / Math.max(1, g.total_days / 7);
+      originalChunk = g.base_target / Math.max(1, g.total_days / 7);
       periodDone    = g.week_completed || 0;
       periodChars   = g.chars_week || 0;
       periodLabel   = 'This week';
@@ -4031,10 +4039,10 @@ function makeGoalCard(g) {
       // +1: see weekly branch — days_left excludes today, the inclusive
       // month_period_days / *30.44 multiplier counts it.
       const daysLeftPs = (g.days_left + 1) + ((g.month_day_index || 1) - 1);
-      const remPs      = g.remaining + (g.month_completed || 0);
+      const remPs      = g.remaining + (g.month_completed || 0) - (g.month_raise || 0);
       const flatDaily  = daysLeftPs > 0 ? remPs / daysLeftPs : 0;
       chunkNeeded   = flatDaily * 30.44;
-      originalChunk = g.target / Math.max(1, g.total_days / 30.44);
+      originalChunk = g.base_target / Math.max(1, g.total_days / 30.44);
       periodDone    = g.month_completed || 0;
       periodChars   = g.chars_month || 0;
       periodLabel   = 'This month';
@@ -4078,8 +4086,16 @@ function makeGoalCard(g) {
   const projHead = g.projected_end
     ? `projected finish: ${g.projected_end}`
     : 'cumulative progress vs required pace';
+  const banked = goalBankedChip(g);
+  const bankedColor = banked ? { success: CT.success, warn: CT.warn, dim: 'var(--dim)' }[banked.tone] : '';
 
   const actLabel = g.activity_type ? ` · ${g.activity_type}` : '';
+  const raisedLabel = (g.raised_by || 0) > 0
+    ? ` <span style="color:var(--muted)" title="Auto-raise added ${fmtMetric(g.raised_by)} for going past ${fmtGoalDays(g.raise_cap_days)} ahead">(raised from ${fmtMetric(g.base_target)})</span>`
+    : '';
+  const capLabel = g.raise_cap_days != null
+    ? ` · <span title="Anything past this far ahead of the plan is added to the target when the day closes">auto-raise past ${fmtGoalDays(g.raise_cap_days)} ahead</span>`
+    : '';
   const charsLabel = g.track_chars
     ? ` · <span class="goal-chars-companion">${fmtChars(Math.round(g.chars_completed || 0))} chars</span>`
     : '';
@@ -4104,27 +4120,26 @@ function makeGoalCard(g) {
         <div class="progress-fill" style="width:${Math.min(100, pct)}%;background:${fillColor}"></div>
       </div>
       ${(() => {
-        // Pace-aligned with the period bar's red tick and every other pacing
-        // calc in the system (chunk_needed, original_chunk, barTarget), which
-        // all use target/total_days as the daily pace. elapsed includes today
-        // (+1) so the marker means "by end of today", and we clamp to total
-        // so the deadline day sits exactly at 100%.
-        const total = Math.max(1, g.total_days);
-        const elapsed = Math.max(0, Math.min(total, (g.total_days - g.days_left) + 1));
-        const expPct = (elapsed / total) * 100;
+        // The plan line at the end of today (db.py's plan_expected): the base
+        // plan's daily amount times today's 1-based day index, plus whatever
+        // auto-raise has added — the same line days banked is measured from
+        // and the burn-up draws. Without raises it's elapsed/total_days of the
+        // target, reaching 100% on the deadline day, not the day before.
+        const expAmt = g.plan_expected || 0;
+        const expPct = g.target > 0 ? Math.min(100, expAmt / g.target * 100) : 0;
         // Match the right-side progress %: 1-decimal precision, always shown.
         const expDisp = fmtPct(expPct);
-        const expVal = fmtMetric((expPct / 100) * g.target);
+        const expVal = fmtMetric(expAmt);
         return `<div class="progress-expected" style="left:${expPct}%" title="Expected by end of today: ${expDisp}% (${expVal})"></div>`;
       })()}
     </div>
     <div class="goal-meta">
-      <span class="goal-numbers">${fmtMetric(g.completed)} / ${fmtMetric(g.target)}${actLabel}${charsLabel}</span>
+      <span class="goal-numbers">${fmtMetric(g.completed)} / ${fmtMetric(g.target)}${raisedLabel}${actLabel}${charsLabel}</span>
       <span class="goal-pct" style="color:${fillColor}">${fmtPct(pct)}%</span>
     </div>
     ${chunkHtml}
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:2px">
-      <div style="font-size:10px;color:var(--muted)">deadline: ${g.deadline} · started: ${g.start_date}</div>
+      <div style="font-size:10px;color:var(--muted)">deadline: ${g.deadline} · started: ${g.start_date}${capLabel}</div>
       <div style="display:flex;align-items:center;gap:8px">
         <button class="btn btn-xs goal-burnup-btn${burnupOpen ? ' active' : ''}" id="goal-burnup-btn-${g.id}"
                 title="Where your current pace lands, against the pace this goal needs"
@@ -4135,7 +4150,8 @@ function makeGoalCard(g) {
     <div class="goal-burnup" id="goal-burnup-${g.id}" style="display:${burnupOpen ? '' : 'none'}">
       <div class="goal-burnup-head">
         <span title="Finish date extrapolated from your average pace since the goal started">${projHead}</span>
-        <span class="goal-slack" id="goal-slack-${g.id}"></span>
+        <span class="goal-slack" style="color:${bankedColor}"
+              title="How far above or below the plan line you are, in days of the plan's daily amount. Today's share isn't counted against you until the day is over.">${banked ? banked.text : ''}</span>
       </div>
       <div class="goal-burnup-chart"><canvas id="goal-burnup-canvas-${g.id}" height="190"></canvas></div>
     </div>`;
@@ -4165,7 +4181,7 @@ const goalBurnupOpen = new Set();
 // hasn't happened. Every derived number comes off the goal payload the card
 // already rendered (target, deadline, projected_end), so the chart and the card
 // can't project differently.
-function goalBurnupSeries(g, dates, actual) {
+function goalBurnupSeries(g, dates, actual, raised) {
   const axisEnd = (g.projected_end && g.projected_end > g.deadline) ? g.projected_end : g.deadline;
   const labels  = [];
   const cur = dateFromISO(g.start_date), stop = dateFromISO(axisEnd);
@@ -4176,20 +4192,31 @@ function goalBurnupSeries(g, dates, actual) {
   const scale  = g.metric === 'time_seconds' ? 1 / 3600 : 1;
   const target = (g.target || 0) * scale;
 
-  const byDate = {};
-  (dates || []).forEach((d, i) => { byDate[d] = (actual || [])[i]; });
+  const byDate = {}, raisedOn = {};
+  (dates || []).forEach((d, i) => {
+    byDate[d]   = (actual || [])[i];
+    raisedOn[d] = ((raised || [])[i] || 0) * scale;
+  });
   const lastDay = (dates && dates.length) ? dates[dates.length - 1] : null;
+  // Auto-raise: `raised` is what had been added by each day's end, so the pace
+  // and target lines step up on the day a raise landed. Days still ahead carry
+  // the full raise the card's target already includes.
+  const base     = (g.base_target ?? g.target ?? 0) * scale;
+  const raiseFor = l => (lastDay && l <= lastDay) ? (raisedOn[l] || 0) : target - base;
   const act = labels.map(l => {
     if (!lastDay || l > lastDay) return null;
     const v = byDate[l];
     return v == null ? null : v * scale;
   });
 
-  // Straight line from 0 at the start to the target on the deadline — the same
-  // target/total_days daily pace the card's expected-progress marker uses.
+  // Straight line rising to the target on the deadline — the same
+  // base_target/total_days daily pace the card's expected-progress marker
+  // uses, lifted by any auto-raise. Every point is an end-of-day total, like
+  // `actual`, so the start day already carries one day's share: the start and
+  // the deadline are both reading days (dlIdx + 1 of them).
   const dlIdx = Math.max(0, labels.indexOf(g.deadline));
-  const pace  = labels.map((_, i) =>
-    i > dlIdx ? null : (dlIdx === 0 ? target : target * i / dlIdx));
+  const plan  = base / (dlIdx + 1);
+  const pace  = labels.map((l, i) => i > dlIdx ? null : plan * (i + 1) + raiseFor(l));
 
   // Projection: a straight run from today's actual to the target on
   // projected_end. db.py derived that date from the observed average pace, so
@@ -4206,17 +4233,43 @@ function goalBurnupSeries(g, dates, actual) {
     }
   }
 
-  // Days you could skip and still land on the deadline at the current pace —
-  // the deadline-relative flip of the card's "3d early / 3d late" chip, so the
-  // two can never disagree.
-  const slack = (g.projected_days_delta == null) ? null : -g.projected_days_delta;
+  // Colours the projection: it lands after the deadline.
+  const late = (g.projected_days_delta ?? 0) > 0;
 
   // `short` is what the axis plots; `labels` stays ISO for the tooltip title.
   // Pre-formatted rather than done in a tick callback, matching every other
   // chart here — under autoSkip a callback's index is the surviving-tick index,
   // not the label index, so looking labels up by it would misalign them.
   return { labels, short: labels.map(l => l.slice(5)),
-           actual: act, pace, projected, scope: labels.map(() => target), slack };
+           actual: act, pace, projected, scope: labels.map(l => base + raiseFor(l)), late };
+}
+
+// The days-banked chip in the projection head. banked_days is db.py's (reading
+// above the plan line, in days of the plan's daily amount); null means the goal
+// isn't live — complete, overdue, or not started — and the chip stays empty.
+// It used to show the projection's distance from the deadline instead, which
+// extrapolated: one big first day on a two-week goal read as nine days of slack.
+//
+// With auto-raise on, the figure can sit above the cap during today — the raise
+// lands when the day closes — so the chip says so rather than looking broken.
+function goalBankedChip(g) {
+  const d = g.banked_days;
+  if (d == null) return null;
+  const n = Math.abs(d);
+  if (n < 0.05) return { text: 'on plan', tone: 'dim' };
+  const days = fmtGoalDays(n);
+  const amt  = fmtGoalMetric(g, Math.abs(g.banked_amount));
+  if (d < 0) return { text: `${days} behind (−${amt})`, tone: 'warn' };
+  const over = g.raise_cap_days != null && d > g.raise_cap_days + 0.05
+    ? ` · over the ${fmtGoalDays(g.raise_cap_days, true)} cap` : '';
+  return { text: `${days} ahead (+${amt})${over}`, tone: 'success' };
+}
+
+// "1 day" / "1.5 days" / "12 days": one decimal under ten, whole days above.
+// `adj` gives the hyphenated form ("3-day") for "the 3-day cap".
+function fmtGoalDays(n, adj = false) {
+  const num = n >= 10 ? String(Math.round(n)) : String(+(+n).toFixed(1));
+  return adj ? `${num}-day` : `${num} day${num === '1' ? '' : 's'}`;
 }
 
 function dropBurnupCharts() {
@@ -4249,8 +4302,7 @@ async function renderGoalBurnup(id) {
   if (!g || !document.getElementById(canvasId)) return;
 
   const data = await window.pywebview.api.get_goal_burnup(id);
-  const s    = data ? goalBurnupSeries(g, data.dates, data.actual) : null;
-  const slackEl = document.getElementById(`goal-slack-${id}`);
+  const s    = data ? goalBurnupSeries(g, data.dates, data.actual, data.raised) : null;
 
   // A goal with no reading yet still draws — a flat zero against the pace line
   // is the answer to "how far behind am I". This only fires when the backend
@@ -4258,23 +4310,12 @@ async function renderGoalBurnup(id) {
   if (!s || !s.actual.some(v => v != null)) {
     destroyChart(key);
     setChartEmpty(canvasId, "This goal hasn't started yet");
-    if (slackEl) slackEl.textContent = '';
     return;
-  }
-
-  if (slackEl) {
-    const n = s.slack;
-    slackEl.title = 'Days you could take off and still finish by the deadline at your current pace';
-    if (n == null)      { slackEl.textContent = ''; }
-    else if (n >= 0)    { slackEl.textContent = `${n} day${n === 1 ? '' : 's'} of slack`;
-                          slackEl.style.color = CT.success; }
-    else                { slackEl.textContent = `${-n} day${n === -1 ? '' : 's'} behind`;
-                          slackEl.style.color = CT.warn; }
   }
 
   const isTime  = g.metric === 'time_seconds';
   const fmtVal  = v => isTime ? fmtTime(v * 3600) : `${fmtChars(Math.round(v))} chars`;
-  const late    = (s.slack ?? 0) < 0;
+  const late    = s.late;
 
   // Array order is draw order AND legend order (see the note in
   // renderDetailMetricChart — `order:` reverses both, so don't reach for it).
@@ -4350,13 +4391,16 @@ async function openGoalEdit(id) {
   document.getElementById('goal-label').value    = g.label;
   document.getElementById('goal-metric').value   = (g.metric === 'time_seconds' && g.track_chars) ? 'time_chars' : g.metric;
   document.getElementById('goal-metric').disabled = true;
-  const rawTarget = g.metric === 'time_seconds' ? +(g.target / 3600).toFixed(2) : g.target;
+  // The user's own number, not the auto-raised one — saving the raised figure
+  // would bake every raise into the base and the next raise would stack on it.
+  const rawTarget = g.metric === 'time_seconds' ? +(g.base_target / 3600).toFixed(2) : g.base_target;
   document.getElementById('goal-target').value   = rawTarget;
   document.getElementById('goal-deadline').value = g.deadline;
   document.getElementById('goal-chunk').value    = g.chunk_period || 'none';
   document.getElementById('goal-chunk').disabled  = true;
   document.getElementById('goal-activity').value  = g.activity_type || '';
   document.getElementById('goal-start').value     = g.start_date || '';
+  document.getElementById('goal-raise-cap').value = g.raise_cap_days ?? '';
   document.getElementById('goal-feedback').textContent = '';
   document.getElementById('goal-add-btn').textContent  = 'Save changes';
   updateGoalUnit();
@@ -4376,6 +4420,8 @@ async function doAddGoal() {
   const chunkPeriod = document.getElementById('goal-chunk').value;
   const atype       = document.getElementById('goal-activity').value || null;
   const startVal    = document.getElementById('goal-start').value.trim();
+  const capVal      = document.getElementById('goal-raise-cap').value.trim();
+  const raiseCap    = capVal === '' ? null : parseFloat(capVal);
   const fb          = document.getElementById('goal-feedback');
 
   if (!label) {
@@ -4399,25 +4445,30 @@ async function doAddGoal() {
   if (startVal && startVal >= deadline) {
     fb.className = 'feedback err'; fb.textContent = 'Start date must be before the deadline.'; return;
   }
+  if (raiseCap !== null && (!isFinite(raiseCap) || raiseCap < 0)) {
+    fb.className = 'feedback err'; fb.textContent = 'Auto-raise must be 0 or more days, or blank for off.'; return;
+  }
 
   let target = metric === 'time_seconds' ? rawTarget * 3600 : rawTarget;
 
   let r;
   if (editingGoalId !== null) {
-    r = await window.pywebview.api.update_goal(editingGoalId, label, target, deadline, atype, trackChars, startVal || null);
+    r = await window.pywebview.api.update_goal(editingGoalId, label, target, deadline, atype, trackChars, startVal || null, raiseCap);
   } else {
     if (chunkPeriod !== 'none') {
       // Pace targets cover the whole goal window, so a backdated start
-      // multiplies the per-period amount over the extra elapsed days too
-      // (matches total_days = deadline − start in db_get_goal_progress).
-      const daysUntil = Math.round((new Date(deadline) - new Date(startVal || today())) / 86400000);
-      const periods   = chunkPeriod === 'weekly' ? Math.ceil(daysUntil / 7) : chunkPeriod === 'monthly' ? Math.ceil(daysUntil / 30.44) : daysUntil;
+      // multiplies the per-period amount over the extra elapsed days too.
+      // Both ends are reading days (matches total_days = deadline − start + 1
+      // in db_get_goal_progress), so 1h/day from Nov 1 to Nov 14 is 14h —
+      // without the +1 it was 13h and the card then asked 0.93h/day.
+      const goalDays  = Math.round((new Date(deadline) - new Date(startVal || today())) / 86400000) + 1;
+      const periods   = chunkPeriod === 'weekly' ? Math.ceil(goalDays / 7) : chunkPeriod === 'monthly' ? Math.ceil(goalDays / 30.44) : goalDays;
       if (periods < 1) {
         fb.className = 'feedback err'; fb.textContent = 'Deadline is too soon for that pace.'; return;
       }
       target *= periods;
     }
-    r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype, trackChars, startVal || null);
+    r = await window.pywebview.api.add_goal(label, metric, target, deadline, chunkPeriod, atype, trackChars, startVal || null, raiseCap);
   }
 
   if (r.ok) {
@@ -4425,6 +4476,7 @@ async function doAddGoal() {
     document.getElementById('goal-target').value   = '';
     document.getElementById('goal-deadline').value = '';
     document.getElementById('goal-start').value    = '';
+    document.getElementById('goal-raise-cap').value = '';
     setGoalPanelMode('default');
     statsCache = {};
     await loadGoals();

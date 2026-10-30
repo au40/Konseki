@@ -875,3 +875,55 @@ to the old shape fails three of its tests.
   drop `time_excluded` time like every other time figure, so a suppressed Anki
   day doesn't count toward a time goal. They used to sum the bare column, which
   put a year's time goal tens of hours above the Stats page.
+
+# Goals — both ends are reading days, and slack is days banked
+
+A goal's start date and its deadline are **both** reading days: Nov 1 → Nov 14
+is 14 days, `total_days = deadline − start + 1`, and the plan's daily amount is
+`target / total_days`. `days_left` excludes today, so "days still to read" is
+`days_left + 1` while the goal is live, and **the deadline day is not overdue** —
+`is_overdue` starts the day after. Every pacing figure has to use this one count:
+the daily share, the week/month bars, the expected-progress marker, the burn-up's
+required-pace line (end-of-day totals, so the start day already owes one share),
+`original_chunk`, the ↑/⚠ arrow and the goal form's per-period multiplier. They
+used to split between this and `deadline − start`, which put the marker at 100%
+a day early, showed a fresh short goal as ahead before anything was read, and
+made "1h/day" over two weeks a 13h goal. The gap is ~0.3% on a year goal and 17%
+on a week, so it only shows on short goals.
+
+**Days banked** (`banked_days` / `banked_amount` in `db_get_goal_progress`) is
+reading above that plan line, in days of the plan's daily amount — no
+extrapolation. Today is measured against the end-of-today plan but its unread
+share is forgiven until the day closes, so reading today only ever moves it up.
+It replaced a "days of slack" that was the projected finish's distance from the
+deadline: that scaled with how much goal was left and read one big first day as
+a week of cushion. The projection (`projected_end`) still answers "if I keep
+this up"; it just isn't the slack figure. Any future auto-raise cap should be
+measured in days banked, so the cap and the chip are the same number.
+
+## Auto-raise (`raise_cap_days`) — a cushion cap, not a re-plan
+
+Optional per goal (NULL = off, set from the goal form). When a day **closes**
+more than `cap` days ahead, the surplus past the cap is added onto the target,
+so every new day starts at most `cap` days ahead. Rules that hold it together:
+
+- **The plan line steps, it doesn't steepen.** The daily amount stays
+  `base_target / total_days`; each raise lifts the line by exactly what was read
+  past the cap. Re-planning the whole line instead turns one good early day
+  into a large raise (that day's pace stretched over the rest of the goal).
+- **Derived on every read, never stored** — `_goal_raise_series` over
+  `_goal_cumulative`, the same closed-day series the burn-up plots. Only
+  `raise_cap_days` and `raise_cap_from` are stored. The payload's `target` is
+  the raised figure and `base_target` the user's own number; **the edit form
+  must load `base_target`**, or saving would bake every raise into the base.
+- **Closed days only.** Today never raises, so today's bar holds still while you
+  read; the chip can sit above the cap until the day closes and says so.
+- **Only days from `raise_cap_from` raise.** Switching the cap on stamps today;
+  changing it while on keeps the stamp. Deriving from the goal's start would
+  raise by a peak you hit weeks ago and could put you behind on the spot.
+- **A goal that reaches its target stops raising**, or the day you finish early
+  would close by raising the target past what you read.
+- The week/month bars subtract `week_raise` / `month_raise` (raised since the
+  period began) so a mid-period raise shows up at the next boundary instead of
+  moving the bar's target mid-week. The ↑/⚠ arrow compares against the base
+  plan's amount (`original_chunk`), which raises never change.

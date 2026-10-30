@@ -113,7 +113,7 @@ const PROBE = `
   TEXT_COLORS, MODE_SURFACE, MODE_CARD, TEXT_TARGETS, textVarsFor, applyTextColor, textTintFragment,
   hexMix, contrastRatio, textCustomPair,
   get appSettings() { return appSettings; }, set appSettings(v) { appSettings = v; },
-  goalHasPeriodLine, goalDailyShare, fmtGoalMetric, todayGoalRows,
+  goalHasPeriodLine, goalDailyShare, fmtGoalMetric, todayGoalRows, goalBankedChip, fmtGoalDays,
   mediaGridItems, seriesCardFacts,
 };`;
 
@@ -293,7 +293,10 @@ check('share holds steady through the day: more reading today, same target',
 check('a live goal gets a period line', P.goalHasPeriodLine(g500), true);
 check('a complete goal does not',       P.goalHasPeriodLine({ ...g500, is_complete: true }), false);
 check('an overdue goal does not',       P.goalHasPeriodLine({ ...g500, is_overdue: true }), false);
-check('nor one on its deadline day',    P.goalHasPeriodLine({ ...g500, days_left: 0 }), false);
+// The deadline day is a reading day (db.py counts both ends); overdue starts
+// the day after, and is_overdue is what says so.
+check('but its deadline day still does', P.goalHasPeriodLine({ ...g500, days_left: 0 }), true);
+check('overdue wins on a zero days_left', P.goalHasPeriodLine({ ...g500, days_left: 0, is_overdue: true }), false);
 check('nor one with nothing left',      P.goalHasPeriodLine({ ...g500, remaining: 0 }), false);
 check('time goals format as time',  P.fmtGoalMetric(g500, 4128), '1h 8m');
 check('chars goals format as chars', P.fmtGoalMetric({ metric: 'chars_read' }, 5255), '5.3k');
@@ -586,16 +589,16 @@ check('a missing series is tolerated',
       P.sparkHTML(undefined, '#5B8CFF').includes('spark-empty'), true);
 
 console.log('\n--- M6: goal burn-up geometry ---');
-// A 10-day chars goal: start Mar 1, deadline Mar 11 (10 days of pace), target
-// 100k. Four days read at 5k/day, so the run rate is half what's needed.
-// projected_end / projected_days_delta are what db.py derives from that pace —
-// 100k at 5k/day is reached on day index 20, i.e. start + 19 = Mar 20, nine
-// days past the deadline. The fixture has to satisfy db.py's arithmetic or the
+// A 10-day chars goal: start Mar 1, deadline Mar 10 (both ends are reading
+// days, so 10 days of pace), target 100k. Four days read at 5k/day, so the run
+// rate is half what's needed. projected_end / projected_days_delta are what
+// db.py derives from that pace — 100k at 5k/day is reached on day index 20,
+// i.e. start + 19 = Mar 20, ten days past the deadline. The fixture has to satisfy db.py's arithmetic or the
 // projection-slope check below is asserting against a pace nobody computed.
 const burnGoal = {
   metric: 'chars_read', target: 100000,
-  start_date: '2026-03-01', deadline: '2026-03-11',
-  projected_end: '2026-03-20', projected_days_delta: 9,
+  start_date: '2026-03-01', deadline: '2026-03-10',
+  projected_end: '2026-03-20', projected_days_delta: 10,
 };
 const burnDates = ['2026-03-01', '2026-03-02', '2026-03-03', '2026-03-04'];
 const burnCum   = [5000, 10000, 15000, 20000];
@@ -611,11 +614,14 @@ check('actual carries the backend series', BU.actual.slice(0, 4).join(','), '500
 check('actual is null past the last real day', BU.actual[4], null);
 check('actual never resumes', BU.actual.slice(4).every(v => v === null), true);
 
-check('pace starts at zero', BU.pace[0], 0);
+// End-of-day totals, like `actual`: the start day already owes one share.
+// (It used to start at 0 and rise over 9 steps, so it ran a day behind the
+// card's marker and the real 10-day plan.)
+check("pace ends the start day on one day's share", BU.pace[0], 10000);
 check('pace hits the target exactly on the deadline',
-      BU.pace[BU.labels.indexOf('2026-03-11')], 100000);
-check('pace is the same target/total_days the card uses', BU.pace[1], 10000);
-check('pace stops at the deadline', BU.pace[BU.labels.indexOf('2026-03-12')], null);
+      BU.pace[BU.labels.indexOf('2026-03-10')], 100000);
+check('pace is the same target/total_days the card uses', BU.pace[1], 20000);
+check('pace stops at the deadline', BU.pace[BU.labels.indexOf('2026-03-11')], null);
 check('target line is flat at the target', BU.scope.every(v => v === 100000), true);
 
 // The projection must LEAVE from the last actual point, not from zero or from
@@ -629,7 +635,7 @@ check('projection is null after projected_end', BU.projected[pEnd + 1], undefine
 // db.py extrapolated projected_end from.
 check('projection runs at the observed pace (5k/day)',
       Math.round(BU.projected[pStart + 1] - BU.projected[pStart]), 5000);
-check('slack is the deadline-relative flip of projected_days_delta', BU.slack, -9);
+check('a projection past the deadline is late', BU.late, true);
 
 // The axis plots `short`; `labels` stays ISO so the tooltip can name the day.
 check('short labels are MM-DD', BU.short[0], '03-01');
@@ -638,11 +644,11 @@ check('short labels stay aligned with the ISO ones', BU.short.length, BU.labels.
 // Ahead of schedule: the axis must NOT stretch past the deadline just because
 // the projection lands early, or the chart grows a meaningless empty tail.
 const early = P.goalBurnupSeries(
-  { ...burnGoal, projected_end: '2026-03-07', projected_days_delta: -4 },
+  { ...burnGoal, projected_end: '2026-03-07', projected_days_delta: -3 },
   burnDates, [15000, 30000, 45000, 60000]);
 check('an early projection leaves the axis at the deadline',
-      early.labels[early.labels.length - 1], '2026-03-11');
-check('slack is positive when finishing early', early.slack, 4);
+      early.labels[early.labels.length - 1], '2026-03-10');
+check('an early projection is not late', early.late, false);
 
 // Time goals plot in hours; the series arrives in seconds.
 const timeGoal = P.goalBurnupSeries(
@@ -652,7 +658,7 @@ const timeGoal = P.goalBurnupSeries(
 check('time series is scaled to hours', timeGoal.actual.slice(0, 2).join(','), '1,2.5');
 check('time target is scaled to hours', timeGoal.scope[0], 10);
 check('no projection without a projected_end', timeGoal.projected, null);
-check('no slack without a delta', timeGoal.slack, null);
+check('no projection is not late', timeGoal.late, false);
 
 // Degenerate + hostile inputs: a same-day goal, and a goal with no reading yet.
 const sameDay = P.goalBurnupSeries(
@@ -671,6 +677,56 @@ check('dateFromISO parses local, not UTC', P.dateFromISO('2026-03-02').getDate()
 check('a 366-day goal spans a leap year without drift',
       P.goalBurnupSeries({ metric: 'chars_read', target: 1, start_date: '2028-01-01',
                            deadline: '2028-12-31' }, [], []).labels.length, 366);
+
+console.log('\n--- goal days-banked chip ---');
+// banked_days / banked_amount come from db.py; the chip only words them.
+const tg = { metric: 'time_seconds' };
+check('no figure means no chip (complete, overdue, not started)',
+      P.goalBankedChip({ ...tg, banked_days: null, banked_amount: null }), null);
+check('a sliver either way reads as on plan',
+      P.goalBankedChip({ ...tg, banked_days: -0.03, banked_amount: -100 }).text, 'on plan');
+const ahead = P.goalBankedChip({ ...tg, banked_days: 1.7, banked_amount: 6000 });
+check('ahead names days and the amount', ahead.text, '1.7 days ahead (+1h 40m)');
+check('ahead is the success tone', ahead.tone, 'success');
+const behind = P.goalBankedChip({ ...tg, banked_days: -2.3, banked_amount: -8280 });
+check('behind names days and the amount', behind.text, '2.3 days behind (−2h 18m)');
+check('behind is the warn tone', behind.tone, 'warn');
+check('one day is singular',
+      P.goalBankedChip({ ...tg, banked_days: 1.02, banked_amount: 3672 }).text, '1 day ahead (+1h 1m)');
+check('ten days and up drop the decimal',
+      P.goalBankedChip({ ...tg, banked_days: 50.4, banked_amount: 181440 }).text.startsWith('50 days ahead'), true);
+check('a chars goal words the amount in chars',
+      P.goalBankedChip({ metric: 'chars_read', banked_days: 2.469, banked_amount: 12345 }).text,
+      '2.5 days ahead (+12.3k)');
+
+console.log('\n--- goal auto-raise ---');
+// Base 100k over Mar 1–10 (10k/day), raised 10k when Mar 3 closed; today Mar 4.
+const raisedGoal = { metric: 'chars_read', target: 110000, base_target: 100000,
+  start_date: '2026-03-01', deadline: '2026-03-10',
+  projected_end: '2026-03-08', projected_days_delta: -2 };
+const RB = P.goalBurnupSeries(raisedGoal, ['2026-03-01', '2026-03-02', '2026-03-03', '2026-03-04'],
+  [10000, 50000, 60000, 70000], [0, 0, 10000, 10000]);
+check('before a raise the pace line is the base plan', RB.pace[1], 20000);
+check('the pace line steps up on the day the raise landed', RB.pace[2], 40000);
+check('the step keeps the base slope, it does not steepen', RB.pace[3] - RB.pace[2], 10000);
+check('the pace line lands on the raised target', RB.pace[RB.labels.indexOf('2026-03-10')], 110000);
+check('the target line starts at the base', RB.scope[0], 100000);
+check('and steps up with the raise', RB.scope[2], 110000);
+check('days ahead carry the full raise', RB.scope[RB.scope.length - 1], 110000);
+check('the projection lands on the raised target',
+      RB.projected[RB.labels.indexOf('2026-03-08')], 110000);
+check('no raise series is no step', P.goalBurnupSeries(burnGoal, burnDates, burnCum).scope[3], 100000);
+
+const capped = { metric: 'chars_read', raise_cap_days: 3 };
+check('over the cap during today says so',
+      P.goalBankedChip({ ...capped, banked_days: 3.4, banked_amount: 34000 }).text,
+      '3.4 days ahead (+34.0k) · over the 3-day cap');
+check('at the cap is just ahead',
+      P.goalBankedChip({ ...capped, banked_days: 3, banked_amount: 30000 }).text, '3 days ahead (+30.0k)');
+check('behind never mentions the cap',
+      P.goalBankedChip({ ...capped, banked_days: -1, banked_amount: -10000 }).text, '1 day behind (−10.0k)');
+check('a fractional cap words as a fraction', P.fmtGoalDays(0.5), '0.5 days');
+check('the cap adjective is hyphenated', P.fmtGoalDays(0.5, true), '0.5-day');
 
 // --- legend room must not destroy a live chart on a scaled display -----------
 // Regression: the guard used to read the canvas `height` attribute back, but

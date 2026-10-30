@@ -1110,6 +1110,74 @@ class TestGoalBurnup:
         assert db.db_get_goal_burnup(9999) is None
 
 
+class TestGoalLengthAndBanked:
+    """A goal's start date and deadline are both reading days, and days banked
+    is reading above that plan line in days of its daily amount. The card used
+    to mix deadline − start with the inclusive count, which marked the
+    deadline day Overdue and showed a fresh short goal as already ahead."""
+
+    def _read(self, seed, offset, chars):
+        seed.session(seed.day(offset), chars=chars, secs=600, source="manual")
+
+    def test_length_counts_both_ends(self, seed, db):
+        gid = _add_goal(seed, db, start=4, deadline=-5)     # 10 calendar days
+        card = _card(db, gid)
+        assert card["total_days"] == 10
+        assert card["original_chunk"] == pytest.approx(10_000)
+
+    def test_the_deadline_day_is_not_overdue(self, seed, db):
+        gid = _add_goal(seed, db, start=9, deadline=0)
+        card = _card(db, gid)
+        assert card["days_left"] == 0
+        assert card["is_overdue"] is False
+        assert card["chunk_needed"] == pytest.approx(100_000), "the whole rest is due today"
+
+    def test_the_day_after_the_deadline_is(self, seed, db):
+        assert _card(db, _add_goal(seed, db, start=9, deadline=1))["is_overdue"] is True
+
+    def test_on_plan_through_yesterday_reads_zero_before_today_is_read(self, seed, db):
+        gid = _add_goal(seed, db, start=4, deadline=-5)     # 10k/day plan, day 5
+        for d in (4, 3, 2, 1):
+            self._read(seed, d, 10_000)
+        assert _card(db, gid)["banked_days"] == pytest.approx(0), \
+            "today's unread share must not count against you yet"
+        self._read(seed, 0, 4_000)
+        assert _card(db, gid)["banked_days"] == pytest.approx(0), \
+            "reading less than today's share leaves the figure where it was"
+
+    def test_reading_past_todays_share_banks_it(self, seed, db):
+        gid = _add_goal(seed, db, start=4, deadline=-5)
+        for d in (4, 3, 2, 1):
+            self._read(seed, d, 10_000)
+        self._read(seed, 0, 15_000)
+        card = _card(db, gid)
+        assert card["banked_amount"] == pytest.approx(5_000)
+        assert card["banked_days"] == pytest.approx(0.5)
+
+    def test_closed_short_days_are_owed(self, seed, db):
+        gid = _add_goal(seed, db, start=4, deadline=-5)
+        self._read(seed, 4, 10_000)
+        self._read(seed, 3, 10_000)
+        assert _card(db, gid)["banked_days"] == pytest.approx(-2)
+
+    def test_one_big_first_day_is_not_extrapolated(self, seed, db):
+        """The example the old figure got wrong: 3 days' worth on day one of a
+        two-week goal banks 2 days. The projection still says 9 days early —
+        that's what it's for, but it isn't slack."""
+        gid = _add_goal(seed, db, target=140_000, start=0, deadline=-13)
+        self._read(seed, 0, 30_000)
+        card = _card(db, gid)
+        assert card["banked_days"] == pytest.approx(2)
+        assert card["projected_days_delta"] == -9
+
+    def test_no_figure_once_complete_or_overdue(self, seed, db):
+        done = _add_goal(seed, db, target=5_000, start=4, deadline=-5)
+        self._read(seed, 2, 6_000)
+        late = _add_goal(seed, db, start=9, deadline=1)
+        assert _card(db, done)["banked_days"] is None
+        assert _card(db, late)["banked_days"] is None
+
+
 class TestGoalTimeExcluded:
     """A time goal counts time on the same basis as the Stats page: rows
     flagged time_excluded (overlap, chars-only backfill, an Anki day already
@@ -1157,3 +1225,130 @@ class TestGoalTimeExcluded:
         gid = _add_goal(seed, db)
         assert _card(db, gid)["completed"] == 12_000
         assert db.db_get_goal_burnup(gid)["actual"][-1] == 12_000
+
+
+class TestGoalAutoRaise:
+    """raise_cap_days: reading past `cap` days ahead of the plan line is added
+    onto the target when its day closes. Derived on read from the same
+    closed-day series the burn-up plots; the base plan's daily amount never
+    changes, so the plan line steps up by each raise instead of steepening."""
+
+    def _goal(self, seed, db, cap, target=100_000, start=4, deadline=-5, cap_from=None):
+        db.db_add_goal("G", "chars_read", float(target), seed.day(deadline), "daily",
+                       None, False, seed.day(start), cap)
+        gid = db.db_get_goals()[-1]["id"]
+        # Switching the cap on stamps today, which leaves no closed day to raise
+        # on; tests that need history backdate the stamp, by default to the start.
+        con = sqlite3.connect(db.DB_PATH)
+        con.execute("UPDATE goals SET raise_cap_from=? WHERE id=?",
+                    (seed.day(start if cap_from is None else cap_from), gid))
+        con.commit()
+        con.close()
+        return gid
+
+    def _read(self, seed, offset, chars):
+        seed.session(seed.day(offset), chars=chars, secs=600, source="manual")
+
+    def test_off_changes_nothing(self, seed, db):
+        self._read(seed, 3, 40_000)
+        gid = _add_goal(seed, db, start=4, deadline=-5)
+        card = _card(db, gid)
+        assert card["target"] == card["base_target"] == 100_000
+        assert card["raised_by"] == 0
+        assert set(db.db_get_goal_burnup(gid)["raised"]) == {0.0}
+
+    def test_surplus_past_the_cap_is_added_to_the_target(self, seed, db):
+        # 10k/day plan over 10 days, cap 2. Day 2 ends 3 days ahead: one day's
+        # worth (10k) goes onto the target and the day closes exactly 2 ahead.
+        gid = self._goal(seed, db, cap=2)
+        for d, c in ((4, 10_000), (3, 40_000), (2, 10_000), (1, 10_000)):
+            self._read(seed, d, c)
+        card = _card(db, gid)
+        assert card["base_target"] == 100_000
+        assert card["raised_by"] == pytest.approx(10_000)
+        assert card["target"] == pytest.approx(110_000)
+        assert card["original_chunk"] == pytest.approx(10_000), "the plan's day stays the base's"
+        assert card["plan_expected"] == pytest.approx(60_000), "5 days of plan + the raise"
+        assert card["banked_days"] == pytest.approx(2), "back at the cap, today unread"
+
+    def test_the_plan_steps_rather_than_steepens(self, seed, db):
+        """One good day early in a long goal raises it by what was read past
+        the cap. Re-planning the whole line would have added ~66k here: 4 days
+        ahead on day 9 read as a pace 44% over plan for the rest of the year."""
+        gid = self._goal(seed, db, cap=2, target=365_000, start=9, deadline=-355)
+        for d in range(9, 1, -1):
+            self._read(seed, d, 1_000)
+        self._read(seed, 1, 5_000)                       # 4 days ahead at day 9
+        assert _card(db, gid)["target"] == pytest.approx(367_000)
+
+    def test_today_never_raises(self, seed, db):
+        """Raises land when a day closes, so today's bar can't run away from
+        you while you read — the chip just shows you over the cap for now."""
+        gid = self._goal(seed, db, cap=2, start=0, deadline=-9)
+        self._read(seed, 0, 40_000)
+        card = _card(db, gid)
+        assert card["raised_by"] == 0
+        assert card["banked_days"] == pytest.approx(3)
+
+    def test_switching_on_caps_from_then_not_from_the_peak(self, seed, db):
+        """9 days ahead on day 1, then nothing for a week: 1 day ahead by
+        yesterday. Switching the cap on then must leave that alone — deriving
+        from the start would raise by the old peak and put you 6 days behind."""
+        self._read(seed, 9, 100_000)
+        late_on = self._goal(seed, db, cap=2, target=200_000, start=9, deadline=-10, cap_from=1)
+        assert _card(db, late_on)["raised_by"] == 0
+        from_start = self._goal(seed, db, cap=2, target=200_000, start=9, deadline=-10)
+        assert _card(db, from_start)["raised_by"] == pytest.approx(70_000)
+        assert _card(db, from_start)["banked_days"] == pytest.approx(-6)
+
+    def test_a_goal_that_reaches_its_target_stops_raising(self, seed, db):
+        """Finishing early would otherwise close the day by raising the target
+        past what was read, and a Complete goal would un-complete overnight."""
+        gid = self._goal(seed, db, cap=1)
+        for d, c in ((4, 10_000), (3, 10_000), (2, 100_000)):
+            self._read(seed, d, c)
+        card = _card(db, gid)
+        assert card["is_complete"] is True
+        assert card["raised_by"] == 0 and card["target"] == 100_000
+
+    def test_period_bars_hold_this_periods_raise_back(self, seed, db):
+        """week_raise/month_raise are what was raised since the period began,
+        which the card takes back out so the bar's target holds until the next
+        boundary. The raise here lands on yesterday."""
+        gid = self._goal(seed, db, cap=1)
+        self._read(seed, 4, 10_000)
+        self._read(seed, 1, 50_000)                      # day 4 ends 2 ahead
+        card  = _card(db, gid)
+        today = db.get_today_date()
+        assert card["raised_by"] == pytest.approx(10_000)
+        assert card["week_raise"] == pytest.approx(0 if today.weekday() == 0 else 10_000)
+        assert card["month_raise"] == pytest.approx(0 if today.day == 1 else 10_000)
+
+    def test_the_burnup_steps_with_the_card(self, seed, db):
+        gid = self._goal(seed, db, cap=2)
+        for d, c in ((4, 10_000), (3, 40_000), (2, 10_000), (1, 10_000)):
+            self._read(seed, d, c)
+        burn, card = db.db_get_goal_burnup(gid), _card(db, gid)
+        assert burn["target"] == pytest.approx(card["target"])
+        assert burn["base_target"] == card["base_target"]
+        assert len(burn["raised"]) == len(burn["dates"])
+        assert burn["raised"] == pytest.approx([0, 10_000, 10_000, 10_000, 10_000]),             "steps on the day it landed; today carries yesterday's"
+
+    def test_cap_edits_keep_the_stamp_and_off_clears_it(self, seed, db):
+        gid = self._goal(seed, db, cap=2, cap_from=3)
+        args = (gid, "G", 100_000.0, seed.day(-5), None)
+        db.db_update_goal(*args, raise_cap_days=3)
+        g = db.db_get_goals()[-1]
+        assert (g["raise_cap_days"], g["raise_cap_from"]) == (3, seed.day(3)),             "a new cap re-derives over the same days"
+        db.db_update_goal(*args)
+        assert db.db_get_goals()[-1]["raise_cap_days"] == 3, "left out means leave it"
+        db.db_update_goal(*args, raise_cap_days=None)
+        g = db.db_get_goals()[-1]
+        assert (g["raise_cap_days"], g["raise_cap_from"]) == (None, None)
+        db.db_update_goal(*args, raise_cap_days=1)
+        assert db.db_get_goals()[-1]["raise_cap_from"] == seed.day(0), "back on: from today"
+
+    def test_a_negative_cap_is_rejected(self, seed, db):
+        with pytest.raises(ValueError):
+            db.db_add_goal("G", "chars_read", 1.0, seed.day(-5), "daily",
+                           None, False, seed.day(0), -1)
