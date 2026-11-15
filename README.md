@@ -1,7 +1,7 @@
 # Konseki
 
 A language-immersion tracker for Windows. It pulls your reading/listening stats/sessions
-from [GameSentenceMiner (GSM)](https://github.com/bpwhelan/GameSentenceMiner), [ッツ Reader (ttsu)](https://reader.ttsu.app), and Youtube, and aggregates everything into one place. It runs in your system tray and updates itself as you read.
+from [GameSentenceMiner (GSM)](https://github.com/bpwhelan/GameSentenceMiner), [ッツ Reader (ttsu)](https://reader.ttsu.app), and Youtube, and aggregates everything into one place. It's intended to run in your tray and update itself as you read.
 
 ## Features
 
@@ -32,7 +32,7 @@ python src/tracker.py
 ```
 
 Konseki is meant to stay open in your tray, monitoring GSM for changes and updating
-automatically. Closing the window hides it to the tray; quit from the tray menu.
+automatically. Closing the window hides it to the tray, so quit from the tray menu.
 
 ## Browser extension (optional)
 
