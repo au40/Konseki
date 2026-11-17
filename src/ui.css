@@ -646,6 +646,9 @@ select:focus { border-color: var(--accent); }
   gap: 22px;
   margin-top: 4px;
   align-items: start;
+  /* The cards' offsetParent, so a drag measures them in grid coordinates and
+     the drop marker can sit in the gaps (see mediaDropTargetAt). */
+  position: relative;
 }
 .media-card {
   border-radius: var(--radius);
@@ -718,58 +721,15 @@ select:focus { border-color: var(--accent); }
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .series-stack .media-card-footer { z-index: 4; }
 
-/* ── Reorder arrows (revealed on hover) ──────────────────────────────────── */
-.media-card-reorder {
-  position: absolute;
-  top: 100%; left: 0; right: 0;
-  /* padding (not margin) so the container's hit box touches the card bottom,
-     bridging the visual gap so hover doesn't drop while the cursor crosses it */
-  padding-top: 4px;
-  display: flex; gap: 6px;
-  opacity: 0;
-  transition: opacity 0.12s;
-  z-index: 5;
-}
-.media-card-reorder::before {
-  /* invisible upward extension so hover survives the card's translateY(-4px)
-     on hover, which would otherwise leave an uncovered 4px sliver above us */
-  content: '';
-  position: absolute;
-  left: 0; right: 0;
-  top: -4px; height: 4px;
-}
-.media-card:hover   > .media-card-reorder,
-.series-stack:hover > .media-card-reorder,
-.media-card-reorder:hover {
-  opacity: 1;
-}
-.media-card-reorder-btn {
-  flex: 1 1 0;
-  height: 18px; padding: 0;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(0,0,0,0.72);
-  border: 1px solid rgba(255,255,255,0.18);
-  color: #fff;
-  border-radius: 4px;
-  font-size: 10px; line-height: 1;
-  cursor: pointer;
-  transition: background 0.12s, color 0.12s;
-}
-.media-card-reorder-btn:hover:not(:disabled) {
-  background: var(--accent); border-color: var(--accent);
-}
-.media-card-reorder-btn:disabled {
-  opacity: 0.3; cursor: default;
-}
-
 /* ── Media status ─────────────────────────────────────────────────────────
    Grid filter, the card's bottom-edge line (length = progress, colour =
    status, see mediaCardLineHTML), and the detail pane's status pill. */
 .media-status-bar { display: flex; margin: 6px 0 14px; }
 .seg-count { margin-left: 6px; opacity: .6; font-variant-numeric: tabular-nums; }
 
-/* Full-card clip layer so the 3px line follows the card's rounded corners;
-   the card itself can't clip (its reorder arrows hang below it). */
+/* Full-card clip layer so the 3px line follows the card's rounded corners
+   without the card itself having to clip (a series stack's peeking covers
+   sit outside its box). */
 .media-card-line {
   position: absolute; inset: 0; z-index: 1;
   border-radius: var(--radius); overflow: hidden; pointer-events: none;
@@ -839,8 +799,9 @@ select:focus { border-color: var(--accent); }
   pointer-events: none;
 }
 
-/* ── Drag-to-series ──────────────────────────────────────────────────────── */
-.media-card.dragging      { opacity: 0.4; }
+/* ── Grid drag: onto a card makes a series, between two moves it ─────────── */
+.media-card.dragging,
+.series-stack.dragging    { opacity: 0.4; }
 .media-card.series-target { box-shadow: 0 0 0 2px var(--accent), 0 0 18px rgba(91,140,255,0.35); transform: scale(1.04); z-index: 4; }
 .series-stack.series-target { box-shadow: 0 0 0 2px var(--accent), 0 0 18px rgba(91,140,255,0.35); }
 
@@ -858,6 +819,20 @@ select:focus { border-color: var(--accent); }
 .series-layer-front { z-index: 3; }
 .series-layer-mid   { z-index: 2; transform: translate(10px, 10px); opacity: 0.82; }
 .series-layer-back  { z-index: 1; transform: translate(20px, 20px); opacity: 0.65; }
+/* The two cards either side of the drop point lean apart to open the gap, and
+   a bar stands in it. After the :hover rules so the lean wins over the lift. */
+.media-card.drop-shift-l, .series-stack.drop-shift-l { transform: translateX(-9px); }
+.media-card.drop-shift-r, .series-stack.drop-shift-r { transform: translateX(9px); }
+.media-drop-marker {
+  position: absolute; width: 4px; border-radius: 2px; z-index: 6;
+  background: var(--accent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent);
+  pointer-events: none;
+  opacity: 0; transform: scaleY(0.6);
+  transition: opacity 0.15s, transform 0.2s, left 0.14s, top 0.14s, height 0.14s;
+}
+.media-drop-marker.on { opacity: 1; transform: none; }
+
 .series-badge {
   position: absolute; top: 7px; right: 7px; z-index: 10;
   background: rgba(0,0,0,0.65); color: #fff; font-size: 9px; font-weight: 700;
@@ -1602,7 +1577,6 @@ h2 { font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: u
 .setup-step-num,
 .brush-label,
 .session-row .edit-time-btn:hover,
-.media-card-reorder-btn:hover:not(:disabled),
 .flatpickr-day.selected { color: var(--surface) !important; }
 
 /* ── Session lists: one bordered list with dividers; activity is a dot ── */

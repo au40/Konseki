@@ -115,6 +115,7 @@ const PROBE = `
   get appSettings() { return appSettings; }, set appSettings(v) { appSettings = v; },
   goalHasPeriodLine, goalDailyShare, fmtGoalMetric, todayGoalRows, goalBankedChip, fmtGoalDays,
   mediaGridItems, seriesCardFacts,
+  sortByManualOrder, orderAfterMove, orderAfterMerge, mediaDropTargetAt,
 };`;
 
 try {
@@ -917,6 +918,39 @@ check('a status-less volume on its own draws no line',
   P.seriesCardFacts(gridSeries[0], gridByTitle, [{ title: 'Anime' }]).status, null);
 check('a volume missing from the grid data adds no time',
   P.seriesCardFacts({ members: [{ title: 'A1' }, { title: 'gone' }] }, gridByTitle).secs, 100);
+
+// Grid order + drag. A new series used to have no saved slot and sort to the
+// end; it now takes the slot of the card it was dropped on.
+console.log('\n--- media grid: manual order and drag ---');
+const keysOf = items => items.map(i => i.key).join(' ');
+check('saved positions first, the unplaced after in natural order',
+  keysOf(P.sortByManualOrder(['t:A', 't:B', 't:C', 't:D'].map(key => ({ key })), { 't:C': 0, 't:A': 1 })),
+  't:C t:A t:B t:D');
+
+const ord = ['t:A', 't:B', 't:C', 't:D'];
+check('move before a card', P.orderAfterMove(ord, 't:D', 't:B', false).join(' '), 't:A t:D t:B t:C');
+check('move after a card',  P.orderAfterMove(ord, 't:A', 't:C', true).join(' '),  't:B t:C t:A t:D');
+check('move onto itself changes nothing', P.orderAfterMove(ord, 't:B', 't:B', true).join(' '), ord.join(' '));
+check('a merged series takes the drop target\'s slot, the dragged slot closes',
+  P.orderAfterMerge(ord, 't:D', 't:B', 's:9').join(' '), 't:A s:9 t:C');
+
+// Three 100x150 cards on a row with 20px gaps, a fourth on the next row.
+const lay = [['t:A', 0, 0], ['t:B', 120, 0], ['t:C', 240, 0], ['t:D', 0, 170]]
+  .map(([key, x, y]) => ({ key, x, y, w: 100, h: 150 }));
+const drop = (px, py, k) => {
+  const t = P.mediaDropTargetAt(lay, px, py, k);
+  return t ? `${t.kind}:${t.card.key}${t.kind === 'insert' ? (t.after ? ':after' : ':before') : ''}` : null;
+};
+check('a card\'s middle merges',             drop(170, 50, 't:D'), 'merge:t:B');
+check('its edge inserts beside it',          drop(125, 50, 't:D'), 'insert:t:B:before');
+check('the gap inserts at the nearest card', drop(230, 50, 't:D'), 'insert:t:B:after');
+check('a series only moves, even mid-card',  drop(170, 50, 's:7'), 'insert:t:B:after');
+check('a series stack can be merged into',   drop(170, 50, 't:D') && P.mediaDropTargetAt(
+  lay.map(c => c.key === 't:B' ? { ...c, key: 's:7' } : c), 170, 50, 't:D').kind, 'merge');
+check('over the dragged card is no target',  drop(50, 50, 't:A'), null);
+check('right beside itself is no target',    drop(335, 50, 't:D'), null);
+check('between rows: the nearest card',      drop(30, 155, 't:D'), 'insert:t:A:before');
+check('past the last card: after it',        drop(300, 200, 't:A'), 'insert:t:D:after');
 
 console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
 process.exit(failures === 0 ? 0 : 1);

@@ -59,7 +59,7 @@ let mediaAllData  = [];
 let seriesData    = [];
 let mediaOrderMap = {}; // key -> position; key is "t:<title>" or "s:<id>"
 let currentSeriesId = null;
-let draggedItem   = null; // {type:'title'|'series', id:string|number}
+let mediaDrag     = null; // the media-grid card being dragged — see startMediaDrag
 let dashHeatmapYear = new Date().getFullYear();
 let appSettings   = { rollover_hour: 0, gsm_url: 'http://localhost:7275/api/stats', theme: 'dark' };
 let currentDetailTitle = null;
@@ -4692,6 +4692,7 @@ function mediaGridItems(media, series, want) {
 
 function renderMediaGrid() {
   const grid = document.getElementById('media-grid');
+  bindMediaGridDrop(grid);
 
   const filtered = mediaAllData.filter(m => !isGridHidden(m));
   renderMediaStatusSeg(filtered);
@@ -4708,75 +4709,244 @@ function renderMediaGrid() {
     return;
   }
 
-  // Manual order overrides natural for items present in mediaOrderMap.
-  const ordered = [...natural].sort((a, b) => {
-    const pa = mediaOrderMap[a.key];
-    const pb = mediaOrderMap[b.key];
-    if (pa != null && pb != null) return pa - pb;
-    if (pa != null) return -1;
-    if (pb != null) return 1;
-    return 0;
-  });
-
-  ordered.forEach((item, idx) => {
-    const canLeft  = idx > 0;
-    const canRight = idx < ordered.length - 1;
+  // Every card drags, under any filter too: a drop is placed against the
+  // visible card it lands beside, so under All it sits next to that same card
+  // whatever hidden cards lie between.
+  sortByManualOrder(natural, mediaOrderMap).forEach(item => {
     const el = item.kind === 'series'
       ? makeSeriesCard(item.data, byTitle, item.shown)
       : makeMediaCard(item.data);
-    // Reordering only under All: shiftMediaCard swaps neighbours in the FULL
-    // order, so in a filtered view the swap could land on a hidden card and
-    // look like the button did nothing.
-    if (want === 'all') el.appendChild(makeReorderControls(item.key, canLeft, canRight));
+    el.dataset.key = item.key;
+    el.draggable = true;
+    el.addEventListener('dragstart', e => startMediaDrag(e, el, item.key));
+    el.addEventListener('dragend', endMediaDrag);
     grid.appendChild(el);
   });
 }
 
-function makeReorderControls(key, canLeft, canRight) {
-  const wrap = document.createElement('div');
-  wrap.className = 'media-card-reorder';
-  wrap.innerHTML = `
-    <button type="button" class="media-card-reorder-btn" data-dir="left"  draggable="false" ${canLeft  ? '' : 'disabled'} title="Move left">◀</button>
-    <button type="button" class="media-card-reorder-btn" data-dir="right" draggable="false" ${canRight ? '' : 'disabled'} title="Move right">▶</button>`;
-  wrap.addEventListener('click',     e => e.stopPropagation());
-  wrap.addEventListener('mousedown', e => e.stopPropagation());
-  wrap.addEventListener('dragstart', e => e.preventDefault());
-  wrap.querySelectorAll('button').forEach(btn => {
-    btn.addEventListener('click', ev => {
-      ev.stopPropagation();
-      if (btn.disabled) return;
-      shiftMediaCard(key, btn.dataset.dir === 'left' ? -1 : 1);
-    });
-  });
-  return wrap;
-}
-
-async function shiftMediaCard(key, delta) {
-  // Rebuild the current visible order, swap, persist, re-render.
-  const inSeries = new Set(seriesData.flatMap(s => s.members.map(m => m.title)));
-  const ungrouped = mediaAllData.filter(m => !isGridHidden(m) && !inSeries.has(m.title));
-  const natural = [
-    ...seriesData.map(s => `s:${s.id}`),
-    ...ungrouped.map(m => `t:${m.title}`),
-  ];
-  const ordered = [...natural].sort((a, b) => {
-    const pa = mediaOrderMap[a];
-    const pb = mediaOrderMap[b];
+// ── Grid order ─────────────────────────────────────────────────────────────
+// Keys with a saved position come first, in that order; the rest follow in
+// natural order (the sort is stable). A key with no position is a card that
+// has never been placed — a title imported since the order was last saved.
+function sortByManualOrder(items, order, keyOf = it => it.key) {
+  return [...items].sort((a, b) => {
+    const pa = order[keyOf(a)], pb = order[keyOf(b)];
     if (pa != null && pb != null) return pa - pb;
     if (pa != null) return -1;
     if (pb != null) return 1;
     return 0;
   });
-  const i = ordered.indexOf(key);
-  const j = i + delta;
-  if (i < 0 || j < 0 || j >= ordered.length) return;
-  [ordered[i], ordered[j]] = [ordered[j], ordered[i]];
+}
 
-  // Refresh in-memory map immediately so re-render reflects the change
-  // before the API round-trip completes.
-  mediaOrderMap = Object.fromEntries(ordered.map((k, idx) => [k, idx]));
+// Every card's key in All order — the order that's saved. A filter shows a
+// subset of it.
+function fullMediaOrder() {
+  const media = mediaAllData.filter(m => !isGridHidden(m));
+  return sortByManualOrder(mediaGridItems(media, seriesData, 'all'), mediaOrderMap).map(it => it.key);
+}
+
+// `key` moved to just before (or after) `refKey`.
+function orderAfterMove(order, key, refKey, after) {
+  if (key === refKey || !order.includes(refKey)) return order.slice();
+  const out = order.filter(k => k !== key);
+  const i = out.indexOf(refKey);
+  out.splice(after ? i + 1 : i, 0, key);
+  return out;
+}
+
+// Two titles merged into a new series: the series takes the slot of the card
+// it was dropped on — the one that becomes the front of the stack — and the
+// dragged title's old slot closes up. Without this the series has no saved
+// position and sorts after everything that has one: the end of the grid.
+function orderAfterMerge(order, draggedKey, targetKey, seriesKey) {
+  return order.filter(k => k !== draggedKey).map(k => k === targetKey ? seriesKey : k);
+}
+
+// ── Grid drag: drop between cards to move, onto one to make a series ──────
+// Only a loose title merges. A series, or a volume shown alone under a filter
+// (it carries its series' key), only moves — dropping it "into" a card would
+// put a volume in two series.
+const canMergeMedia = (dragKey, targetKey) => dragKey.startsWith('t:') && dragKey !== targetKey;
+
+// What a drop at (px, py), grid-relative, would do. `layout` is the cards'
+// boxes in grid order, taken from offset* at drag start: those ignore
+// transforms, so the neighbours leaning apart and the merge highlight's scale
+// can't move a zone out from under the pointer and make it flicker. The middle
+// half of a card merges (when merging is allowed); its outer quarters and the
+// gaps insert beside it. A drop that would leave the order as it is (onto the
+// dragged card, or right beside it) is no target at all.
+const MEDIA_DROP_EDGE = 0.25;
+function mediaDropTargetAt(layout, px, py, dragKey) {
+  if (!layout.length) return null;
+  const inRow = c => py >= c.y && py < c.y + c.h;
+  let card = layout.find(c => inRow(c) && px >= c.x && px < c.x + c.w);
+  if (card) {
+    if (card.key === dragKey) return null;
+    const f = (px - card.x) / card.w;
+    if (canMergeMedia(dragKey, card.key) && f > MEDIA_DROP_EDGE && f < 1 - MEDIA_DROP_EDGE) {
+      return { kind: 'merge', card };
+    }
+  } else {
+    // In a gap: the nearest card in this row, or between rows the nearest one.
+    const dist = c => Math.hypot(Math.max(c.x - px, 0, px - c.x - c.w),
+                                 Math.max(c.y - py, 0, py - c.y - c.h));
+    const row  = layout.filter(inRow);
+    card = (row.length ? row : layout).reduce((a, b) => dist(b) < dist(a) ? b : a);
+  }
+  const after = px >= card.x + card.w / 2;
+  const slot  = layout.indexOf(card) + (after ? 1 : 0);   // insert before this index
+  const d     = layout.findIndex(c => c.key === dragKey);
+  if (d >= 0 && (slot === d || slot === d + 1)) return null;
+  return { kind: 'insert', card, after };
+}
+
+function startMediaDrag(e, el, key) {
+  const grid = document.getElementById('media-grid');
+  e.dataTransfer.setData('application/x-media-drag', key);
+  e.dataTransfer.effectAllowed = 'move';
+  const marker = document.createElement('div');
+  marker.className = 'media-drop-marker';
+  grid.appendChild(marker);
+  mediaDrag = {
+    key, el, marker, target: null, sig: '',
+    gap: parseFloat(getComputedStyle(grid).columnGap) || 22,
+    layout: [...grid.querySelectorAll(':scope > [data-key]')].map(c => ({
+      el: c, key: c.dataset.key, x: c.offsetLeft, y: c.offsetTop, w: c.offsetWidth, h: c.offsetHeight,
+    })),
+  };
+  setTimeout(() => el.classList.add('dragging'), 0);   // after the drag image is taken
+}
+
+function endMediaDrag() {
+  if (!mediaDrag) return;
+  mediaDrag.el.classList.remove('dragging');
+  clearMediaDropVisuals();
+  mediaDrag.marker.remove();
+  mediaDrag = null;
+}
+
+function clearMediaDropVisuals() {
+  document.querySelectorAll('#media-grid .series-target, #media-grid .drop-shift-l, #media-grid .drop-shift-r')
+    .forEach(x => x.classList.remove('series-target', 'drop-shift-l', 'drop-shift-r'));
+}
+
+// Merge: the card lights up. Insert: the cards either side of the drop point
+// lean apart and a bar shows in the gap they open. A neighbour on another row
+// (the drop point is at a row's end) stays put.
+function showMediaDropTarget(t) {
+  const sig = t ? `${t.kind}|${t.card.key}|${t.after}` : '';
+  if (sig === mediaDrag.sig) return;
+  mediaDrag.sig = sig;
+  mediaDrag.target = t;
+  clearMediaDropVisuals();
+  const marker = mediaDrag.marker;
+  if (!t || t.kind === 'merge') {
+    marker.classList.remove('on');
+    if (t) t.card.el.classList.add('series-target');
+    return;
+  }
+  const L = mediaDrag.layout, i = L.indexOf(t.card);
+  const left  = t.after ? t.card : L[i - 1];
+  const right = t.after ? L[i + 1] : t.card;
+  if (left  && left.y  === t.card.y) left.el.classList.add('drop-shift-l');
+  if (right && right.y === t.card.y) right.el.classList.add('drop-shift-r');
+
+  const x = t.after ? t.card.x + t.card.w + mediaDrag.gap / 2 : t.card.x - mediaDrag.gap / 2;
+  const place = () => {
+    marker.style.left   = `${x - 2}px`;
+    marker.style.top    = `${t.card.y}px`;
+    marker.style.height = `${t.card.h}px`;
+  };
+  if (marker.classList.contains('on')) { place(); return; }   // slides to the new gap
+  // Appearing: jump straight to the gap, then fade and grow in.
+  marker.style.transition = 'none';
+  place();
+  void marker.offsetWidth;
+  marker.style.transition = '';
+  marker.classList.add('on');
+}
+
+// One listener set on the grid itself (it outlives renderMediaGrid's
+// innerHTML resets), so the gaps between cards are drop targets too.
+function bindMediaGridDrop(grid) {
+  if (grid.dataset.dropBound) return;
+  grid.dataset.dropBound = '1';
+  grid.addEventListener('dragover', e => {
+    if (!mediaDrag) return;   // not a card (a file, say)
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    const g = grid.getBoundingClientRect();
+    showMediaDropTarget(mediaDropTargetAt(mediaDrag.layout,
+      e.clientX - g.left - grid.clientLeft, e.clientY - g.top - grid.clientTop, mediaDrag.key));
+  });
+  grid.addEventListener('dragleave', e => {
+    if (mediaDrag && !grid.contains(e.relatedTarget)) showMediaDropTarget(null);
+  });
+  grid.addEventListener('drop', e => {
+    if (!mediaDrag) return;
+    e.preventDefault();
+    const { key, target } = mediaDrag;
+    if (target) dropMedia(key, target);
+    endMediaDrag();
+  });
+}
+
+async function dropMedia(key, target) {
+  const api   = window.pywebview.api;
+  const order = fullMediaOrder();   // before seriesData changes under it
+  const tk    = target.card.key;
+
+  if (target.kind === 'insert') {
+    const next = orderAfterMove(order, key, tk, target.after);
+    mediaOrderMap = Object.fromEntries(next.map((k, i) => [k, i]));
+    flipMediaGrid(key);   // now, so the old positions are measured mid-lean
+    await api.set_media_order(next);
+    return;
+  }
+
+  const dragged = key.slice(2);
+  let r, popKey = tk, next = null;
+  if (tk.startsWith('s:')) {
+    r = await api.add_to_series(Number(tk.slice(2)), dragged);
+  } else {
+    r = await api.create_series(tk.slice(2), dragged);
+    if (r && r.ok) {
+      popKey = `s:${r.series_id}`;
+      next = orderAfterMerge(order, key, tk, popKey);
+      mediaOrderMap = Object.fromEntries(next.map((k, i) => [k, i]));
+    }
+  }
+  if (!r || !r.ok) alert((r && r.error) || 'Could not make the series');
+  seriesData = await api.get_series();
+  flipMediaGrid(popKey);
+  if (next) await api.set_media_order(next);
+}
+
+// Re-render, then slide every card from where it was to where it now is
+// (FLIP). The card that just landed — the moved one, or the series it made or
+// joined — pops in at its new spot instead of flying across the grid.
+function flipMediaGrid(popKey) {
+  const grid = document.getElementById('media-grid');
+  const cards = () => [...grid.querySelectorAll(':scope > [data-key]')];
+  const before = new Map(cards().map(el => [el.dataset.key, el.getBoundingClientRect()]));
   renderMediaGrid();
-  await window.pywebview.api.set_media_order(ordered);
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  cards().forEach(el => {
+    if (typeof el.animate !== 'function') return;
+    const k = el.dataset.key;
+    if (k === popKey) {
+      el.animate([{ transform: 'scale(0.9)', opacity: 0.4 }, { transform: 'none', opacity: 1 }],
+                 { duration: 260, easing: 'cubic-bezier(.2,.9,.3,1.2)' });
+      return;
+    }
+    const r0 = before.get(k);
+    if (!r0) return;
+    const r1 = el.getBoundingClientRect();
+    const dx = r0.left - r1.left, dy = r0.top - r1.top;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
+    el.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }],
+               { duration: 240, easing: 'cubic-bezier(.2,.7,.2,1)' });
+  });
 }
 
 // 30-day activity strip, used by the shelf rows. Plain divs rather than a
@@ -4809,44 +4979,8 @@ function makeMediaCard(m) {
 
   const el = document.createElement('div');
   el.className = 'media-card';
-  el.draggable = true;
   el.dataset.title = m.title;
   el.onclick = () => openMediaDetail(m.title);
-
-  el.addEventListener('dragstart', e => {
-    e.dataTransfer.setData('application/x-media-drag', JSON.stringify({type: 'title', id: m.title}));
-    e.dataTransfer.effectAllowed = 'move';
-    setTimeout(() => el.classList.add('dragging'), 0);
-  });
-  el.addEventListener('dragend', () => {
-    el.classList.remove('dragging');
-    document.querySelectorAll('.series-target').forEach(x => x.classList.remove('series-target'));
-  });
-  el.addEventListener('dragover', e => {
-    if (!e.dataTransfer.types.includes('application/x-media-drag')) return;
-    e.preventDefault(); e.stopPropagation();
-    // Don't highlight self
-    if (el.classList.contains('dragging')) return;
-    el.classList.add('series-target');
-  });
-  el.addEventListener('dragleave', e => {
-    if (!el.contains(e.relatedTarget)) el.classList.remove('series-target');
-  });
-  el.addEventListener('drop', async e => {
-    e.preventDefault(); e.stopPropagation();
-    el.classList.remove('series-target');
-    const raw = e.dataTransfer.getData('application/x-media-drag');
-    if (!raw) return;
-    const dragged = JSON.parse(raw);
-    if (dragged.type === 'title' && dragged.id === m.title) return;
-    if (dragged.type === 'title') {
-      await window.pywebview.api.create_series(m.title, dragged.id);
-    } else {
-      await window.pywebview.api.add_to_series(dragged.id, m.title);
-    }
-    seriesData = await window.pywebview.api.get_series();
-    renderMediaGrid();
-  });
 
   let innerHTML = '';
   if (hasImg) {
@@ -4967,29 +5101,6 @@ function makeSeriesCard(s, byTitle = new Map(), shown = s.members) {
 
   el.innerHTML = html;
   el.onclick = () => openSeriesDetail(s.id);
-
-  el.addEventListener('dragover', e => {
-    const raw = e.dataTransfer.types.includes('application/x-media-drag');
-    if (!raw) return;
-    e.preventDefault(); e.stopPropagation();
-    el.classList.add('series-target');
-  });
-  el.addEventListener('dragleave', e => {
-    if (!el.contains(e.relatedTarget)) el.classList.remove('series-target');
-  });
-  el.addEventListener('drop', async e => {
-    e.preventDefault(); e.stopPropagation();
-    el.classList.remove('series-target');
-    const raw = e.dataTransfer.getData('application/x-media-drag');
-    if (!raw) return;
-    const dragged = JSON.parse(raw);
-    if (dragged.type !== 'title') return;
-    if (s.members.some(m => m.title === dragged.id)) return;
-    await window.pywebview.api.add_to_series(s.id, dragged.id);
-    seriesData = await window.pywebview.api.get_series();
-    renderMediaGrid();
-  });
-
   return el;
 }
 
