@@ -167,7 +167,9 @@ def apply_payload(path, body):
             # Neither `days` nor the per-entry counters get a default, for the
             # same reason `youtube` refuses one: an omitted `time_seconds` must
             # arrive as None and be rejected, never be read as the zero that
-            # means "delete this day".
+            # means "delete this day". Each entry's optional `notes_added`
+            # rides inside `days` the same way: absent stays absent, which the
+            # import reads as "leave the stored count alone".
             #
             # `skip_days_with_vocabulary_time` is passed through as-is because
             # it is TRI-STATE, and `.get` returning None for an absent key is

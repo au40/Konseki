@@ -211,7 +211,7 @@ POST /import
   "source": "anki",
   "days": [
     {"session_date": "2026-08-12", "time_seconds": 1834.5, "cards": 210,
-     "client_id": "anki:2026-08-12"}
+     "notes_added": 14, "client_id": "anki:2026-08-12"}
   ],
   "skip_days_with_vocabulary_time": true
 }
@@ -222,9 +222,15 @@ POST /import
   second path to keep in step.
 - `time_seconds` and `cards` are both **required and both cumulative** — the
   day's running total, re-posted as it grows.
-- **Both zero deletes the day's row.** Same contract as `youtube`, for the same
-  reason: the client must be able to empty a day out. Neither field is
-  defaulted, so an omitted one is an error rather than a deletion.
+- `notes_added` (notes created that day) is cumulative too, but **optional, and
+  omitting it is not the same as sending 0**: an omitted count leaves the stored
+  one alone, which is what lets a client that predates the field keep posting
+  without wiping it. Send it on every day once you send it at all — zero
+  included, or a day whose notes were deleted can never fall.
+- **All three zero deletes the day's row** (an omitted `notes_added` counts as
+  whatever is stored). Same contract as `youtube`, for the same reason: the
+  client must be able to empty a day out. Neither required field is defaulted,
+  so an omitted one is an error rather than a deletion.
 - **Validation is all-or-nothing.** One bad entry rejects the whole batch and
   stores nothing, so your retry is a clean replay. Cap is 400 entries per
   request; chunk a bigger backfill.

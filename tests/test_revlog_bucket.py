@@ -174,3 +174,67 @@ class TestRecentDays:
 
     def test_degenerate_counts_do_not_explode(self):
         assert rl.recent_days("2026-05-14", 0) == ["2026-05-14"]
+
+
+class TestBucketNotes:
+    """Notes added, bucketed by the note id — which IS its creation time."""
+
+    def test_counts_notes_per_logical_day(self):
+        rows = [(_ms(2026, 5, 13, 10),), (_ms(2026, 5, 13, 22),), (_ms(2026, 5, 14, 9),)]
+        assert rl.bucket_notes(rows, 0) == {"2026-05-13": 2, "2026-05-14": 1}
+
+    def test_a_post_midnight_mine_lands_on_the_previous_day(self):
+        """Same calendar as the reviews, by the same function."""
+        rows = [(_ms(2026, 5, 14, 1, 30),)]
+        assert rl.bucket_notes(rows, 4) == {"2026-05-13": 1}
+        assert rl.bucket_notes(rows, 0) == {"2026-05-14": 1}
+
+    @pytest.mark.parametrize("bad", [0, None, -5])
+    def test_a_nonsense_id_is_skipped(self, bad):
+        assert rl.bucket_notes([(bad,)], 0) == {}
+
+    def test_empty_input(self):
+        assert rl.bucket_notes([], 0) == {}
+
+
+class TestBackfillRange:
+    def test_starts_at_the_first_review_and_drops_older_notes(self):
+        """A shared deck keeps its author's note ids; those must not drag
+        Konseki's earliest date back years."""
+        reviews = {"2026-05-10": (60.0, 4), "2026-05-12": (30.0, 2)}
+        notes   = {"2012-03-01": 900, "2026-05-10": 3, "2026-05-11": 5}
+        dates, kept = rl.backfill_range(reviews, notes)
+        assert dates == ["2026-05-10", "2026-05-11", "2026-05-12"]
+        assert kept == {"2026-05-10": 3, "2026-05-11": 5}
+
+    def test_extends_to_a_last_day_of_mining_without_reviews(self):
+        reviews = {"2026-05-10": (60.0, 4)}
+        dates, kept = rl.backfill_range(reviews, {"2026-05-12": 2})
+        assert dates == ["2026-05-10", "2026-05-11", "2026-05-12"]
+        assert kept == {"2026-05-12": 2}
+
+    def test_no_reviews_sends_nothing(self):
+        assert rl.backfill_range({}, {"2026-05-12": 2}) == ([], {})
+
+
+class TestDaysPayloadNotes:
+    def test_every_day_carries_a_count_zero_included(self):
+        """Zero must be sent, or a day whose notes were all deleted can't fall."""
+        days = rl.days_payload({"2026-05-13": (60.0, 4)},
+                               ["2026-05-13", "2026-05-14"],
+                               lambda d: f"anki:{d}",
+                               {"2026-05-13": 7})
+        assert [d["notes_added"] for d in days] == [7, 0]
+
+    def test_a_mining_only_day_is_sent_with_zero_time(self):
+        days = rl.days_payload({}, ["2026-05-14"], lambda d: None, {"2026-05-14": 3})
+        assert days[0]["time_seconds"] == 0.0 and days[0]["cards"] == 0
+        assert days[0]["notes_added"] == 3
+
+    def test_without_notes_the_field_is_absent_not_zero(self):
+        """Absent tells the server to leave the stored count alone."""
+        days = rl.days_payload({"2026-05-13": (60.0, 4)}, ["2026-05-13"], lambda d: None)
+        assert "notes_added" not in days[0]
+
+    def test_the_notes_sql_is_bounded_like_the_revlog_one(self):
+        assert "id >= ?" in rl.NOTES_SQL and "FROM notes" in rl.NOTES_SQL

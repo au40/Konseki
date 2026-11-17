@@ -17,7 +17,7 @@ APP_NAME     = "Konseki"
 DATA_DIR     = Path(os.environ.get("IMMERSION_TRACKER_DATA_DIR") or (Path.home() / "immersion-tracker"))
 DB_PATH      = DATA_DIR / "tracker.db"
 
-SAFE_METRICS  = {'time_seconds', 'chars_read', 'lines_read'}
+SAFE_METRICS  = {'time_seconds', 'chars_read', 'lines_read', 'notes_added'}
 BUILTIN_CATS  = ['Reading', 'Listening', 'Watching', 'Speaking', 'Vocabulary', 'Other']
 
 # ── Database setup ────────────────────────────────────────────────────────────
@@ -60,6 +60,10 @@ def init_db():
         # GSM's "cards mined from this game" and is inert; conflating the two
         # would make `_compute_title_core` report Anki reviews as mined cards.
         ("cards_done",     "INTEGER DEFAULT 0"),
+        # Anki notes added that logical day, from the same addon and on the same
+        # pooled row. Notes, not cards: one mined word is one note however many
+        # card templates its note type makes. Read only by goals.
+        ("notes_added",    "INTEGER DEFAULT 0"),
     ]:
         if col_name not in cols:
             con.execute(f"ALTER TABLE sessions ADD COLUMN {col_name} {col_def}")
@@ -1331,7 +1335,17 @@ def get_all_time_totals():
     chars, lines, secs, days = _q1(f"""
         SELECT COALESCE(SUM({_counted_chars()}),0), COALESCE(SUM(lines_read),0),
                COALESCE(SUM(CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END),0),
-               COUNT(DISTINCT CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN session_date END)
+               COUNT(DISTINCT CASE WHEN (time_excluded=0 OR time_excluded IS NULL)
+                                    -- A day you only mined on: an Anki row holding
+                                    -- notes added and nothing else. Not a day of
+                                    -- immersion, same as the streak and consistency
+                                    -- figures, which count days with time.
+                                    AND NOT (COALESCE(notes_added,0)>0
+                                             AND COALESCE(time_seconds,0)=0
+                                             AND COALESCE(chars_read,0)=0
+                                             AND COALESCE(lines_read,0)=0
+                                             AND COALESCE(cards_done,0)=0)
+                                   THEN session_date END)
         FROM sessions
     """)
     # GSM rollover attribution nets to zero over all-time (both endpoints are in
@@ -2723,6 +2737,11 @@ def _goal_metric_expr(metric):
         return _counted_chars()
     if metric == "time_seconds":
         return "CASE WHEN time_excluded=0 OR time_excluded IS NULL THEN time_seconds ELSE 0 END"
+    if metric == "notes_added":
+        # Every row, time_excluded included — the same basis as Anki's review
+        # count in get_daily_cards. A day the backfill suppressed had its TIME
+        # logged elsewhere by hand; the notes added that day were not.
+        return "COALESCE(notes_added,0)"
     return metric
 
 def db_get_goal_progress():

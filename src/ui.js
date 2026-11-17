@@ -3854,8 +3854,17 @@ function updateGoalUnit() {
   const isEdit = editingGoalId !== null;
   const suffix = isEdit ? '' : (chunk === 'daily' ? '/day' : chunk === 'weekly' ? '/week' : chunk === 'monthly' ? '/month' : '');
   const isTimeMetric = metric === 'time_seconds' || metric === 'time_chars';
+  const isNotes      = metric === 'notes_added';
   document.getElementById('goal-target-label').textContent =
-    isTimeMetric ? `Target (hours${suffix})` : `Target (characters${suffix})`;
+    isTimeMetric ? `Target (hours${suffix})`
+    : isNotes    ? `Target (notes${suffix})`
+    :              `Target (characters${suffix})`;
+  // Notes live only on the Anki row, which is always Vocabulary, so any other
+  // activity filter would pin the goal at zero forever. "All activities" is
+  // the one choice that can't go wrong; lock it in.
+  const act = document.getElementById('goal-activity');
+  if (isNotes) act.value = '';
+  act.disabled = isNotes;
 }
 
 async function populateGoalActivitySelect() {
@@ -3960,7 +3969,16 @@ function fmtGoalMetric(g, v) {
   if (!v && v !== 0) return '—';
   if (g.metric === 'time_seconds') return fmtTime(v);
   if (g.metric === 'chars_read')   return fmtChars(Math.round(v));
+  if (g.metric === 'notes_added')  return fmtNotes(v);
   return String(Math.round(v));
+}
+
+// Note counts are small, so a pace like 3.3/day would round to a misleading
+// "3" — one decimal under ten, whole numbers above (with separators).
+function fmtNotes(v) {
+  const n = Math.abs(v);
+  if (n < 10 && Math.round(v) !== v) return String(+v.toFixed(1));
+  return Math.round(v).toLocaleString();
 }
 
 function makeGoalCard(g) {
@@ -4089,7 +4107,9 @@ function makeGoalCard(g) {
   const banked = goalBankedChip(g);
   const bankedColor = banked ? { success: CT.success, warn: CT.warn, dim: 'var(--dim)' }[banked.tone] : '';
 
-  const actLabel = g.activity_type ? ` · ${g.activity_type}` : '';
+  // A notes goal's numbers are bare counts ("120 / 300"), so say what they count.
+  const actLabel = g.metric === 'notes_added' ? ' · Anki notes'
+                 : g.activity_type ? ` · ${g.activity_type}` : '';
   const raisedLabel = (g.raised_by || 0) > 0
     ? ` <span style="color:var(--muted)" title="Auto-raise added ${fmtMetric(g.raised_by)} for going past ${fmtGoalDays(g.raise_cap_days)} ahead">(raised from ${fmtMetric(g.base_target)})</span>`
     : '';
@@ -4314,7 +4334,10 @@ async function renderGoalBurnup(id) {
   }
 
   const isTime  = g.metric === 'time_seconds';
-  const fmtVal  = v => isTime ? fmtTime(v * 3600) : `${fmtChars(Math.round(v))} chars`;
+  const isNotes = g.metric === 'notes_added';
+  const fmtVal  = v => isTime  ? fmtTime(v * 3600)
+                     : isNotes ? `${fmtNotes(v)} notes`
+                     :           `${fmtChars(Math.round(v))} chars`;
   const late    = s.late;
 
   // Array order is draw order AND legend order (see the note in
@@ -4356,7 +4379,7 @@ async function renderGoalBurnup(id) {
         x: { grid: { color: CT.grid },
              ticks: { color: CT.dim, maxRotation: 0, autoSkip: true, maxTicksLimit: 12 } },
         y: { grid: { color: CT.grid }, beginAtZero: true,
-             ticks: { color: CT.dim, callback: v => isTime ? fmtHourTick(v) : fmtChars(v) },
+             ticks: { color: CT.dim, callback: v => isTime ? fmtHourTick(v) : isNotes ? fmtNotes(v) : fmtChars(v) },
              afterFit: sc => { sc.width = 62; } },
       },
     },

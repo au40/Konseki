@@ -51,10 +51,12 @@ def _install_aqt_stub():
         if on_done:
             on_done(fut)
     taskman.run_in_background = run_in_background
+    taskman.run_on_main = lambda fn: fn()
 
     mw = types.SimpleNamespace(
         addonManager=types.SimpleNamespace(getConfig=lambda _m: dict(CONFIG)),
-        col=types.SimpleNamespace(db=types.SimpleNamespace(all=lambda *a: list(REVLOG))),
+        col=types.SimpleNamespace(db=types.SimpleNamespace(
+            all=lambda sql, *a: list(NOTES if "FROM notes" in sql else REVLOG))),
         taskman=taskman,
         progress=types.SimpleNamespace(
             single_shot=lambda ms, fn, req=True: armed.append((ms, fn))),
@@ -80,13 +82,19 @@ def _install_aqt_stub():
     utils.tooltip = lambda *a, **k: None
 
     aqt.qt, aqt.utils = qt, utils
-    sys.modules.update({"aqt": aqt, "aqt.qt": qt, "aqt.utils": utils})
+
+    anki = types.ModuleType("anki")
+    anki.hooks = types.SimpleNamespace(note_will_be_added=[])
+
+    sys.modules.update({"aqt": aqt, "aqt.qt": qt, "aqt.utils": utils,
+                        "anki": anki, "anki.hooks": anki.hooks})
     return mw, armed
 
 
 CONFIG = {"host": "127.0.0.1", "port": 18463, "token": "t0ken",
           "collection_tag": "", "idle_push_mins": 5}
 REVLOG = []
+NOTES = []
 
 
 class FakeTracker:
@@ -108,7 +116,7 @@ class FakeTracker:
 @pytest.fixture
 def addon(tmp_path):
     """A freshly imported add-on module with aqt stubbed and state isolated."""
-    global REVLOG
+    global REVLOG, NOTES
     mw, armed = _install_aqt_stub()
     for mod in [m for m in sys.modules if m.startswith("konseki_anki")]:
         del sys.modules[mod]
@@ -122,6 +130,7 @@ def addon(tmp_path):
     # One review today, so there is always something to send.
     now = datetime.now()
     REVLOG = [(int((now - timedelta(minutes=5)).timestamp() * 1000), 30_000)]
+    NOTES = []
 
     k._armed = armed
     yield k
@@ -164,6 +173,65 @@ class TestDebounce:
             assert addon._armed[-1][0] == 2 * 60_000
         finally:
             CONFIG["idle_push_mins"] = 5
+
+
+class TestNoteTrigger:
+    """Adding a note (Yomitan via AnkiConnect, or the Add window) must reach
+    Konseki on its own — a day of mining with no reviews has no other trigger."""
+
+    def test_the_hook_is_registered(self, addon):
+        assert addon.on_note_added in sys.modules["anki"].hooks.note_will_be_added
+
+    def test_adding_a_note_arms_the_debounce_rather_than_pushing(self, addon):
+        tk = FakeTracker()
+        addon.tracker = lambda: tk
+        addon.on_note_added(object(), object(), 1)
+        assert addon._armed[-1][0] == 5 * 60_000
+        assert tk.posts == []
+
+    def test_the_hook_never_raises(self, addon, monkeypatch):
+        """An exception here propagates into Collection.add_note and the note
+        is never added — every Yomitan mine would fail."""
+        def boom(_fn):
+            raise RuntimeError("no main thread")
+        monkeypatch.setattr(addon.mw.taskman, "run_on_main", boom)
+        addon.on_note_added(object(), object(), 1)      # must not raise
+
+    def test_a_push_carries_the_days_notes(self, addon):
+        global NOTES
+        tk = FakeTracker()
+        addon.tracker = lambda: tk
+        NOTES = [(int(datetime.now().timestamp() * 1000),)] * 3
+        addon.mark_dirty()
+        _fire_last(addon)
+        today = tk.posts[0][-1]
+        assert today["notes_added"] == 3
+        assert all("notes_added" in d for d in tk.posts[0])
+
+    def test_a_new_note_alone_resends_its_day(self, addon):
+        global NOTES
+        tk = FakeTracker()
+        addon.tracker = lambda: tk
+        addon.mark_dirty()
+        _fire_last(addon)
+
+        NOTES = NOTES + [(int(datetime.now().timestamp() * 1000),)]
+        addon.on_note_added(object(), object(), 1)
+        _fire_last(addon)
+        assert len(tk.posts) == 2
+        assert [d["notes_added"] for d in tk.posts[1]] == [1]
+
+    def test_a_pre_upgrade_confirmed_map_resends_once(self, addon):
+        """Two-number entries from before notes never match, so the week is
+        re-sent once and its note counts fill in."""
+        import konseki_anki.revlog as rl
+        tk = FakeTracker()
+        addon.tracker = lambda: tk
+        today = rl.today_logical(0)
+        addon._state["posted"] = {today: [30.0, 1]}
+        addon.mark_dirty()
+        _fire_last(addon)
+        assert today in [d["session_date"] for d in tk.posts[0]]
 
 
 class TestSyncTrigger:

@@ -418,3 +418,131 @@ class TestCardsReadPaths:
         _push(d, 0, 5)
         assert [r for r in db.get_today_stats() if r[1] == "anki"]
         assert [r for r in db.get_recent_sessions(30) if r[2] == "anki"]
+
+
+# ── notes added ───────────────────────────────────────────────────────────────
+def _pushn(date, secs, cards, notes):
+    e = _day(date, secs, cards, f"anki:{date}")
+    e["notes_added"] = notes
+    return im.import_anki_days([e])
+
+
+def _notes(db, date):
+    con = sqlite3.connect(db.DB_PATH)
+    r = con.execute("SELECT notes_added FROM sessions WHERE source='anki' "
+                    "AND session_date=?", (date,)).fetchall()
+    con.close()
+    return [n for (n,) in r]
+
+
+class TestNotesAdded:
+    def test_stored_on_the_pooled_row(self, seed, db):
+        d = seed.day(1)
+        _pushn(d, 1800, 210, 12)
+        assert _notes(db, d) == [12]
+        assert len(_rows(db, d)) == 1
+
+    def test_rewritten_including_downward(self, seed, db):
+        """Deleting a mined note lowers its day — no monotonic guard."""
+        d = seed.day(1)
+        _pushn(d, 1800, 210, 12)
+        _pushn(d, 1800, 210, 9)
+        assert _notes(db, d) == [9]
+
+    def test_an_absent_count_leaves_the_stored_one_alone(self, seed, db):
+        """An addon that predates notes must not wipe them."""
+        d = seed.day(1)
+        _pushn(d, 1800, 210, 12)
+        _push(d, 2000, 240)                    # no notes_added key at all
+        assert _notes(db, d) == [12]
+        assert _one(db, d)[5] == 2000          # the rest still updated
+
+    def test_a_mining_only_day_keeps_its_row(self, seed, db):
+        """0 time / 0 cards used to mean delete. With notes it is a real day."""
+        d = seed.day(1)
+        out = _pushn(d, 0, 0, 5)
+        assert out["inserted"] == 1
+        assert _notes(db, d) == [5]
+
+    def test_an_older_addons_zero_does_not_delete_a_day_with_notes(self, seed, db):
+        d = seed.day(1)
+        _pushn(d, 600, 40, 5)
+        out = _push(d, 0, 0)                   # reviews undone, notes unknown
+        assert out["deleted"] == 0
+        assert _notes(db, d) == [5]
+        assert _one(db, d)[5] == 0
+
+    def test_all_three_zero_deletes(self, seed, db):
+        d = seed.day(1)
+        _pushn(d, 600, 40, 5)
+        out = _pushn(d, 0, 0, 0)
+        assert out["deleted"] == 1
+        assert _rows(db, d) == []
+
+    @pytest.mark.parametrize("bad", [-1, "x", "", 1.5j])
+    def test_a_bad_count_rejects_the_batch(self, seed, db, bad):
+        d = seed.day(1)
+        e = _day(d, 60, 1, f"anki:{d}")
+        e["notes_added"] = bad
+        assert "error" in im.import_anki_days([e])
+        assert _rows(db, d) == []
+
+    def test_rides_through_the_dispatch(self, seed, db):
+        d = seed.day(1)
+        e = _day(d, 0, 0, f"anki:{d}")
+        e["notes_added"] = 4
+        out, status = ext_server.apply_payload("/import", {"source": "anki", "days": [e]})
+        assert status == 200 and out["logged"] is True
+        assert _notes(db, d) == [4]
+
+    def test_a_mining_only_day_is_not_an_active_day(self, seed, db):
+        """Streak/consistency count days with time; the all-time day count
+        must agree, or mining alone would read as a day of immersion."""
+        seed.gsm(seed.day(2), 10_000, 3600)
+        _pushn(seed.day(1), 0, 0, 5)
+        assert db.get_all_time_totals()[3] == 1
+
+    def test_a_mining_only_day_stays_out_of_dashboard_and_history(self, seed, db):
+        _pushn(seed.day(0), 0, 0, 5)
+        assert not [r for r in db.get_today_stats() if r[1] == "anki"]
+        assert not [r for r in db.get_recent_sessions(30) if r[2] == "anki"]
+
+
+class TestNotesGoal:
+    def _goal(self, seed, db, target=300, activity=None):
+        db.db_add_goal("Mining", "notes_added", target, seed.day(-30),
+                       activity_type=activity, start_date=seed.day(10))
+        return db.db_get_goal_progress()[0]
+
+    def test_sums_notes_across_days(self, seed, db):
+        _pushn(seed.day(3), 1800, 200, 10)
+        _pushn(seed.day(1), 0, 0, 5)           # mining-only day counts too
+        assert self._goal(seed, db)["completed"] == 15
+
+    def test_today_counts_toward_the_day(self, seed, db):
+        _pushn(seed.day(0), 600, 40, 7)
+        assert self._goal(seed, db)["today_completed"] == 7
+
+    def test_a_suppressed_day_still_counts_its_notes(self, seed, db):
+        """time_excluded is about TIME logged elsewhere; the notes weren't."""
+        d = seed.day(3)
+        seed.session(d, secs=900, source="manual", title=None, atype="Vocabulary")
+        e = _day(d, 1800, 210, f"anki:{d}")
+        e["notes_added"] = 8
+        im.import_anki_days([e], skip_vocab_days=True)
+        assert _one(db, d)[8] == 1
+        assert self._goal(seed, db)["completed"] == 8
+
+    def test_ignores_everything_that_is_not_a_note(self, seed, db):
+        seed.gsm(seed.day(2), 10_000, 3600)
+        _pushn(seed.day(2), 1800, 210, 0)
+        assert self._goal(seed, db)["completed"] == 0
+
+    def test_the_burnup_line_matches_the_card(self, seed, db):
+        _pushn(seed.day(3), 1800, 200, 10)
+        _pushn(seed.day(1), 0, 0, 5)
+        g = self._goal(seed, db)
+        assert db.db_get_goal_burnup(g["id"])["actual"][-1] == g["completed"] == 15
+
+    def test_is_an_allowed_goal_metric(self, seed, db):
+        assert "notes_added" in db.SAFE_METRICS

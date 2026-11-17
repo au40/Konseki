@@ -300,6 +300,9 @@ check('overdue wins on a zero days_left', P.goalHasPeriodLine({ ...g500, days_le
 check('nor one with nothing left',      P.goalHasPeriodLine({ ...g500, remaining: 0 }), false);
 check('time goals format as time',  P.fmtGoalMetric(g500, 4128), '1h 8m');
 check('chars goals format as chars', P.fmtGoalMetric({ metric: 'chars_read' }, 5255), '5.3k');
+check('notes goals keep a decimal on a small pace', P.fmtGoalMetric({ metric: 'notes_added' }, 3.333), '3.3');
+check('notes goals show whole counts whole', P.fmtGoalMetric({ metric: 'notes_added' }, 7), '7');
+check('notes goals round big counts', P.fmtGoalMetric({ metric: 'notes_added' }, 1234.6), (1235).toLocaleString());
 
 const gChars  = { ...g500, label: '1M chars', metric: 'chars_read', remaining: 387600, today_completed: 27550 };
 const gListen = { ...g500, label: 'Listening', remaining: 55.5 * 3600, today_completed: 41 * 60 };

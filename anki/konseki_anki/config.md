@@ -1,7 +1,9 @@
 ## Konseki — Anki review time
 
-Sends your daily Anki review time and card count to Konseki, where it lands as a
-**Vocabulary** session — one pooled row per day.
+Sends your daily Anki review time, card count and **notes added** to Konseki,
+where it lands as a **Vocabulary** session — one pooled row per day. Notes added
+feed Konseki's "Anki notes added" goal; adding a note (the Add window, or
+Yomitan through AnkiConnect) sends the day the same way answering cards does.
 
 | Setting | What it does |
 |---|---|
@@ -9,7 +11,7 @@ Sends your daily Anki review time and card count to Konseki, where it lands as a
 | `port` | Konseki's ingest port. `18463` unless you changed it. |
 | `token` | From Konseki → Settings → Browser extension. The same token works against the desktop and the inbox. |
 | `collection_tag` | Leave empty. Only needed if you feed **two separate Anki collections** into one tracker — give each a different tag so their days don't overwrite each other. |
-| `idle_push_mins` | How long after you stop answering cards before the day is sent. There is no polling timer - a sync sends immediately, and each card answered pushes this deadline back, so one study session means one send. |
+| `idle_push_mins` | How long after you stop answering cards or adding notes before the day is sent. There is no polling timer - a sync sends immediately, and each card answered or note added pushes this deadline back, so one study session means one send. |
 
 ### Notes
 
@@ -22,3 +24,8 @@ Sends your daily Anki review time and card count to Konseki, where it lands as a
 - **Backfill is separate**: Tools → *Send Anki history to Konseki…*. It imports
   your whole review history in one pass, and by default skips counting the time
   on days where you'd already logged Vocabulary time by hand.
+- **Notes are counted by when they were created.** Deleting a note lowers the
+  day it was added on. A shared deck you import keeps its author's dates, so it
+  never counts as added this week; the backfill ignores any day before your
+  first review, but imported notes whose dates fall inside your own history
+  count on those days.

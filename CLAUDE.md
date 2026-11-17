@@ -777,10 +777,10 @@ instance of: **the key names the thing being accumulated.** There, one device's
 viewing on one day. Here, one collection's studying on one day. `collection_tag`
 (default empty) adds a segment only for the two-collections case.
 
-Both counters zero **deletes** the row, same as `import_youtube_day` and for the
-same reason — so neither `days` nor the per-entry counters get a `, 0` default
-anywhere in the chain. A day with no reviews is still *sent* as `0/0`, which is
-what deletes the row of a day the user emptied out.
+All three counters zero (time, reviews, notes added) **deletes** the row, same as
+`import_youtube_day` and for the same reason — so neither `days` nor the per-entry
+counters get a `, 0` default anywhere in the chain. A day with no reviews is still
+*sent* as `0/0/0`, which is what deletes the row of a day the user emptied out.
 
 ## `skip_days_with_vocabulary_time` — the backfill's don't-double-count rule
 
@@ -840,6 +840,46 @@ stored — the same invariant as chars/hour, for the same reason.
 tuple element (phantom rollover rows carry 0), and it joins their
 drop-if-all-zero liveness test so an all-cards row survives. GSM rows carry
 `cards_done=0`, so none of their behaviour changes.
+
+## `notes_added` — the "Anki notes added" goal
+
+`sessions.notes_added` is notes created that logical day, on the same pooled Anki
+row. **Notes, not cards** — one mined word is one note however many templates its
+note type makes. The add-on reads it from `notes.id`, which *is* the creation
+time in ms, bucketed by the same `logical_date` as the reviews (`bucket_notes` in
+[revlog.py](anki/konseki_anki/revlog.py)). Its only reader is goals
+(`_goal_metric_expr`), and like `cards_done` it counts **every** row,
+`time_excluded` included — a suppressed day's time was logged by hand, its notes
+weren't.
+
+Rules that hold it together:
+
+- **Absent is not zero.** `notes_added` is the one optional per-entry field in
+  `import_anki_days`: missing means "leave the stored count alone". An older
+  add-on, or a post still queued on the Pi inbox, carries no such field; reading
+  it as `0` would wipe the day, rejecting it would stall the drain. The add-on
+  always sends it, zero included, so a day whose notes were deleted can fall.
+- **The delete test reads the stored count when the field is absent**, so an
+  older add-on's `0/0` can't delete a day whose notes it never knew about.
+- **A mining-only day is a real row with zero time.** History and the dashboard
+  already drop it (their liveness test is chars/secs/lines/cards), the heatmaps
+  and streak count `secs > 0`, and `get_all_time_totals`' day count has an
+  explicit clause excluding notes-only rows. **If you add a figure that counts
+  ROWS or DISTINCT dates rather than summing time, exclude these too**, or
+  mining alone reads as a day of immersion.
+- **The backfill never starts before the first review day** (`backfill_range`).
+  A shared deck keeps its author's note ids, so a 2012 deck would otherwise put
+  notes-only rows in 2012 and drag `MIN(session_date)` — and every all-time
+  chart and consistency denominator — back years. Accepted gap: an imported
+  deck's notes whose borrowed dates fall *inside* the user's own history still
+  count on those days. The periodic push's seven-day window never sees them.
+- **The trigger is `anki.hooks.note_will_be_added`**, which `Collection.add_note(s)`
+  fires for the Add window and AnkiConnect (Yomitan) alike; the backend importer
+  doesn't fire it. The handler must never raise (it would abort the user's note
+  add) and hands off via `taskman.run_on_main` because the Add window adds from a
+  background op. Anki Beacon (installed separately, posting to GSM) was
+  considered as the source and rejected: it is fire-and-forget with no retry and
+  no history, so a note mined while Konseki is closed would be lost for good.
 
 ## The add-on pushes on events, never on a clock
 

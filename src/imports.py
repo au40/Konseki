@@ -1380,11 +1380,16 @@ def import_anki_days(days, skip_vocab_days=None):
     There is deliberately no monotonic guard: a correction — undoing reviews,
     deleting a deck — must be able to lower a day.
 
-    **Both counters zero deletes the row**, for the same reason it does for
-    YouTube: the addon has to be able to empty a day out, and the stored row must
-    follow it down. Deleting a row that isn't there is a SUCCESS, not an error —
-    a 200 carrying `error` makes the addon retry forever and stalls the Pi
-    drain's high-water mark.
+    **All three counters zero deletes the row** (time, cards answered, notes
+    added), for the same reason it does for YouTube: the addon has to be able
+    to empty a day out, and the stored row must follow it down. It used to be
+    "both" — that rule would delete a day you mined on but didn't review.
+    Deleting a row that isn't there is a SUCCESS, not an error — a 200 carrying
+    `error` makes the addon retry forever and stalls the Pi drain's high-water
+    mark.
+
+    `notes_added` is optional per entry, and absent means "leave the stored
+    count alone", never zero — see the parse below.
 
     `skip_vocab_days` is tri-state, and the third state is the point:
 
@@ -1453,13 +1458,29 @@ def import_anki_days(days, skip_vocab_days=None):
         if cards < 0:
             return {"error": f"days[{i}]: cards must not be negative"}
 
+        # OPTIONAL, unlike the two above, and absent is its own state: "leave
+        # the stored count alone". A post from an addon that predates notes —
+        # another machine not yet updated, or one still queued on the inbox —
+        # carries no field at all. Read as zero it would wipe that day's count;
+        # rejected, it would stall the drain on a post that was fine.
+        notes = entry.get("notes_added")
+        if notes is not None:
+            if isinstance(notes, str) and not notes.strip():
+                return {"error": f"days[{i}]: notes_added must be an integer"}
+            try:
+                notes = int(notes)
+            except (TypeError, ValueError):
+                return {"error": f"days[{i}]: notes_added must be an integer"}
+            if notes < 0:
+                return {"error": f"days[{i}]: notes_added must not be negative"}
+
         key = str(entry.get("client_id") or "").strip() or None
         if key is not None:
             if key in seen_key:
                 return {"error": f"days[{i}]: duplicate client_id {key}"}
             seen_key.add(key)
 
-        parsed.append((d, secs, cards, key))
+        parsed.append((d, secs, cards, notes, key))
 
     con = sqlite3.connect(DB_PATH)
     try:
@@ -1473,21 +1494,27 @@ def import_anki_days(days, skip_vocab_days=None):
         inserted = updated = deleted = 0
         skipped_days = []
 
-        for d, secs, cards, key in parsed:
+        for d, secs, cards, notes, key in parsed:
             if key:
                 # Looked up on the key alone: the partial unique index on
                 # client_id is global, so a narrower WHERE could only miss.
                 row = con.execute(
-                    "SELECT rowid FROM sessions WHERE client_id=?", (key,)
+                    "SELECT rowid, COALESCE(notes_added,0) FROM sessions "
+                    "WHERE client_id=?", (key,)
                 ).fetchone()
             else:
                 row = con.execute(
-                    "SELECT rowid FROM sessions WHERE source='anki' "
-                    "AND session_date=? AND client_id IS NULL",
+                    "SELECT rowid, COALESCE(notes_added,0) FROM sessions "
+                    "WHERE source='anki' AND session_date=? AND client_id IS NULL",
                     (d,),
                 ).fetchone()
 
-            if secs == 0 and cards == 0:
+            # Empty means ALL THREE counters are zero. A day you mined on but
+            # didn't review arrives as 0 time / 0 cards and must keep its row.
+            # An absent notes count is the stored one, so an older addon's 0/0
+            # can't delete a day whose notes it never knew about.
+            notes_after = notes if notes is not None else (row[1] if row else 0)
+            if secs == 0 and cards == 0 and notes_after == 0:
                 if row:
                     con.execute("DELETE FROM sessions WHERE rowid=?", (row[0],))
                     deleted += 1
@@ -1501,26 +1528,30 @@ def import_anki_days(days, skip_vocab_days=None):
                     skipped_days.append(d)
 
             if row:
-                if excl is None:
-                    con.execute(
-                        "UPDATE sessions SET time_seconds=?, cards_done=?, "
-                        "ingested_at=? WHERE rowid=?",
-                        (secs, cards, now, row[0]),
-                    )
-                else:
-                    con.execute(
-                        "UPDATE sessions SET time_seconds=?, cards_done=?, "
-                        "ingested_at=?, time_excluded=? WHERE rowid=?",
-                        (secs, cards, now, excl, row[0]),
-                    )
+                # Each of these two is written only when the payload has a
+                # value for it: an absent skip flag or notes count leaves the
+                # stored one alone.
+                sets = ["time_seconds=?", "cards_done=?", "ingested_at=?"]
+                vals = [secs, cards, now]
+                if excl is not None:
+                    sets.append("time_excluded=?")
+                    vals.append(excl)
+                if notes is not None:
+                    sets.append("notes_added=?")
+                    vals.append(notes)
+                con.execute(
+                    f"UPDATE sessions SET {', '.join(sets)} WHERE rowid=?",
+                    (*vals, row[0]),
+                )
                 updated += 1
             else:
                 con.execute(
                     "INSERT INTO sessions "
                     "(source, title, activity_type, session_date, chars_read, "
-                    " time_seconds, cards_done, ingested_at, time_excluded, client_id) "
-                    "VALUES ('anki','Anki','Vocabulary',?,0,?,?,?,?,?)",
-                    (d, secs, cards, now, excl or 0, key),
+                    " time_seconds, cards_done, notes_added, ingested_at, "
+                    " time_excluded, client_id) "
+                    "VALUES ('anki','Anki','Vocabulary',?,0,?,?,?,?,?,?)",
+                    (d, secs, cards, notes or 0, now, excl or 0, key),
                 )
                 inserted += 1
 

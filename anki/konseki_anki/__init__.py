@@ -28,6 +28,11 @@ What replaces it:
   * **Answering a card** re-arms a one-shot timer `idle_push_mins` out. Each
     card pushes the deadline back, so a study session produces ONE push, when
     you stop, rather than one every few minutes while you work.
+  * **Adding a note** does the same, so a mining session with no reviews still
+    reaches Konseki. It hangs off Anki's `note_will_be_added` hook, which
+    `Collection.add_note(s)` fires for every caller — the Add window and
+    AnkiConnect (Yomitan) alike — and which a shared-deck import, going
+    through the backend importer instead, does not.
   * **A finished sync** pushes immediately — a sync is a natural checkpoint and
     is the one event that can introduce reviews done elsewhere.
   * **Opening a profile** pushes shortly after load; **closing one** pushes
@@ -42,6 +47,7 @@ import json
 import os
 import time
 
+from anki import hooks as anki_hooks
 from aqt import gui_hooks, mw
 from aqt.qt import (QAction, QCheckBox, QDialog, QDialogButtonBox, QLabel,
                     QProgressBar, QVBoxLayout, qconnect)
@@ -118,14 +124,18 @@ def save_state():
 
 # ── reading the collection (main thread only) ─────────────────────────────────
 def read_days(dates):
-    """Bucket the revlog covering `dates` (contiguous, oldest first)."""
-    since = rl.logical_day_start_ms(dates[0], _state["rollover"])
-    rows  = mw.col.db.all(rl.REVLOG_SQL, since)
-    return rl.bucket_reviews(rows, _state["rollover"])
+    """`(reviews, notes)` buckets covering `dates` (contiguous, oldest first)."""
+    return _read(rl.logical_day_start_ms(dates[0], _state["rollover"]))
 
 
 def read_all():
-    return rl.bucket_reviews(mw.col.db.all(rl.REVLOG_SQL, 0), _state["rollover"])
+    return _read(0)
+
+
+def _read(since):
+    roll = _state["rollover"]
+    return (rl.bucket_reviews(mw.col.db.all(rl.REVLOG_SQL, since), roll),
+            rl.bucket_notes(mw.col.db.all(rl.NOTES_SQL, since), roll))
 
 
 # ── scheduling ────────────────────────────────────────────────────────────────
@@ -162,6 +172,28 @@ def mark_dirty(*args, **kwargs):
     arm(idle_delay_ms())
 
 
+def on_note_added(*args, **kwargs):
+    """A note is about to be added (`note_will_be_added`). Same debounce as an
+    answered card, so a mining session produces one push when it goes quiet.
+
+    The hook fires BEFORE the note is written, which is fine: the push is at
+    least a minute out, by which time it is in the table.
+
+    Two things here are load-bearing:
+
+    - **Nothing may escape.** An exception raised from this hook propagates
+      into `Collection.add_note` and the note is never added — every Yomitan
+      mine would fail, for the sake of a statistic.
+    - **It is handed to the main thread.** The Add window adds its note from a
+      background op, and `arm` starts a Qt timer, which only works from the
+      main thread. `run_on_main` is safe to call from either.
+    """
+    try:
+        mw.taskman.run_on_main(mark_dirty)
+    except Exception:
+        pass
+
+
 def on_sync_done(*args, **kwargs):
     """A sync is a checkpoint, and the one event that can introduce reviews
     done on another device. No debounce — push straight away."""
@@ -187,14 +219,18 @@ def push_now(force=False):
     tk    = tracker()
     today = rl.today_logical(_state["rollover"])
     dates = rl.recent_days(today, PUSH_WINDOW_DAYS)
-    days  = rl.days_payload(read_days(dates), dates, tk.client_id)
+    reviews, notes = read_days(dates)
+    days  = rl.days_payload(reviews, dates, tk.client_id, notes)
 
     # Only what actually moved. A day is re-sent whenever its numbers differ from
     # the last CONFIRMED post — including downward, which is how an undo lands.
     # In steady state this is empty and nothing goes over the wire, which is what
-    # makes a seven-day window as cheap as a two-day one.
+    # makes a seven-day window as cheap as a two-day one. A confirmed entry from
+    # before notes were counted has two numbers, not three, so it never matches:
+    # every day is re-sent once after the upgrade, which is what fills in the
+    # week's note counts.
     pending = [d for d in days
-               if _state["posted"].get(d["session_date"]) != [d["time_seconds"], d["cards"]]]
+               if _state["posted"].get(d["session_date"]) != _confirmed(d)]
     if not pending:
         return
 
@@ -217,11 +253,16 @@ def push_now(force=False):
             return
         _retry = 0
         for d in pending:
-            _state["posted"][d["session_date"]] = [d["time_seconds"], d["cards"]]
+            _state["posted"][d["session_date"]] = _confirmed(d)
         prune_posted()
         save_state()
 
     mw.taskman.run_in_background(work, done)
+
+
+def _confirmed(day):
+    """What the confirmed map remembers of a sent day — every number in it."""
+    return [day["time_seconds"], day["cards"], day.get("notes_added")]
 
 
 def prune_posted():
@@ -232,20 +273,25 @@ def prune_posted():
 
 # ── backfill ──────────────────────────────────────────────────────────────────
 class BackfillDialog(QDialog):
-    def __init__(self, parent, buckets):
+    def __init__(self, parent, buckets, note_buckets):
         super().__init__(parent)
         self.buckets = buckets
+        # Range and notes decided once, here, so what the dialog reports is
+        # exactly what `send` posts.
+        self.dates, self.notes = rl.backfill_range(buckets, note_buckets)
         self.setWindowTitle("Send Anki history to Konseki")
 
         dates = sorted(buckets)
         secs  = sum(s for s, _ in buckets.values())
         cards = sum(c for _, c in buckets.values())
+        added = sum(self.notes.values())
 
         lay = QVBoxLayout(self)
         lay.addWidget(QLabel(
             f"<b>{len(dates)}</b> days with reviews<br>"
             f"{dates[0] if dates else '—'} to {dates[-1] if dates else '—'}<br><br>"
             f"<b>{secs / 3600:,.0f}</b> hours &nbsp;·&nbsp; <b>{cards:,}</b> cards"
+            f" &nbsp;·&nbsp; <b>{added:,}</b> notes added"
         ))
 
         # Checked by default. The addon makes no judgement of its own here and
@@ -272,12 +318,10 @@ class BackfillDialog(QDialog):
         tk   = tracker()
         skip = self.skip.isChecked()
         # The dense range, not just the days with reviews. An empty day sends
-        # 0/0, which DELETES a row a previous run put there wrongly - the same
+        # 0/0/0, which DELETES a row a previous run put there wrongly - the same
         # rule the periodic push already follows. Sending only the days found
         # would leave such a row stranded at its old total forever.
-        found = sorted(self.buckets)
-        dates = rl.date_range(found[0], found[-1])
-        days = rl.days_payload(self.buckets, dates, tk.client_id)
+        days = rl.days_payload(self.buckets, self.dates, tk.client_id, self.notes)
         self.buttons.setEnabled(False)
         self.bar.setVisible(True)
         self.bar.setMaximum(len(days))
@@ -339,11 +383,11 @@ def open_backfill():
             "the wrong day, so nothing was sent. Check the host, port and token "
             "in this add-on's config, and that Konseki is running.")
         return
-    buckets = read_all()          # main thread: mw.col.db is not thread-safe
+    buckets, notes = read_all()   # main thread: mw.col.db is not thread-safe
     if not buckets:
         tooltip("No reviews found in this collection.")
         return
-    BackfillDialog(mw, buckets).exec()
+    BackfillDialog(mw, buckets, notes).exec()
 
 
 # ── lifecycle ─────────────────────────────────────────────────────────────────
@@ -415,3 +459,4 @@ gui_hooks.profile_did_open.append(on_profile_open)
 gui_hooks.profile_will_close.append(on_profile_close)
 gui_hooks.reviewer_did_answer_card.append(mark_dirty)
 gui_hooks.sync_did_finish.append(on_sync_done)
+anki_hooks.note_will_be_added.append(on_note_added)
